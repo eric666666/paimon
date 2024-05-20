@@ -24,49 +24,29 @@ import org.apache.paimon.types.DataField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nullable;
-
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
-/**
- * {@link EventParser} for {@link RichCdcMultiplexRecord}.
- */
-public class StpRichCdcMultiplexRecordEventParser implements EventParser<StpRichCdcMultiplexRecord> {
+/** {@link EventParser} for {@link StpCdcRecord}. */
+public class StpCdcRecordEventParser implements EventParser<StpCdcRecord> {
 
-    private static final Logger LOG =
-            LoggerFactory.getLogger(StpRichCdcMultiplexRecordEventParser.class);
+    private static final Logger LOG = LoggerFactory.getLogger(StpCdcRecordEventParser.class);
 
-    @Nullable
-    private final StpNewTableSchemaBuilder schemaBuilder;
     private final Map<String, RichEventParser> parsers = new HashMap<>();
-    private final Set<String> includedTables = new HashSet<>();
-    private final Set<String> excludedTables = new HashSet<>();
-    private final Set<String> createdTables = new HashSet<>();
-
-    private StpRichCdcMultiplexRecord record;
+    private StpCdcRecord record;
     private String currentTable;
     private boolean shouldSynchronizeCurrentTable;
     private RichEventParser currentParser;
 
-    //public StpRichCdcMultiplexRecordEventParser(boolean caseSensitive) {
-    //    this(null, null, null, new TableNameConverter(caseSensitive));
-    //}
-    //
-    public StpRichCdcMultiplexRecordEventParser(
-            @Nullable StpNewTableSchemaBuilder schemaBuilder) {
-        this.schemaBuilder = schemaBuilder;
-    }
+    public StpCdcRecordEventParser() {}
 
     @Override
-    public void setRawEvent(StpRichCdcMultiplexRecord record) {
+    public void setRawEvent(StpCdcRecord record) {
         this.record = record;
-        this.currentTable = record.tableName();
+        this.currentTable = record.databaseName() + "." + record.tableName();
         this.shouldSynchronizeCurrentTable = shouldSynchronizeCurrentTable();
         if (shouldSynchronizeCurrentTable) {
             this.currentParser = parsers.computeIfAbsent(currentTable, t -> new RichEventParser());
@@ -76,7 +56,13 @@ public class StpRichCdcMultiplexRecordEventParser implements EventParser<StpRich
 
     @Override
     public String parseTableName() {
-        return record.databaseName() + "." + record.tableName();
+        if (record.databaseName() == null || record.tableName() == null) {
+            throw new IllegalArgumentException(
+                    "Cannot synchronize record when database name or table name is unknown. "
+                            + "Invalid record is:\n"
+                            + record);
+        }
+        return currentTable;
     }
 
     @Override
@@ -95,30 +81,10 @@ public class StpRichCdcMultiplexRecordEventParser implements EventParser<StpRich
 
     @Override
     public Optional<Schema> parseNewTable() {
-        return schemaBuilder.build(record);
+        return Optional.empty();
     }
 
     private boolean shouldSynchronizeCurrentTable() {
-        // In case the record is incomplete, we let the null value pass validation
-        // and handle the null value when we really need it
-        if (currentTable == null) {
-            return true;
-        }
-
-        if (includedTables.contains(currentTable)) {
-            return true;
-        }
-        if (excludedTables.contains(currentTable)) {
-            return false;
-        }
-
-        includedTables.add(currentTable);
         return true;
     }
-
-    //private boolean shouldCreateCurrentTable() {
-    //    return shouldSynchronizeCurrentTable
-    //            && !record.fields().isEmpty()
-    //            && createdTables.add(parseTableName());
-    //}
 }

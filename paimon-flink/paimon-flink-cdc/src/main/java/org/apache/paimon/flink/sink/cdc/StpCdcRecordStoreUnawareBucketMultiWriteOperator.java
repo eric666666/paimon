@@ -31,8 +31,8 @@ import org.apache.paimon.flink.sink.StoreSinkWriteState;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 
 import org.apache.flink.runtime.state.StateInitializationContext;
@@ -56,7 +56,7 @@ import static org.apache.paimon.flink.sink.cdc.CdcRecordUtils.toGenericRow;
  * A {@link PrepareCommitOperator} to write {@link CdcRecord}. Record schema may change. If current
  * known schema does not fit record schema, this operator will wait for schema changes.
  */
-public class CdcRecordStoreMultiWriteOperator
+public class StpCdcRecordStoreUnawareBucketMultiWriteOperator
         extends PrepareCommitOperator<CdcMultiplexRecord, MultiTableCommittable> {
 
     private static final long serialVersionUID = 1L;
@@ -73,7 +73,7 @@ public class CdcRecordStoreMultiWriteOperator
     private String commitUser;
     private ExecutorService compactExecutor;
 
-    public CdcRecordStoreMultiWriteOperator(
+    public StpCdcRecordStoreUnawareBucketMultiWriteOperator(
             Catalog.Loader catalogLoader,
             StoreSinkWrite.WithWriteBufferProvider storeSinkWriteProvider,
             String initialCommitUser,
@@ -108,8 +108,10 @@ public class CdcRecordStoreMultiWriteOperator
     }
 
     @Override
-    public void processElement(StreamRecord<CdcMultiplexRecord> element) throws Exception {
-        CdcMultiplexRecord record = element.getValue();
+    public void processElement(StreamRecord<CdcMultiplexRecord> streamRecord) throws Exception {
+        CdcMultiplexRecord record = streamRecord.getValue();
+        // only accepts INSERT record
+        record.record().setRowKind(RowKind.INSERT);
 
         String databaseName = record.databaseName();
         String tableName = record.tableName();
