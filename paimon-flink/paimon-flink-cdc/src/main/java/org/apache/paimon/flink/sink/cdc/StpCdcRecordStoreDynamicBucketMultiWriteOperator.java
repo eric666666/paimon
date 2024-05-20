@@ -31,10 +31,10 @@ import org.apache.paimon.flink.sink.StoreSinkWriteState;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -56,8 +56,8 @@ import static org.apache.paimon.flink.sink.cdc.CdcRecordUtils.toGenericRow;
  * A {@link PrepareCommitOperator} to write {@link CdcRecord}. Record schema may change. If current
  * known schema does not fit record schema, this operator will wait for schema changes.
  */
-public class CdcRecordStoreMultiWriteOperator
-        extends PrepareCommitOperator<CdcMultiplexRecord, MultiTableCommittable> {
+public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
+        extends PrepareCommitOperator<Tuple2<CdcMultiplexRecord, Integer>, MultiTableCommittable> {
 
     private static final long serialVersionUID = 1L;
 
@@ -73,7 +73,7 @@ public class CdcRecordStoreMultiWriteOperator
     private String commitUser;
     private ExecutorService compactExecutor;
 
-    public CdcRecordStoreMultiWriteOperator(
+    public StpCdcRecordStoreDynamicBucketMultiWriteOperator(
             Catalog.Loader catalogLoader,
             StoreSinkWrite.WithWriteBufferProvider storeSinkWriteProvider,
             String initialCommitUser,
@@ -108,8 +108,10 @@ public class CdcRecordStoreMultiWriteOperator
     }
 
     @Override
-    public void processElement(StreamRecord<CdcMultiplexRecord> element) throws Exception {
-        CdcMultiplexRecord record = element.getValue();
+    public void processElement(StreamRecord<Tuple2<CdcMultiplexRecord, Integer>> streamRecord)
+            throws Exception {
+        Tuple2<CdcMultiplexRecord, Integer> value = streamRecord.getValue();
+        CdcMultiplexRecord record = value.f0;
 
         String databaseName = record.databaseName();
         String tableName = record.tableName();
@@ -166,7 +168,7 @@ public class CdcRecordStoreMultiWriteOperator
         }
 
         try {
-            write.write(optionalConverted.get());
+            write.write(optionalConverted.get(), value.f1);
         } catch (Exception e) {
             throw new IOException(e);
         }

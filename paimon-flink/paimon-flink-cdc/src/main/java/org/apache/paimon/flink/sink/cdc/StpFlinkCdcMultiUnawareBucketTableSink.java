@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.flink.VersionedSerializerWrapper;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
 import org.apache.paimon.flink.sink.CommitterOperator;
@@ -38,7 +39,6 @@ import org.apache.paimon.options.Options;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -46,6 +46,7 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.UUID;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
@@ -53,10 +54,10 @@ import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
 /**
  * A {@link FlinkSink} which accepts {@link CdcRecord} and waits for a schema change if necessary.
  */
-public class FlinkCdcMultiTableSink implements Serializable {
+public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private static final String WRITER_NAME = "CDC MultiplexWriter";
+    private static final String WRITER_NAME = "CDC Dynamic bucket MultiplexWriter";
     private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
 
     private final boolean isOverwrite = false;
@@ -64,19 +65,18 @@ public class FlinkCdcMultiTableSink implements Serializable {
     private final double commitCpuCores;
     @Nullable private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
-    private final String commitUser;
+    // private final Catalog catalog;
 
-    public FlinkCdcMultiTableSink(
+    public StpFlinkCdcMultiUnawareBucketTableSink(
             Catalog.Loader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
-            boolean commitChaining,
-            String commitUser) {
+            boolean commitChaining) {
         this.catalogLoader = catalogLoader;
+        // this.catalog = catalogLoader.load();
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
-        this.commitUser = commitUser;
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -88,7 +88,7 @@ public class FlinkCdcMultiTableSink implements Serializable {
                         state,
                         ioManager,
                         isOverwrite,
-                        table.coreOptions().prepareCommitWaitCompaction(),
+                        false,
                         true,
                         memoryPoolFactory,
                         metricGroup);
@@ -100,7 +100,8 @@ public class FlinkCdcMultiTableSink implements Serializable {
         // commit operators.
         // When the job restarts, commitUser will be recovered from states and this value is
         // ignored.
-        return sinkFrom(input, commitUser, createWriteProvider());
+        String initialCommitUser = UUID.randomUUID().toString();
+        return sinkFrom(input, initialCommitUser, createWriteProvider());
     }
 
     public DataStreamSink<?> sinkFrom(
@@ -108,15 +109,9 @@ public class FlinkCdcMultiTableSink implements Serializable {
             String commitUser,
             StoreSinkWrite.WithWriteBufferProvider sinkProvider) {
         StreamExecutionEnvironment env = input.getExecutionEnvironment();
-        CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-        boolean streamingCheckpointEnabled =
-                FlinkSink.isStreaming(input) && checkpointConfig.isCheckpointingEnabled();
-        if (streamingCheckpointEnabled) {
-            assertStreamingConfiguration(env);
-        }
-
+        assertStreamingConfiguration(env);
         MultiTableCommittableTypeInfo typeInfo = new MultiTableCommittableTypeInfo();
-        SingleOutputStreamOperator<MultiTableCommittable> written =
+        DataStream<MultiTableCommittable> written =
                 input.transform(
                                 WRITER_NAME,
                                 typeInfo,
@@ -147,9 +142,9 @@ public class FlinkCdcMultiTableSink implements Serializable {
         return committed.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
     }
 
-    protected OneInputStreamOperator<CdcMultiplexRecord, MultiTableCommittable> createWriteOperator(
+    protected OneInputStreamOperator createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
-        return new CdcRecordStoreMultiWriteOperator(
+        return new StpCdcRecordStoreUnawareBucketMultiWriteOperator(
                 catalogLoader, writeProvider, commitUser, new Options());
     }
 
@@ -160,11 +155,11 @@ public class FlinkCdcMultiTableSink implements Serializable {
         // commit new files list even if they're empty.
         // Otherwise we can't tell if the commit is successful after
         // a restart.
-        return context -> new StoreMultiCommitter(catalogLoader, context);
+        return (user, metricGroup) -> new StoreMultiCommitter(catalogLoader, user, metricGroup);
     }
 
     protected CommittableStateManager<WrappedManifestCommittable> createCommittableStateManager() {
         return new RestoreAndFailCommittableStateManager<>(
-                WrappedManifestCommittableSerializer::new);
+                () -> new VersionedSerializerWrapper<>(new WrappedManifestCommittableSerializer()));
     }
 }
