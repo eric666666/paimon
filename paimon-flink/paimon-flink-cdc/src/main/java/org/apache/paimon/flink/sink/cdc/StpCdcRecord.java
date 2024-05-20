@@ -18,39 +18,42 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
-import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataField;
 
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
 /**
- * Compared to {@link CdcMultiplexRecord}, this contains schema information.
+ * StpCdcRecord. Compared to {@link CdcMultiplexRecord}, this contains schema information. Compared
+ * to {@link RichCdcMultiplexRecord} remove primary key.
  */
-public class StpRichCdcMultiplexRecord implements Serializable {
+public class StpCdcRecord implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    private final String databaseName;
-    private final String tableName;
-    private final CdcRecord cdcRecord;
-    /**
-     * CDC record's schema.
-     */
-    private final Schema schema;
+    private String databaseName;
+    private String tableName;
+    /** to update data field. */
+    private List<DataField> fields;
 
-    public StpRichCdcMultiplexRecord(
-            @Nonnull String databaseName,
-            @Nonnull String tableName,
-            @Nonnull Schema schema,
-            @Nonnull CdcRecord cdcRecord) {
+    private CdcRecord cdcRecord;
+
+    public StpCdcRecord(
+            String databaseName, String tableName, List<DataField> fields, CdcRecord cdcRecord) {
         this.databaseName = databaseName;
         this.tableName = tableName;
-        this.schema = schema;
+        this.fields = fields;
+        this.cdcRecord = cdcRecord;
+    }
+
+    public StpCdcRecord(String databaseName, String tableName, CdcRecord cdcRecord) {
+        this.databaseName = databaseName;
+        this.tableName = tableName;
+        this.fields = Collections.emptyList();
         this.cdcRecord = cdcRecord;
     }
 
@@ -65,16 +68,32 @@ public class StpRichCdcMultiplexRecord implements Serializable {
     }
 
     public List<DataField> fields() {
-        return schema.fields();
+        return fields;
     }
 
     public RichCdcRecord toRichCdcRecord() {
-        return new RichCdcRecord(cdcRecord, schema.fields());
+        return new RichCdcRecord(cdcRecord, fields);
+    }
+
+    public void setDatabaseName(String databaseName) {
+        this.databaseName = databaseName;
+    }
+
+    public void setTableName(String tableName) {
+        this.tableName = tableName;
+    }
+
+    public void setFields(List<DataField> fields) {
+        this.fields = fields;
+    }
+
+    public void setCdcRecord(CdcRecord cdcRecord) {
+        this.cdcRecord = cdcRecord;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(databaseName, tableName, schema, cdcRecord);
+        return Objects.hash(databaseName, tableName, fields, cdcRecord);
     }
 
     @Override
@@ -85,10 +104,10 @@ public class StpRichCdcMultiplexRecord implements Serializable {
         if (o == null || getClass() != o.getClass()) {
             return false;
         }
-        StpRichCdcMultiplexRecord that = (StpRichCdcMultiplexRecord) o;
+        StpCdcRecord that = (StpCdcRecord) o;
         return Objects.equals(databaseName, that.databaseName)
                 && Objects.equals(tableName, that.tableName)
-                && Objects.equals(schema, that.schema)
+                && Objects.equals(fields, that.fields)
                 && Objects.equals(cdcRecord, that.cdcRecord);
     }
 
@@ -99,8 +118,8 @@ public class StpRichCdcMultiplexRecord implements Serializable {
                 + databaseName
                 + ", tableName="
                 + tableName
-                + ", schema="
-                + schema
+                + ", fields="
+                + fields
                 + ", cdcRecord="
                 + cdcRecord
                 + '}';

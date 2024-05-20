@@ -39,7 +39,6 @@ import org.apache.paimon.options.Options;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -55,10 +54,10 @@ import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
 /**
  * A {@link FlinkSink} which accepts {@link CdcRecord} and waits for a schema change if necessary.
  */
-public class FlinkCdcMultiTableSink implements Serializable {
+public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private static final String WRITER_NAME = "CDC MultiplexWriter";
+    private static final String WRITER_NAME = "CDC Dynamic bucket MultiplexWriter";
     private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
 
     private final boolean isOverwrite = false;
@@ -66,13 +65,15 @@ public class FlinkCdcMultiTableSink implements Serializable {
     private final double commitCpuCores;
     @Nullable private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
+    // private final Catalog catalog;
 
-    public FlinkCdcMultiTableSink(
+    public StpFlinkCdcMultiUnawareBucketTableSink(
             Catalog.Loader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
             boolean commitChaining) {
         this.catalogLoader = catalogLoader;
+        // this.catalog = catalogLoader.load();
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
@@ -108,15 +109,9 @@ public class FlinkCdcMultiTableSink implements Serializable {
             String commitUser,
             StoreSinkWrite.WithWriteBufferProvider sinkProvider) {
         StreamExecutionEnvironment env = input.getExecutionEnvironment();
-        CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-        boolean streamingCheckpointEnabled =
-                FlinkSink.isStreaming(input) && checkpointConfig.isCheckpointingEnabled();
-        if (streamingCheckpointEnabled) {
-            assertStreamingConfiguration(env);
-        }
-
+        assertStreamingConfiguration(env);
         MultiTableCommittableTypeInfo typeInfo = new MultiTableCommittableTypeInfo();
-        SingleOutputStreamOperator<MultiTableCommittable> written =
+        DataStream<MultiTableCommittable> written =
                 input.transform(
                                 WRITER_NAME,
                                 typeInfo,
@@ -147,9 +142,9 @@ public class FlinkCdcMultiTableSink implements Serializable {
         return committed.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
     }
 
-    protected OneInputStreamOperator<CdcMultiplexRecord, MultiTableCommittable> createWriteOperator(
+    protected OneInputStreamOperator createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
-        return new CdcRecordStoreMultiWriteOperator(
+        return new StpCdcRecordStoreUnawareBucketMultiWriteOperator(
                 catalogLoader, writeProvider, commitUser, new Options());
     }
 
