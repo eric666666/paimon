@@ -64,7 +64,6 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
     private final Catalog.Loader catalogLoader;
 
     private transient EventParser<T> parser;
-    private transient Catalog catalog;
 
     public CdcDynamicTableParsingProcessFunction(
             String database, Catalog.Loader catalogLoader, EventParser.Factory<T> parserFactory) {
@@ -77,7 +76,6 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
     @Override
     public void open(Configuration parameters) throws Exception {
         parser = parserFactory.create();
-        catalog = catalogLoader.load();
     }
 
     @Override
@@ -96,7 +94,7 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
                 .ifPresent(
                         schema -> {
                             Identifier identifier = new Identifier(database, tableName);
-                            try {
+                            try (Catalog catalog = catalogLoader.load()) {
                                 catalog.createTable(identifier, schema, true);
                             } catch (Exception e) {
                                 LOG.error(

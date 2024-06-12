@@ -30,7 +30,6 @@ import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,7 +45,6 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
     private static final Logger LOG =
             LoggerFactory.getLogger(UpdatedDataFieldsProcessFunctionBase.class);
 
-    protected Catalog catalog;
     protected final Catalog.Loader catalogLoader;
     private static final List<DataTypeRoot> STRING_TYPES =
             Arrays.asList(DataTypeRoot.CHAR, DataTypeRoot.VARCHAR);
@@ -67,68 +65,66 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
         this.catalogLoader = catalogLoader;
     }
 
-    @Override
-    public void open(Configuration parameters) {
-        this.catalog = catalogLoader.load();
-    }
-
     protected void applySchemaChange(
             SchemaManager schemaManager, SchemaChange schemaChange, Identifier identifier)
             throws Exception {
-        if (schemaChange instanceof SchemaChange.AddColumn) {
-            try {
-                catalog.alterTable(identifier, schemaChange, false);
-            } catch (Catalog.ColumnAlreadyExistException e) {
-                // This is normal. For example when a table is split into multiple database tables,
-                // all these tables will be added the same column. However, schemaManager can't
-                // handle duplicated column adds, so we just catch the exception and log it.
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug(
-                            "Failed to perform SchemaChange.AddColumn {}, "
-                                    + "possibly due to duplicated column name",
-                            schemaChange,
-                            e);
-                }
-            }
-        } else if (schemaChange instanceof SchemaChange.UpdateColumnType) {
-            SchemaChange.UpdateColumnType updateColumnType =
-                    (SchemaChange.UpdateColumnType) schemaChange;
-            TableSchema schema =
-                    schemaManager
-                            .latest()
-                            .orElseThrow(
-                                    () ->
-                                            new RuntimeException(
-                                                    "Table does not exist. This is unexpected."));
-            int idx = schema.fieldNames().indexOf(updateColumnType.fieldName());
-            Preconditions.checkState(
-                    idx >= 0,
-                    "Field name "
-                            + updateColumnType.fieldName()
-                            + " does not exist in table. This is unexpected.");
-            DataType oldType = schema.fields().get(idx).type();
-            DataType newType = updateColumnType.newDataType();
-            switch (canConvert(oldType, newType)) {
-                case CONVERT:
+        try (Catalog catalog = catalogLoader.load()) {
+            if (schemaChange instanceof SchemaChange.AddColumn) {
+                try {
                     catalog.alterTable(identifier, schemaChange, false);
-                    break;
-                case EXCEPTION:
-                    throw new UnsupportedOperationException(
-                            String.format(
-                                    "Cannot convert field %s from type %s to %s of Paimon table %s.",
-                                    updateColumnType.fieldName(),
-                                    oldType,
-                                    newType,
-                                    identifier.getFullName()));
+                } catch (Catalog.ColumnAlreadyExistException e) {
+                    // This is normal. For example when a table is split into multiple database
+                    // tables,
+                    // all these tables will be added the same column. However, schemaManager can't
+                    // handle duplicated column adds, so we just catch the exception and log it.
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug(
+                                "Failed to perform SchemaChange.AddColumn {}, "
+                                        + "possibly due to duplicated column name",
+                                schemaChange,
+                                e);
+                    }
+                }
+            } else if (schemaChange instanceof SchemaChange.UpdateColumnType) {
+                SchemaChange.UpdateColumnType updateColumnType =
+                        (SchemaChange.UpdateColumnType) schemaChange;
+                TableSchema schema =
+                        schemaManager
+                                .latest()
+                                .orElseThrow(
+                                        () ->
+                                                new RuntimeException(
+                                                        "Table does not exist. This is unexpected."));
+                int idx = schema.fieldNames().indexOf(updateColumnType.fieldName());
+                Preconditions.checkState(
+                        idx >= 0,
+                        "Field name "
+                                + updateColumnType.fieldName()
+                                + " does not exist in table. This is unexpected.");
+                DataType oldType = schema.fields().get(idx).type();
+                DataType newType = updateColumnType.newDataType();
+                switch (canConvert(oldType, newType)) {
+                    case CONVERT:
+                        catalog.alterTable(identifier, schemaChange, false);
+                        break;
+                    case EXCEPTION:
+                        throw new UnsupportedOperationException(
+                                String.format(
+                                        "Cannot convert field %s from type %s to %s of Paimon table %s.",
+                                        updateColumnType.fieldName(),
+                                        oldType,
+                                        newType,
+                                        identifier.getFullName()));
+                }
+            } else if (schemaChange instanceof SchemaChange.UpdateColumnComment) {
+                catalog.alterTable(identifier, schemaChange, false);
+            } else {
+                throw new UnsupportedOperationException(
+                        "Unsupported schema change class "
+                                + schemaChange.getClass().getName()
+                                + ", content "
+                                + schemaChange);
             }
-        } else if (schemaChange instanceof SchemaChange.UpdateColumnComment) {
-            catalog.alterTable(identifier, schemaChange, false);
-        } else {
-            throw new UnsupportedOperationException(
-                    "Unsupported schema change class "
-                            + schemaChange.getClass().getName()
-                            + ", content "
-                            + schemaChange);
         }
     }
 
@@ -220,12 +216,7 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
     }
 
     @Override
-    public void close() throws Exception {
-        if (catalog != null) {
-            catalog.close();
-            catalog = null;
-        }
-    }
+    public void close() throws Exception {}
 
     /**
      * Return type of {@link UpdatedDataFieldsProcessFunction#canConvert(DataType, DataType)}. This

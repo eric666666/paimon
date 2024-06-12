@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
@@ -66,7 +67,6 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
     private final Catalog.Loader catalogLoader;
 
     private MemoryPoolFactory memoryPoolFactory;
-    private Catalog catalog;
     private Map<Identifier, FileStoreTable> tables;
     private StoreSinkWriteState state;
     private Map<Identifier, StoreSinkWrite> writes;
@@ -88,8 +88,6 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
 
-        catalog = catalogLoader.load();
-
         // Each job can only have one user name and this name must be consistent across restarts.
         // We cannot use job id as commit user name here because user may change job id by creating
         // a savepoint, stop the job and then resume from savepoint.
@@ -104,7 +102,8 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         compactExecutor =
                 Executors.newSingleThreadScheduledExecutor(
                         new ExecutorThreadFactory(
-                                Thread.currentThread().getName() + "-CdcMultiWrite-Compaction"));
+                                Thread.currentThread().getName()
+                                        + "-StpCdcRecordStoreDynamicBucketMultiWrite-Compaction"));
     }
 
     @Override
@@ -128,8 +127,13 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
                                     ? memoryPool
                                     // currently, the options of all tables are the same in CDC
                                     : new HeapMemorySegmentPool(
-                                            table.coreOptions().writeBufferSize(),
-                                            table.coreOptions().pageSize()));
+                                            super.options
+                                                    .get(CoreOptions.WRITE_BUFFER_SIZE)
+                                                    .getBytes(),
+                                            (int)
+                                                    super.options
+                                                            .get(CoreOptions.PAGE_SIZE)
+                                                            .getBytes()));
         }
 
         StoreSinkWrite write =
@@ -174,13 +178,15 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         }
     }
 
-    private FileStoreTable getTable(Identifier tableId) throws Catalog.TableNotExistException {
-        FileStoreTable table = tables.get(tableId);
-        if (table == null) {
-            table = (FileStoreTable) catalog.getTable(tableId);
-            tables.put(tableId, table);
+    private FileStoreTable getTable(Identifier tableId) throws Exception {
+        try (Catalog catalog = catalogLoader.load()) {
+            FileStoreTable table = tables.get(tableId);
+            if (table == null) {
+                table = (FileStoreTable) catalog.getTable(tableId);
+                tables.put(tableId, table);
+            }
+            return table;
         }
-        return table;
     }
 
     @Override

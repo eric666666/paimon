@@ -65,7 +65,6 @@ public class CdcRecordStoreMultiWriteOperator
     private final Catalog.Loader catalogLoader;
 
     private MemoryPoolFactory memoryPoolFactory;
-    private Catalog catalog;
     private Map<Identifier, FileStoreTable> tables;
     private StoreSinkWriteState state;
     private Map<Identifier, StoreSinkWrite> writes;
@@ -86,8 +85,6 @@ public class CdcRecordStoreMultiWriteOperator
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
-
-        catalog = catalogLoader.load();
 
         // Each job can only have one user name and this name must be consistent across restarts.
         // We cannot use job id as commit user name here because user may change job id by creating
@@ -171,13 +168,15 @@ public class CdcRecordStoreMultiWriteOperator
         }
     }
 
-    private FileStoreTable getTable(Identifier tableId) throws Catalog.TableNotExistException {
-        FileStoreTable table = tables.get(tableId);
-        if (table == null) {
-            table = (FileStoreTable) catalog.getTable(tableId);
-            tables.put(tableId, table);
+    private FileStoreTable getTable(Identifier tableId) throws Exception {
+        try (Catalog catalog = catalogLoader.load()) {
+            FileStoreTable table = tables.get(tableId);
+            if (table == null) {
+                table = (FileStoreTable) catalog.getTable(tableId);
+                tables.put(tableId, table);
+            }
+            return table;
         }
-        return table;
     }
 
     @Override

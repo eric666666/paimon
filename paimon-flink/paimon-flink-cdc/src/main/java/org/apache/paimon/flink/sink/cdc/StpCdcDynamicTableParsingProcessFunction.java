@@ -34,7 +34,10 @@ import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * A {@link ProcessFunction} to parse CDC change event to either a list of {@link DataField}s or
@@ -75,21 +78,26 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
 
     private final EventParser.Factory<T> parserFactory;
     private final Catalog.Loader catalogLoader;
+    private final Set<BucketMode> excludeBucketModes;
 
     private transient EventParser<T> parser;
-    private transient Catalog catalog;
+    private transient Map<Identifier, FileStoreTable> tableMap;
 
     public StpCdcDynamicTableParsingProcessFunction(
-            Catalog.Loader catalogLoader, EventParser.Factory<T> parserFactory) {
+            Catalog.Loader catalogLoader,
+            EventParser.Factory<T> parserFactory,
+            Set<BucketMode> excludeBucketModes) {
         // for now, only support single database
         this.catalogLoader = catalogLoader;
         this.parserFactory = parserFactory;
+        this.excludeBucketModes = excludeBucketModes;
     }
 
     @Override
     public void open(Configuration parameters) throws Exception {
-        parser = parserFactory.create();
-        catalog = catalogLoader.load();
+        this.parser = parserFactory.create();
+        // this.catalog = catalogLoader.load();
+        this.tableMap = new HashMap<>();
     }
 
     @Override
@@ -97,8 +105,9 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
         parser.setRawEvent(raw);
         String tableName = parser.parseTableName();
         Identifier identifier = Identifier.fromString(tableName);
-        if (!catalog.tableExists(identifier)) {
-            throw new IllegalArgumentException("Paimon table not exists:" + identifier);
+        if (!tableMap.containsKey(identifier) && getTableBucketMode(identifier) == null) {
+            throw new IllegalArgumentException(
+                    "Paimon table not exists:" + identifier.getEscapedFullName());
         }
 
         List<DataField> schemaChange = parser.parseSchemaChange();
@@ -106,7 +115,14 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
             context.output(DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG, Tuple2.of(identifier, schemaChange));
         }
 
-        BucketMode bucketMode = ((FileStoreTable) catalog.getTable(identifier)).bucketMode();
+        BucketMode bucketMode = getTableBucketMode(identifier);
+        if (excludeBucketModes.contains(bucketMode)) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "Unaccepted bucket mode %s of table %s, exclude bucket modes: %s",
+                            bucketMode, identifier.getFullName(), excludeBucketModes));
+        }
+
         OutputTag<CdcMultiplexRecord> outputTag;
         switch (bucketMode) {
             case DYNAMIC:
@@ -131,6 +147,19 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
                                                 identifier.getDatabaseName(),
                                                 identifier.getObjectName(),
                                                 record)));
+    }
+
+    private BucketMode getTableBucketMode(Identifier identifier) throws Exception {
+        FileStoreTable table;
+        if (!tableMap.containsKey(identifier)) {
+            try (Catalog catalog = catalogLoader.load()) {
+                table = (FileStoreTable) catalog.getTable(identifier);
+                tableMap.put(identifier, table);
+            }
+        } else {
+            table = tableMap.get(identifier);
+        }
+        return table.bucketMode();
     }
 
     private CdcMultiplexRecord wrapRecord(String databaseName, String tableName, CdcRecord record) {
