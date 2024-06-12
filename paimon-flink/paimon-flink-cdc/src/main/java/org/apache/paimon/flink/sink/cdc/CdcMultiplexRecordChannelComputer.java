@@ -72,11 +72,8 @@ public class CdcMultiplexRecordChannelComputer implements ChannelComputer<CdcMul
                     FileStoreTable table;
                     try (Catalog catalog = catalogLoader.load()) {
                         table = (FileStoreTable) catalog.getTable(id);
-                    } catch (Catalog.TableNotExistException e) {
-                        LOG.error("Failed to get table {}", id.getFullName(), e);
-                        return null;
                     } catch (Exception e) {
-                        throw new RuntimeException(e);
+                        throw new RuntimeException("Failed to get table " + id.getFullName(), e);
                     }
 
                     if (table.bucketMode() != BucketMode.HASH_FIXED) {

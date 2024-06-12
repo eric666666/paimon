@@ -61,7 +61,6 @@ public class MultiTablesReadOperator extends AbstractStreamOperator<RowData>
         this.isStreaming = isStreaming;
     }
 
-    private transient Catalog catalog;
     private transient IOManager ioManager;
     private transient Map<Identifier, BucketsTable> tablesMap;
     private transient Map<Identifier, TableRead> readsMap;
@@ -79,7 +78,6 @@ public class MultiTablesReadOperator extends AbstractStreamOperator<RowData>
                                 .getSpillingDirectoriesPaths());
         tablesMap = new HashMap<>();
         readsMap = new HashMap<>();
-        catalog = catalogLoader.load();
 
         this.reuseRow = new FlinkRowData(null);
         this.reuseRecord = new StreamRecord<>(reuseRow);
@@ -102,20 +100,23 @@ public class MultiTablesReadOperator extends AbstractStreamOperator<RowData>
         BucketsTable table = tablesMap.get(tableId);
         if (table == null) {
             try {
-                Table newTable = catalog.getTable(tableId);
-                Preconditions.checkArgument(
-                        newTable instanceof FileStoreTable,
-                        "Only FileStoreTable supports compact action. The table type is '%s'.",
-                        newTable.getClass().getName());
-                table =
-                        new BucketsTable(
-                                        (FileStoreTable) newTable,
-                                        isStreaming,
-                                        tableId.getDatabaseName())
-                                .copy(compactOptions(isStreaming));
-                tablesMap.put(tableId, table);
-                readsMap.put(tableId, table.newReadBuilder().newRead().withIOManager(ioManager));
-            } catch (Catalog.TableNotExistException e) {
+                try (Catalog catalog = catalogLoader.load()) {
+                    Table newTable = catalog.getTable(tableId);
+                    Preconditions.checkArgument(
+                            newTable instanceof FileStoreTable,
+                            "Only FileStoreTable supports compact action. The table type is '%s'.",
+                            newTable.getClass().getName());
+                    table =
+                            new BucketsTable(
+                                            (FileStoreTable) newTable,
+                                            isStreaming,
+                                            tableId.getDatabaseName())
+                                    .copy(compactOptions(isStreaming));
+                    tablesMap.put(tableId, table);
+                    readsMap.put(
+                            tableId, table.newReadBuilder().newRead().withIOManager(ioManager));
+                }
+            } catch (Exception e) {
                 LOG.error(String.format("table: %s not found.", tableId.getFullName()));
             }
         }

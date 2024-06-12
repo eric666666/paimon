@@ -61,6 +61,7 @@ import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
@@ -82,17 +83,20 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private final double commitCpuCores;
     @Nullable private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
+    private final Options tableOption;
 
     public StpFlinkCdcMultiDynamicBucketTableSink(
             Catalog.Loader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
-            boolean commitChaining) {
+            boolean commitChaining,
+            Options tableOption) {
         this.catalogLoader = catalogLoader;
         // this.catalog = catalogLoader.load();
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
+        this.tableOption = tableOption;
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -219,7 +223,10 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             createWriteOperator(
                     StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
         return new StpCdcRecordStoreDynamicBucketMultiWriteOperator(
-                catalogLoader, writeProvider, commitUser, new Options());
+                catalogLoader,
+                writeProvider,
+                commitUser,
+                Optional.ofNullable(this.tableOption).orElse(new Options()));
     }
 
     // Table committers are dynamically created at runtime
@@ -238,7 +245,6 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     }
 
     private class AssignerChannelComputer implements ChannelComputer<CdcMultiplexRecord> {
-        private transient Catalog catalog;
         private final Catalog.Loader loader;
         private Integer numAssigners;
 
@@ -248,7 +254,6 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         public AssignerChannelComputer(Integer numAssigners, Catalog.Loader loader) {
             this.numAssigners = numAssigners;
             this.loader = loader;
-            this.catalog = loader.load();
         }
 
         @Override
@@ -264,11 +269,10 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             if (!extractors.containsKey(identifier)) {
                 Table table;
                 try {
-                    if (catalog == null) {
-                        catalog = loader.load();
+                    try (Catalog catalog = loader.load()) {
+                        table = catalog.getTable(identifier);
                     }
-                    table = catalog.getTable(identifier);
-                } catch (Catalog.TableNotExistException e) {
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
                 KeyAndBucketExtractor<CdcMultiplexRecord> extractor =
@@ -291,13 +295,12 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
 
     private class RecordWithBucketChannelComputer
             implements ChannelComputer<Tuple2<CdcMultiplexRecord, Integer>> {
-
-        private transient Catalog catalog;
         private transient int numChannels;
+        private transient Catalog.Loader catalogLoader;
         private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
 
         public RecordWithBucketChannelComputer(Catalog.Loader catalogLoader) {
-            this.catalog = catalogLoader.load();
+            this.catalogLoader = catalogLoader;
         }
 
         @Override
@@ -312,13 +315,10 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             Identifier identifier =
                     Identifier.create(cdcRecord.databaseName(), cdcRecord.tableName());
             if (!extractors.containsKey(identifier)) {
-                Table table = null;
-                try {
-                    if (this.catalog == null) {
-                        this.catalog = catalogLoader.load();
-                    }
-                    table = this.catalog.getTable(identifier);
-                } catch (Catalog.TableNotExistException e) {
+                Table table;
+                try (Catalog catalog = catalogLoader.load()) {
+                    table = catalog.getTable(identifier);
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
                 KeyAndBucketExtractor<CdcMultiplexRecord> extractor =
