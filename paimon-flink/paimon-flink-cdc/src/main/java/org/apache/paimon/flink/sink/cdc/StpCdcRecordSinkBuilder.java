@@ -24,6 +24,7 @@ import org.apache.paimon.flink.sink.FlinkWriteSink;
 import org.apache.paimon.flink.utils.SingleOutputStreamOperatorUtils;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.utils.Preconditions;
 
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -32,6 +33,8 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Collections;
+import java.util.Set;
 
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
 
@@ -64,6 +67,18 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
     //     Paimon tables. 2) in multiplex sink where it is used to
     //     initialize different writers to multiple tables.
     private Catalog.Loader catalogLoader;
+    private Set<BucketMode> excludeBucketModes = Collections.emptySet();
+    private Options tableOption;
+
+    public StpCdcRecordSinkBuilder<T> withExcludeBucketModes(Set<BucketMode> excludeBucketModes) {
+        this.excludeBucketModes = excludeBucketModes;
+        return this;
+    }
+
+    public StpCdcRecordSinkBuilder<T> withOptions(Options tableOptions) {
+        this.tableOption = tableOptions;
+        return this;
+    }
 
     public StpCdcRecordSinkBuilder<T> withInput(DataStream<T> input) {
         this.input = input;
@@ -89,6 +104,7 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
     }
 
     public void build() {
+        Preconditions.checkState(excludeBucketModes.size() < BucketMode.values().length);
         Preconditions.checkNotNull(input);
         Preconditions.checkNotNull(parserFactory);
         Preconditions.checkNotNull(catalogLoader);
@@ -101,7 +117,7 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
                 input.forward()
                         .process(
                                 new StpCdcDynamicTableParsingProcessFunction<>(
-                                        catalogLoader, parserFactory))
+                                        catalogLoader, parserFactory, excludeBucketModes))
                         .name("Side Output")
                         .setParallelism(input.getParallelism());
         DataStream<CdcMultiplexRecord> fixedBucketDS =
@@ -130,15 +146,29 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
                         new CdcMultiplexRecordChannelComputer(catalogLoader),
                         parallelism);
 
-        new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining)
-                .sinkFrom(partitioned);
+        if (!excludeBucketModes.contains(BucketMode.FIXED)) {
+            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining)
+                    .sinkFrom(partitioned);
+        }
 
-        new StpFlinkCdcMultiDynamicBucketTableSink(
-                        catalogLoader, committerCpu, committerMemory, commitChaining)
-                .sinkFrom(dynamicBucketDS);
+        if (!excludeBucketModes.contains(BucketMode.DYNAMIC)) {
+            new StpFlinkCdcMultiDynamicBucketTableSink(
+                            catalogLoader,
+                            committerCpu,
+                            committerMemory,
+                            commitChaining,
+                            tableOption)
+                    .sinkFrom(dynamicBucketDS);
+        }
 
-        new StpFlinkCdcMultiUnawareBucketTableSink(
-                        catalogLoader, committerCpu, committerMemory, commitChaining)
-                .sinkFrom(unawareBucketDS);
+        if (!excludeBucketModes.contains(BucketMode.UNAWARE)) {
+            new StpFlinkCdcMultiUnawareBucketTableSink(
+                            catalogLoader,
+                            committerCpu,
+                            committerMemory,
+                            commitChaining,
+                            tableOption)
+                    .sinkFrom(unawareBucketDS);
+        }
     }
 }

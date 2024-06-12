@@ -62,7 +62,6 @@ public class StpMultiTableHashBucketAssignerOperator
     private int numberTasks;
     private int taskId;
     private String commitUser;
-    private transient Catalog catalog;
 
     public StpMultiTableHashBucketAssignerOperator(
             String commitUser,
@@ -98,26 +97,26 @@ public class StpMultiTableHashBucketAssignerOperator
         CdcMultiplexRecord value = streamRecord.getValue();
         Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
         if (!this.assignerHolder.containsKey(identifier)) {
-            if (this.catalog == null) {
-                this.catalog = this.catalogLoader.load();
+            try (Catalog catalog = catalogLoader.load()) {
+                FileStoreTable table = ((FileStoreTable) catalog.getTable(identifier));
+                long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
+                BucketAssigner assigner =
+                        overwrite
+                                ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
+                                : new HashBucketAssigner(
+                                        table.snapshotManager(),
+                                        commitUser,
+                                        table.store().newIndexFileHandler(),
+                                        numberTasks,
+                                        MathUtils.min(numAssigners, numberTasks),
+                                        taskId,
+                                        targetRowNum);
+                PartitionKeyExtractor<CdcMultiplexRecord> extractor =
+                        extractorFunction.apply(table.schema());
+
+                this.assignerHolder.put(identifier, assigner);
+                this.extractors.put(identifier, extractor);
             }
-            FileStoreTable table = ((FileStoreTable) catalog.getTable(identifier));
-            long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
-            BucketAssigner assigner =
-                    overwrite
-                            ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
-                            : new HashBucketAssigner(
-                                    table.snapshotManager(),
-                                    commitUser,
-                                    table.store().newIndexFileHandler(),
-                                    numberTasks,
-                                    MathUtils.min(numAssigners, numberTasks),
-                                    taskId,
-                                    targetRowNum);
-            PartitionKeyExtractor<CdcMultiplexRecord> extractor =
-                    extractorFunction.apply(table.schema());
-            this.assignerHolder.put(identifier, assigner);
-            this.extractors.put(identifier, extractor);
         }
         BucketAssigner assigner = this.assignerHolder.get(identifier);
         PartitionKeyExtractor<CdcMultiplexRecord> extractor = this.extractors.get(identifier);

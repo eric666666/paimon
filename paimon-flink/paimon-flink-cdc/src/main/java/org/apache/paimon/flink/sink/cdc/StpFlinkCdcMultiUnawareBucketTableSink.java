@@ -46,6 +46,7 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
@@ -57,7 +58,7 @@ import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
 public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private static final String WRITER_NAME = "CDC Dynamic bucket MultiplexWriter";
+    private static final String WRITER_NAME = "CDC unaware bucket MultiplexWriter";
     private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
 
     private final boolean isOverwrite = false;
@@ -65,18 +66,19 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
     private final double commitCpuCores;
     @Nullable private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
-    // private final Catalog catalog;
+    private final Options tableOptions;
 
     public StpFlinkCdcMultiUnawareBucketTableSink(
             Catalog.Loader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
-            boolean commitChaining) {
+            boolean commitChaining,
+            Options tableOptions) {
         this.catalogLoader = catalogLoader;
-        // this.catalog = catalogLoader.load();
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
+        this.tableOptions = tableOptions;
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -145,7 +147,10 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
     protected OneInputStreamOperator createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
         return new StpCdcRecordStoreUnawareBucketMultiWriteOperator(
-                catalogLoader, writeProvider, commitUser, new Options());
+                catalogLoader,
+                writeProvider,
+                commitUser,
+                Optional.ofNullable(this.tableOptions).orElse(new Options()));
     }
 
     // Table committers are dynamically created at runtime

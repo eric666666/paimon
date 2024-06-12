@@ -34,7 +34,6 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * A {@link ProcessFunction} to handle schema changes. New schema is represented by a list of {@link
@@ -67,21 +66,17 @@ public class MultiTableUpdatedDataFieldsProcessFunction
                         tableId,
                         id -> {
                             FileStoreTable table;
-                            try {
+                            try (Catalog catalog = super.catalogLoader.load()) {
                                 table = (FileStoreTable) catalog.getTable(tableId);
-                            } catch (Catalog.TableNotExistException e) {
-                                return null;
+                            } catch (Exception e) {
+                                throw new RuntimeException("Failed to get table " + tableId, e);
                             }
                             return new SchemaManager(table.fileIO(), table.location());
                         });
 
-        if (Objects.isNull(schemaManager)) {
-            LOG.error("Failed to get schema manager for table " + tableId);
-        } else {
-            for (SchemaChange schemaChange :
-                    extractSchemaChanges(schemaManager, updatedDataFields.f1)) {
-                applySchemaChange(schemaManager, schemaChange, tableId);
-            }
+        for (SchemaChange schemaChange :
+                extractSchemaChanges(schemaManager, updatedDataFields.f1)) {
+            applySchemaChange(schemaManager, schemaChange, tableId);
         }
     }
 }
