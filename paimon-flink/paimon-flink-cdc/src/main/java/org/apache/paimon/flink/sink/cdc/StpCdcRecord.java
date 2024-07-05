@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
+import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
 
 import javax.annotation.Nullable;
@@ -39,8 +40,8 @@ public class StpCdcRecord implements Serializable {
     private String tableName;
     /** to update data field. */
     private List<DataField> fields;
-
     private CdcRecord cdcRecord;
+    private Table table;
 
     public StpCdcRecord(
             String databaseName, String tableName, List<DataField> fields, CdcRecord cdcRecord) {
@@ -71,6 +72,10 @@ public class StpCdcRecord implements Serializable {
         return fields;
     }
 
+    public Table getTable() {
+        return table;
+    }
+
     public RichCdcRecord toRichCdcRecord() {
         return new RichCdcRecord(cdcRecord, fields);
     }
@@ -89,6 +94,10 @@ public class StpCdcRecord implements Serializable {
 
     public void setCdcRecord(CdcRecord cdcRecord) {
         this.cdcRecord = cdcRecord;
+    }
+
+    public void setTable(Table table) {
+        this.table = table;
     }
 
     @Override

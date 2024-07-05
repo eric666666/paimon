@@ -49,12 +49,11 @@ import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
  * tables added during runtime. Note that the topology of the Flink job is likely to change when
  * there is newly added table and the job resume from a given savepoint.
  *
- * @param <T> CDC change event type
  */
-public class StpCdcRecordSinkBuilder<T> implements Serializable {
+public class StpCdcRecordSinkBuilder implements Serializable {
 
-    private DataStream<T> input = null;
-    private EventParser.Factory<T> parserFactory;
+    private DataStream<StpCdcRecord> input = null;
+    private EventParser.Factory<StpCdcRecord> parserFactory;
 
     @Nullable private Integer parallelism;
     private double committerCpu;
@@ -70,27 +69,27 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
     private Set<BucketMode> excludeBucketModes = Collections.emptySet();
     private Options tableOption;
 
-    public StpCdcRecordSinkBuilder<T> withExcludeBucketModes(Set<BucketMode> excludeBucketModes) {
+    public StpCdcRecordSinkBuilder withExcludeBucketModes(Set<BucketMode> excludeBucketModes) {
         this.excludeBucketModes = excludeBucketModes;
         return this;
     }
 
-    public StpCdcRecordSinkBuilder<T> withOptions(Options tableOptions) {
+    public StpCdcRecordSinkBuilder withOptions(Options tableOptions) {
         this.tableOption = tableOptions;
         return this;
     }
 
-    public StpCdcRecordSinkBuilder<T> withInput(DataStream<T> input) {
+    public StpCdcRecordSinkBuilder withInput(DataStream<StpCdcRecord> input) {
         this.input = input;
         return this;
     }
 
-    public StpCdcRecordSinkBuilder<T> withParserFactory(EventParser.Factory<T> parserFactory) {
+    public StpCdcRecordSinkBuilder withParserFactory(EventParser.Factory<StpCdcRecord> parserFactory) {
         this.parserFactory = parserFactory;
         return this;
     }
 
-    public StpCdcRecordSinkBuilder<T> withTableOptions(Options options) {
+    public StpCdcRecordSinkBuilder withTableOptions(Options options) {
         this.parallelism = options.get(FlinkConnectorOptions.SINK_PARALLELISM);
         this.committerCpu = options.get(FlinkConnectorOptions.SINK_COMMITTER_CPU);
         this.committerMemory = options.get(FlinkConnectorOptions.SINK_COMMITTER_MEMORY);
@@ -98,7 +97,7 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
         return this;
     }
 
-    public StpCdcRecordSinkBuilder<T> withCatalogLoader(Catalog.Loader catalogLoader) {
+    public StpCdcRecordSinkBuilder withCatalogLoader(Catalog.Loader catalogLoader) {
         this.catalogLoader = catalogLoader;
         return this;
     }
@@ -116,7 +115,7 @@ public class StpCdcRecordSinkBuilder<T> implements Serializable {
         SingleOutputStreamOperator<Void> parsed =
                 input.forward()
                         .process(
-                                new StpCdcDynamicTableParsingProcessFunction<>(
+                                new StpCdcDynamicTableParsingProcessFunction(
                                         catalogLoader, parserFactory, excludeBucketModes))
                         .name("Side Output")
                         .setParallelism(input.getParallelism());
