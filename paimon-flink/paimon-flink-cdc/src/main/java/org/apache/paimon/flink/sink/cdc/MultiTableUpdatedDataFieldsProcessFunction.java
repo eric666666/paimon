@@ -23,6 +23,7 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
 
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -49,6 +50,7 @@ public class MultiTableUpdatedDataFieldsProcessFunction
             LoggerFactory.getLogger(MultiTableUpdatedDataFieldsProcessFunction.class);
 
     private final Map<Identifier, SchemaManager> schemaManagers = new HashMap<>();
+    private final Map<Identifier, FileStoreTable> tables = new HashMap<>();
 
     public MultiTableUpdatedDataFieldsProcessFunction(Catalog.Loader catalogLoader) {
         super(catalogLoader);
@@ -61,15 +63,16 @@ public class MultiTableUpdatedDataFieldsProcessFunction
             Collector<Void> collector)
             throws Exception {
         Identifier tableId = updatedDataFields.f0;
+
         SchemaManager schemaManager =
                 schemaManagers.computeIfAbsent(
                         tableId,
                         id -> {
-                            FileStoreTable table;
-                            try (Catalog catalog = super.catalogLoader.load()) {
-                                table = (FileStoreTable) catalog.getTable(tableId);
+                            FileStoreTable table = null;
+                            try {
+                                table = TableHolder.getTable(tables, tableId, (Table) null, super.catalogLoader);
                             } catch (Exception e) {
-                                throw new RuntimeException("Failed to get table " + tableId, e);
+                                throw new RuntimeException(e);
                             }
                             return new SchemaManager(table.fileIO(), table.location());
                         });

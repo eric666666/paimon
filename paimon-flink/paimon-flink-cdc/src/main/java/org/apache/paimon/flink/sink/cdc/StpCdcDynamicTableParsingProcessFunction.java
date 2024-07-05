@@ -46,10 +46,8 @@ import java.util.Set;
  * newly added tables are including by attesting table filters.
  *
  * <p>This {@link ProcessFunction} can handle records for different tables at the same time.
- *
- * @param <T> CDC change event type
  */
-public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T, Void> {
+public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<StpCdcRecord, Void> {
 
     private static final Logger LOG =
             LoggerFactory.getLogger(StpCdcDynamicTableParsingProcessFunction.class);
@@ -71,21 +69,22 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
 
     public static final OutputTag<Tuple2<Identifier, List<DataField>>>
             DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG =
-                    new OutputTag<>(
-                            "paimon-dynamic-table-schema-change",
-                            TypeInformation.of(
-                                    new TypeHint<Tuple2<Identifier, List<DataField>>>() {}));
+            new OutputTag<>(
+                    "paimon-dynamic-table-schema-change",
+                    TypeInformation.of(
+                            new TypeHint<Tuple2<Identifier, List<DataField>>>() {
+                            }));
 
-    private final EventParser.Factory<T> parserFactory;
+    private final EventParser.Factory<StpCdcRecord> parserFactory;
     private final Catalog.Loader catalogLoader;
     private final Set<BucketMode> excludeBucketModes;
 
-    private transient EventParser<T> parser;
+    private transient EventParser<StpCdcRecord> parser;
     private transient Map<Identifier, FileStoreTable> tableMap;
 
     public StpCdcDynamicTableParsingProcessFunction(
             Catalog.Loader catalogLoader,
-            EventParser.Factory<T> parserFactory,
+            EventParser.Factory<StpCdcRecord> parserFactory,
             Set<BucketMode> excludeBucketModes) {
         // for now, only support single database
         this.catalogLoader = catalogLoader;
@@ -96,16 +95,17 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
     @Override
     public void open(Configuration parameters) throws Exception {
         this.parser = parserFactory.create();
-        // this.catalog = catalogLoader.load();
         this.tableMap = new HashMap<>();
     }
 
     @Override
-    public void processElement(T raw, Context context, Collector<Void> collector) throws Exception {
+    public void processElement(StpCdcRecord raw, Context context, Collector<Void> collector) throws Exception {
         parser.setRawEvent(raw);
         String tableName = parser.parseTableName();
         Identifier identifier = Identifier.fromString(tableName);
-        if (!tableMap.containsKey(identifier) && getTableBucketMode(identifier) == null) {
+        FileStoreTable table = TableHolder.getTable(this.tableMap, identifier, raw, catalogLoader);
+        if (!tableMap.containsKey(identifier)
+                && table == null) {
             throw new IllegalArgumentException(
                     "Paimon table not exists:" + identifier.getEscapedFullName());
         }
@@ -115,7 +115,7 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
             context.output(DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG, Tuple2.of(identifier, schemaChange));
         }
 
-        BucketMode bucketMode = getTableBucketMode(identifier);
+        BucketMode bucketMode = table.bucketMode();
         if (excludeBucketModes.contains(bucketMode)) {
             throw new IllegalArgumentException(
                     String.format(
@@ -149,18 +149,6 @@ public class StpCdcDynamicTableParsingProcessFunction<T> extends ProcessFunction
                                                 record)));
     }
 
-    private BucketMode getTableBucketMode(Identifier identifier) throws Exception {
-        FileStoreTable table;
-        if (!tableMap.containsKey(identifier)) {
-            try (Catalog catalog = catalogLoader.load()) {
-                table = (FileStoreTable) catalog.getTable(identifier);
-                tableMap.put(identifier, table);
-            }
-        } else {
-            table = tableMap.get(identifier);
-        }
-        return table.bucketMode();
-    }
 
     private CdcMultiplexRecord wrapRecord(String databaseName, String tableName, CdcRecord record) {
         return CdcMultiplexRecord.fromCdcRecord(databaseName, tableName, record);

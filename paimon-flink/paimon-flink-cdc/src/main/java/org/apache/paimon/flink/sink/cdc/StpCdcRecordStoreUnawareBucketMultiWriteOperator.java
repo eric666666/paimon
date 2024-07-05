@@ -33,6 +33,7 @@ import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 
@@ -116,7 +117,7 @@ public class StpCdcRecordStoreUnawareBucketMultiWriteOperator
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
 
-        FileStoreTable table = getTable(tableId);
+        FileStoreTable table = TableHolder.getTable(this.tables, tableId, record, this.catalogLoader);
 
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables
@@ -127,13 +128,13 @@ public class StpCdcRecordStoreUnawareBucketMultiWriteOperator
                                     ? memoryPool
                                     // currently, the options of all tables are the same in CDC
                                     : new HeapMemorySegmentPool(
+                                    super.options
+                                            .get(CoreOptions.WRITE_BUFFER_SIZE)
+                                            .getBytes(),
+                                    (int)
                                             super.options
-                                                    .get(CoreOptions.WRITE_BUFFER_SIZE)
-                                                    .getBytes(),
-                                            (int)
-                                                    super.options
-                                                            .get(CoreOptions.PAGE_SIZE)
-                                                            .getBytes()));
+                                                    .get(CoreOptions.PAGE_SIZE)
+                                                    .getBytes()));
         }
 
         StoreSinkWrite write =
@@ -175,17 +176,6 @@ public class StpCdcRecordStoreUnawareBucketMultiWriteOperator
             write.write(optionalConverted.get());
         } catch (Exception e) {
             throw new IOException(e);
-        }
-    }
-
-    private FileStoreTable getTable(Identifier tableId) throws Exception {
-        try (Catalog catalog = catalogLoader.load()) {
-            FileStoreTable table = tables.get(tableId);
-            if (table == null) {
-                table = (FileStoreTable) catalog.getTable(tableId);
-                tables.put(tableId, table);
-            }
-            return table;
         }
     }
 

@@ -22,8 +22,8 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.sink.StateUtils;
 import org.apache.paimon.index.BucketAssigner;
-import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.index.SimpleHashBucketAssigner;
+import org.apache.paimon.index.StpHashBucketAssigner;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.PartitionKeyExtractor;
@@ -39,7 +39,9 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Assign bucket for the input record, output record with bucket. */
+/**
+ * Assign bucket for the input record, output record with bucket.
+ */
 public class StpMultiTableHashBucketAssignerOperator
         extends AbstractStreamOperator<Tuple2<CdcMultiplexRecord, Integer>>
         implements OneInputStreamOperator<CdcMultiplexRecord, Tuple2<CdcMultiplexRecord, Integer>> {
@@ -55,9 +57,11 @@ public class StpMultiTableHashBucketAssignerOperator
     private final boolean overwrite;
 
     private final Map<Identifier, BucketAssigner> assignerHolder = new HashMap<>();
+    private final Map<Identifier, FileStoreTable> tables = new HashMap<>();
     private final Map<Identifier, PartitionKeyExtractor<CdcMultiplexRecord>> extractors =
             new HashMap<>();
     private final Catalog.Loader catalogLoader;
+    private final long indexExpireTimestamp;
 
     private int numberTasks;
     private int taskId;
@@ -69,12 +73,14 @@ public class StpMultiTableHashBucketAssignerOperator
             Integer numAssigners,
             SerializableFunction<TableSchema, PartitionKeyExtractor<CdcMultiplexRecord>>
                     extractorFunction,
-            boolean overwrite) {
+            boolean overwrite,
+            long indexExpireTimestamp) {
         this.initialCommitUser = commitUser;
         this.catalogLoader = catalogLoader;
         this.numAssigners = numAssigners;
         this.extractorFunction = extractorFunction;
         this.overwrite = overwrite;
+        this.indexExpireTimestamp = indexExpireTimestamp;
     }
 
     @Override
@@ -96,27 +102,26 @@ public class StpMultiTableHashBucketAssignerOperator
     public void processElement(StreamRecord<CdcMultiplexRecord> streamRecord) throws Exception {
         CdcMultiplexRecord value = streamRecord.getValue();
         Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
+        FileStoreTable table = TableHolder.getTable(tables, identifier, value, catalogLoader);
         if (!this.assignerHolder.containsKey(identifier)) {
-            try (Catalog catalog = catalogLoader.load()) {
-                FileStoreTable table = ((FileStoreTable) catalog.getTable(identifier));
-                long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
-                BucketAssigner assigner =
-                        overwrite
-                                ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
-                                : new HashBucketAssigner(
-                                        table.snapshotManager(),
-                                        commitUser,
-                                        table.store().newIndexFileHandler(),
-                                        numberTasks,
-                                        MathUtils.min(numAssigners, numberTasks),
-                                        taskId,
-                                        targetRowNum);
-                PartitionKeyExtractor<CdcMultiplexRecord> extractor =
-                        extractorFunction.apply(table.schema());
+            long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
+            BucketAssigner assigner =
+                    overwrite
+                            ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
+                            : new StpHashBucketAssigner(
+                            table.snapshotManager(),
+                            commitUser,
+                            table.store().newIndexFileHandler(),
+                            numberTasks,
+                            MathUtils.min(numAssigners, numberTasks),
+                            taskId,
+                            targetRowNum,
+                            indexExpireTimestamp);
+            PartitionKeyExtractor<CdcMultiplexRecord> extractor =
+                    extractorFunction.apply(table.schema());
 
-                this.assignerHolder.put(identifier, assigner);
-                this.extractors.put(identifier, extractor);
-            }
+            this.assignerHolder.put(identifier, assigner);
+            this.extractors.put(identifier, extractor);
         }
         BucketAssigner assigner = this.assignerHolder.get(identifier);
         PartitionKeyExtractor<CdcMultiplexRecord> extractor = this.extractors.get(identifier);

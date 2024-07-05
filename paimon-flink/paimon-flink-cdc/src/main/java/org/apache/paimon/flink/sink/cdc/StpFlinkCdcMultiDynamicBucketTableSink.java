@@ -81,7 +81,8 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private final boolean isOverwrite = false;
     private final Catalog.Loader catalogLoader;
     private final double commitCpuCores;
-    @Nullable private final MemorySize commitHeapMemory;
+    @Nullable
+    private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
     private final Options tableOption;
 
@@ -92,7 +93,6 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             boolean commitChaining,
             Options tableOption) {
         this.catalogLoader = catalogLoader;
-        // this.catalog = catalogLoader.load();
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
@@ -146,7 +146,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         // 2. bucket-assigner
         StpMultiTableHashBucketAssignerOperator assignerOperator =
                 new StpMultiTableHashBucketAssignerOperator(
-                        commitUser, catalogLoader, numAssigners, extractorFunction(), false);
+                        commitUser, catalogLoader, numAssigners, extractorFunction(), false, -1);
         TupleTypeInfo<Tuple2<CdcMultiplexRecord, Integer>> rowWithBucketType =
                 new TupleTypeInfo<>(partitionByKeyHash.getType(), BasicTypeInfo.INT_TYPE_INFO);
         DataStream<Tuple2<CdcMultiplexRecord, Integer>> bucketAssigned =
@@ -192,7 +192,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     }
 
     private SerializableFunction<TableSchema, PartitionKeyExtractor<CdcMultiplexRecord>>
-            extractorFunction() {
+    extractorFunction() {
         return schema -> {
             KeyAndBucketExtractor<CdcMultiplexRecord> extractor = createExtractor(schema);
             return new PartitionKeyExtractor<CdcMultiplexRecord>() {
@@ -220,8 +220,8 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     }
 
     protected OneInputStreamOperator<Tuple2<CdcMultiplexRecord, Integer>, MultiTableCommittable>
-            createWriteOperator(
-                    StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
+    createWriteOperator(
+            StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
         return new StpCdcRecordStoreDynamicBucketMultiWriteOperator(
                 catalogLoader,
                 writeProvider,
@@ -231,7 +231,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
 
     // Table committers are dynamically created at runtime
     protected Committer.Factory<MultiTableCommittable, WrappedManifestCommittable>
-            createCommitterFactory() {
+    createCommitterFactory() {
         // If checkpoint is enabled for streaming job, we have to
         // commit new files list even if they're empty.
         // Otherwise we can't tell if the commit is successful after
@@ -249,7 +249,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         private Integer numAssigners;
 
         private transient int numChannels;
-        private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
+        private Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
 
         public AssignerChannelComputer(Integer numAssigners, Catalog.Loader loader) {
             this.numAssigners = numAssigners;
@@ -296,8 +296,9 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private class RecordWithBucketChannelComputer
             implements ChannelComputer<Tuple2<CdcMultiplexRecord, Integer>> {
         private transient int numChannels;
-        private transient Catalog.Loader catalogLoader;
+        private Catalog.Loader catalogLoader;
         private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
+        private transient Map<Identifier, FileStoreTable> tables;
 
         public RecordWithBucketChannelComputer(Catalog.Loader catalogLoader) {
             this.catalogLoader = catalogLoader;
@@ -307,6 +308,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         public void setup(int numChannels) {
             this.numChannels = numChannels;
             this.extractors = new HashMap<>();
+            this.tables = new HashMap<>();
         }
 
         @Override
@@ -314,15 +316,16 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             CdcMultiplexRecord cdcRecord = record.f0;
             Identifier identifier =
                     Identifier.create(cdcRecord.databaseName(), cdcRecord.tableName());
+
+            FileStoreTable table;
+            try {
+                table = TableHolder.getTable(this.tables, identifier, cdcRecord, catalogLoader);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
             if (!extractors.containsKey(identifier)) {
-                Table table;
-                try (Catalog catalog = catalogLoader.load()) {
-                    table = catalog.getTable(identifier);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
                 KeyAndBucketExtractor<CdcMultiplexRecord> extractor =
-                        createExtractor(((FileStoreTable) table).schema());
+                        createExtractor(table.schema());
                 extractors.put(identifier, extractor);
             }
             KeyAndBucketExtractor<CdcMultiplexRecord> extractor = extractors.get(identifier);

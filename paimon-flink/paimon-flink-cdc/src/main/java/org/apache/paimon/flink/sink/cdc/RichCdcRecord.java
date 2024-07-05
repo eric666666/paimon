@@ -33,7 +33,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** A change message contains schema and data. */
+/**
+ * A change message contains schema and data.
+ */
 @Experimental
 public class RichCdcRecord implements Serializable {
 
@@ -89,7 +91,9 @@ public class RichCdcRecord implements Serializable {
         return new Builder(kind, new AtomicInteger(-1));
     }
 
-    /** Builder for {@link RichCdcRecord}. */
+    /**
+     * Builder for {@link RichCdcRecord}.
+     */
     public static class Builder {
 
         private final RowKind kind;
@@ -114,7 +118,7 @@ public class RichCdcRecord implements Serializable {
         }
 
         public RichCdcRecord build() {
-            return new RichCdcRecord(new CdcRecord(kind, fieldValues), fields);
+            return new RichCdcRecord(new CdcRecord(kind, fieldValues, null), fields);
         }
     }
 }

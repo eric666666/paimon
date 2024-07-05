@@ -112,7 +112,7 @@ public class CdcRecordStoreMultiWriteOperator
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
 
-        FileStoreTable table = getTable(tableId);
+        FileStoreTable table = TableHolder.getTable(tables, tableId, record, catalogLoader);
 
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables
@@ -123,8 +123,8 @@ public class CdcRecordStoreMultiWriteOperator
                                     ? memoryPool
                                     // currently, the options of all tables are the same in CDC
                                     : new HeapMemorySegmentPool(
-                                            table.coreOptions().writeBufferSize(),
-                                            table.coreOptions().pageSize()));
+                                    table.coreOptions().writeBufferSize(),
+                                    table.coreOptions().pageSize()));
         }
 
         StoreSinkWrite write =
@@ -169,16 +169,6 @@ public class CdcRecordStoreMultiWriteOperator
         }
     }
 
-    private FileStoreTable getTable(Identifier tableId) throws Exception {
-        try (Catalog catalog = catalogLoader.load()) {
-            FileStoreTable table = tables.get(tableId);
-            if (table == null) {
-                table = (FileStoreTable) catalog.getTable(tableId);
-                tables.put(tableId, table);
-            }
-            return table;
-        }
-    }
 
     @Override
     public void snapshotState(StateSnapshotContext context) throws Exception {

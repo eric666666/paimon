@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.annotation.Experimental;
+import org.apache.paimon.table.Table;
 import org.apache.paimon.types.RowKind;
 
 import java.io.Serializable;
@@ -37,13 +38,26 @@ public class CdcRecord implements Serializable {
 
     private final Map<String, String> fields;
 
+    private Table table;
+
+    public CdcRecord(RowKind kind, Map<String, String> fields, Table table) {
+        this.kind = kind;
+        this.fields = fields;
+        this.table = table;
+    }
+
     public CdcRecord(RowKind kind, Map<String, String> fields) {
         this.kind = kind;
         this.fields = fields;
     }
 
+    public CdcRecord setRowKind(RowKind kind) {
+        this.kind = kind;
+        return this;
+    }
+
     public static CdcRecord emptyRecord() {
-        return new CdcRecord(RowKind.INSERT, Collections.emptyMap());
+        return new CdcRecord(RowKind.INSERT, Collections.emptyMap(), null);
     }
 
     public RowKind kind() {
@@ -60,6 +74,10 @@ public class CdcRecord implements Serializable {
             newFields.put(entry.getKey().toLowerCase(), entry.getValue());
         }
         return new CdcRecord(kind, newFields);
+    }
+
+    public Table getTable() {
+        return table;
     }
 
     @Override
