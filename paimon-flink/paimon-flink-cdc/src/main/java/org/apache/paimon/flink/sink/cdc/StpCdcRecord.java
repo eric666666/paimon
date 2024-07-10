@@ -96,6 +96,22 @@ public class StpCdcRecord implements Serializable {
         this.cdcRecord = cdcRecord;
     }
 
+    public CdcRecord getCdcRecord() {
+        return cdcRecord;
+    }
+
+    public List<DataField> getFields() {
+        return fields;
+    }
+
+    public String getTableName() {
+        return tableName;
+    }
+
+    public String getDatabaseName() {
+        return databaseName;
+    }
+
     public void setTable(Table table) {
         this.table = table;
     }

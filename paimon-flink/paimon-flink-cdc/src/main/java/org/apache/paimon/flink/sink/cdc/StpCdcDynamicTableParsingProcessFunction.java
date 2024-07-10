@@ -103,7 +103,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
         parser.setRawEvent(raw);
         String tableName = parser.parseTableName();
         Identifier identifier = Identifier.fromString(tableName);
-        FileStoreTable table = TableHolder.getTable(this.tableMap, identifier, raw, catalogLoader);
+        FileStoreTable table = TableSelector.getTable(this.tableMap, identifier, raw, catalogLoader);
         if (!tableMap.containsKey(identifier)
                 && table == null) {
             throw new IllegalArgumentException(
@@ -125,13 +125,13 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
 
         OutputTag<CdcMultiplexRecord> outputTag;
         switch (bucketMode) {
-            case DYNAMIC:
+            case HASH_DYNAMIC:
                 outputTag = DYNAMIC_BUCKET_OUTPUT_TAG;
                 break;
-            case FIXED:
+            case HASH_FIXED:
                 outputTag = DYNAMIC_OUTPUT_TAG;
                 break;
-            case UNAWARE:
+            case BUCKET_UNAWARE:
                 outputTag = UNAWARE_BUCKET_OUTPUT_TAG;
                 break;
             default:

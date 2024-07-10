@@ -73,10 +73,15 @@ public class StpHashBucketAssigner implements BucketAssigner {
         this.assignId = assignId;
         this.targetBucketRowNumber = targetBucketRowNumber;
         this.indexExpireTimestamp = indexExpireTimestamp;
-        this.partitionIndex = Caffeine.newBuilder()
-                .expireAfterAccess(indexExpireTimestamp, TimeUnit.MILLISECONDS)
+        Caffeine<Object, Object> builder = Caffeine.newBuilder();
+        if (indexExpireTimestamp > 0) {
+            builder.expireAfterAccess(indexExpireTimestamp, TimeUnit.MILLISECONDS);
+        }
+        this.partitionIndex = builder
                 .removalListener((o, o2, removalCause) -> {
-
+                    if (removalCause.wasEvicted()) {
+                        LOG.info("Partition {} expire.", o);
+                    }
                 })
                 .build();
     }

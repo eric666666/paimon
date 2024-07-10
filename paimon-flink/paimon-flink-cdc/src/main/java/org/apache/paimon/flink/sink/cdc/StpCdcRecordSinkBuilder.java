@@ -36,6 +36,7 @@ import java.io.Serializable;
 import java.util.Collections;
 import java.util.Set;
 
+import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
 
 /**
@@ -48,16 +49,17 @@ import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
  * <p>For newly added tables, this builder will create a multiplexed Paimon sink to handle all
  * tables added during runtime. Note that the topology of the Flink job is likely to change when
  * there is newly added table and the job resume from a given savepoint.
- *
  */
 public class StpCdcRecordSinkBuilder implements Serializable {
 
     private DataStream<StpCdcRecord> input = null;
     private EventParser.Factory<StpCdcRecord> parserFactory;
 
-    @Nullable private Integer parallelism;
+    @Nullable
+    private Integer parallelism;
     private double committerCpu;
-    @Nullable private MemorySize committerMemory;
+    @Nullable
+    private MemorySize committerMemory;
     private boolean commitChaining;
 
     // Paimon catalog used to check and create tables. There will be two
@@ -68,6 +70,7 @@ public class StpCdcRecordSinkBuilder implements Serializable {
     private Catalog.Loader catalogLoader;
     private Set<BucketMode> excludeBucketModes = Collections.emptySet();
     private Options tableOption;
+    private String commitUser;
 
     public StpCdcRecordSinkBuilder withExcludeBucketModes(Set<BucketMode> excludeBucketModes) {
         this.excludeBucketModes = excludeBucketModes;
@@ -94,6 +97,7 @@ public class StpCdcRecordSinkBuilder implements Serializable {
         this.committerCpu = options.get(FlinkConnectorOptions.SINK_COMMITTER_CPU);
         this.committerMemory = options.get(FlinkConnectorOptions.SINK_COMMITTER_MEMORY);
         this.commitChaining = options.get(FlinkConnectorOptions.SINK_COMMITTER_OPERATOR_CHAINING);
+        this.commitUser = createCommitUser(options);
         return this;
     }
 
@@ -145,28 +149,28 @@ public class StpCdcRecordSinkBuilder implements Serializable {
                         new CdcMultiplexRecordChannelComputer(catalogLoader),
                         parallelism);
 
-        if (!excludeBucketModes.contains(BucketMode.FIXED)) {
-            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining)
+        if (!excludeBucketModes.contains(BucketMode.HASH_FIXED)) {
+            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining, commitUser)
                     .sinkFrom(partitioned);
         }
 
-        if (!excludeBucketModes.contains(BucketMode.DYNAMIC)) {
+        if (!excludeBucketModes.contains(BucketMode.HASH_DYNAMIC)) {
             new StpFlinkCdcMultiDynamicBucketTableSink(
-                            catalogLoader,
-                            committerCpu,
-                            committerMemory,
-                            commitChaining,
-                            tableOption)
+                    catalogLoader,
+                    committerCpu,
+                    committerMemory,
+                    commitChaining,
+                    tableOption)
                     .sinkFrom(dynamicBucketDS);
         }
 
-        if (!excludeBucketModes.contains(BucketMode.UNAWARE)) {
+        if (!excludeBucketModes.contains(BucketMode.BUCKET_UNAWARE)) {
             new StpFlinkCdcMultiUnawareBucketTableSink(
-                            catalogLoader,
-                            committerCpu,
-                            committerMemory,
-                            commitChaining,
-                            tableOption)
+                    catalogLoader,
+                    committerCpu,
+                    committerMemory,
+                    commitChaining,
+                    tableOption)
                     .sinkFrom(unawareBucketDS);
         }
     }
