@@ -33,7 +33,6 @@ import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -117,7 +116,7 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
 
-        FileStoreTable table = TableHolder.getTable(tables, tableId, record, catalogLoader);
+        FileStoreTable table = TableSelector.getTable(tables, tableId, record, catalogLoader);
 
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables

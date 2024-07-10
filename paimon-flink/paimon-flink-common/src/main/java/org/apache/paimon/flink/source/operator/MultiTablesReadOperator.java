@@ -113,7 +113,7 @@ public class MultiTablesReadOperator extends AbstractStreamOperator<RowData>
         TableRead read = getTableRead(identifier);
         Map<BinaryRow, Long> partitionInfo = getPartitionInfo(tablesMap.get(identifier));
         try (CloseableIterator<InternalRow> iterator =
-                read.createReader(record.getValue().f0).toCloseableIterator()) {
+                     read.createReader(record.getValue().f0).toCloseableIterator()) {
             if (partitionIdleTime == null) {
                 while (iterator.hasNext()) {
                     reuseRow.replace(iterator.next());
@@ -143,9 +143,9 @@ public class MultiTablesReadOperator extends AbstractStreamOperator<RowData>
                             newTable.getClass().getName());
                     table =
                             new BucketsTable(
-                                            (FileStoreTable) newTable,
-                                            isStreaming,
-                                            tableId.getDatabaseName())
+                                    (FileStoreTable) newTable,
+                                    isStreaming,
+                                    tableId.getDatabaseName())
                                     .copy(compactOptions(isStreaming));
                     tablesMap.put(tableId, table);
                     readsMap.put(

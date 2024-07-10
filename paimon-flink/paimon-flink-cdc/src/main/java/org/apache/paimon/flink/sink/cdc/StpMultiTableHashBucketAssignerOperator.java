@@ -102,7 +102,7 @@ public class StpMultiTableHashBucketAssignerOperator
     public void processElement(StreamRecord<CdcMultiplexRecord> streamRecord) throws Exception {
         CdcMultiplexRecord value = streamRecord.getValue();
         Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
-        FileStoreTable table = TableHolder.getTable(tables, identifier, value, catalogLoader);
+        FileStoreTable table = TableSelector.getTable(tables, identifier, value, catalogLoader);
         if (!this.assignerHolder.containsKey(identifier)) {
             long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
             BucketAssigner assigner =

@@ -21,7 +21,6 @@ package org.apache.paimon.flink.sink.cdc;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.flink.VersionedSerializerWrapper;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
 import org.apache.paimon.flink.sink.CommitterOperator;
@@ -108,7 +107,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
                         state,
                         ioManager,
                         isOverwrite,
-                        false,
+                        table.coreOptions().prepareCommitWaitCompaction(),
                         true,
                         memoryPoolFactory,
                         metricGroup);
@@ -236,12 +235,12 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         // commit new files list even if they're empty.
         // Otherwise we can't tell if the commit is successful after
         // a restart.
-        return (user, metricGroup) -> new StoreMultiCommitter(catalogLoader, user, metricGroup);
+        return context -> new StoreMultiCommitter(catalogLoader, context);
     }
 
     protected CommittableStateManager<WrappedManifestCommittable> createCommittableStateManager() {
         return new RestoreAndFailCommittableStateManager<>(
-                () -> new VersionedSerializerWrapper<>(new WrappedManifestCommittableSerializer()));
+                WrappedManifestCommittableSerializer::new);
     }
 
     private class AssignerChannelComputer implements ChannelComputer<CdcMultiplexRecord> {
@@ -319,7 +318,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
 
             FileStoreTable table;
             try {
-                table = TableHolder.getTable(this.tables, identifier, cdcRecord, catalogLoader);
+                table = TableSelector.getTable(this.tables, identifier, cdcRecord, catalogLoader);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

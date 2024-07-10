@@ -70,7 +70,7 @@ public class MultiTableUpdatedDataFieldsProcessFunction
                         id -> {
                             FileStoreTable table = null;
                             try {
-                                table = TableHolder.getTable(tables, tableId, (Table) null, super.catalogLoader);
+                                table = TableSelector.getTable(tables, tableId, (Table) null, super.catalogLoader);
                             } catch (Exception e) {
                                 throw new RuntimeException(e);
                             }
