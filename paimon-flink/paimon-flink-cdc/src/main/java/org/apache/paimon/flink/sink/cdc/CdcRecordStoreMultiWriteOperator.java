@@ -65,6 +65,7 @@ public class CdcRecordStoreMultiWriteOperator
     private final Catalog.Loader catalogLoader;
 
     private MemoryPoolFactory memoryPoolFactory;
+    private Catalog catalog;
     private Map<Identifier, FileStoreTable> tables;
     private StoreSinkWriteState state;
     private Map<Identifier, StoreSinkWrite> writes;
@@ -85,6 +86,8 @@ public class CdcRecordStoreMultiWriteOperator
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
+
+        catalog = catalogLoader.load();
 
         // Each job can only have one user name and this name must be consistent across restarts.
         // We cannot use job id as commit user name here because user may change job id by creating
@@ -110,9 +113,7 @@ public class CdcRecordStoreMultiWriteOperator
         String databaseName = record.databaseName();
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
-
-        FileStoreTable table = TableSelector.getTable(tables, tableId, record, catalogLoader);
-
+        FileStoreTable table = (FileStoreTable) catalog.getTable(tableId);
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables
         if (memoryPoolFactory == null) {
@@ -122,8 +123,8 @@ public class CdcRecordStoreMultiWriteOperator
                                     ? memoryPool
                                     // currently, the options of all tables are the same in CDC
                                     : new HeapMemorySegmentPool(
-                                    table.coreOptions().writeBufferSize(),
-                                    table.coreOptions().pageSize()));
+                                            table.coreOptions().writeBufferSize(),
+                                            table.coreOptions().pageSize()));
         }
 
         StoreSinkWrite write =
@@ -168,7 +169,6 @@ public class CdcRecordStoreMultiWriteOperator
         }
     }
 
-
     @Override
     public void snapshotState(StateSnapshotContext context) throws Exception {
         super.snapshotState(context);
@@ -187,6 +187,10 @@ public class CdcRecordStoreMultiWriteOperator
         }
         if (compactExecutor != null) {
             compactExecutor.shutdownNow();
+        }
+        if (catalog != null) {
+            catalog.close();
+            catalog = null;
         }
     }
 

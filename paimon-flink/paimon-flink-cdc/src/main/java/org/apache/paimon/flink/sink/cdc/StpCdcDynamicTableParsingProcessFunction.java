@@ -77,6 +77,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
 
     private final EventParser.Factory<StpCdcRecord> parserFactory;
     private final Catalog.Loader catalogLoader;
+    private transient Catalog catalog;
     private final Set<BucketMode> excludeBucketModes;
 
     private transient EventParser<StpCdcRecord> parser;
@@ -86,7 +87,6 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
             Catalog.Loader catalogLoader,
             EventParser.Factory<StpCdcRecord> parserFactory,
             Set<BucketMode> excludeBucketModes) {
-        // for now, only support single database
         this.catalogLoader = catalogLoader;
         this.parserFactory = parserFactory;
         this.excludeBucketModes = excludeBucketModes;
@@ -96,6 +96,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
     public void open(Configuration parameters) throws Exception {
         this.parser = parserFactory.create();
         this.tableMap = new HashMap<>();
+        this.catalog = catalogLoader.load();
     }
 
     @Override
@@ -103,7 +104,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
         parser.setRawEvent(raw);
         String tableName = parser.parseTableName();
         Identifier identifier = Identifier.fromString(tableName);
-        FileStoreTable table = TableSelector.getTable(this.tableMap, identifier, raw, catalogLoader);
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
         if (!tableMap.containsKey(identifier)
                 && table == null) {
             throw new IllegalArgumentException(
