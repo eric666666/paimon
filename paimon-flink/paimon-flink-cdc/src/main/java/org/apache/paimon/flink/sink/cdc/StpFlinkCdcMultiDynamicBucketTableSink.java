@@ -298,6 +298,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         private Catalog.Loader catalogLoader;
         private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
         private transient Map<Identifier, FileStoreTable> tables;
+        private transient Catalog catalog;
 
         public RecordWithBucketChannelComputer(Catalog.Loader catalogLoader) {
             this.catalogLoader = catalogLoader;
@@ -308,6 +309,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             this.numChannels = numChannels;
             this.extractors = new HashMap<>();
             this.tables = new HashMap<>();
+            this.catalog = catalogLoader.load();
         }
 
         @Override
@@ -318,7 +320,13 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
 
             FileStoreTable table;
             try {
-                table = TableSelector.getTable(this.tables, identifier, cdcRecord, catalogLoader);
+                table = tables.computeIfAbsent(identifier, id -> {
+                    try {
+                        return (FileStoreTable) catalog.getTable(identifier);
+                    } catch (Catalog.TableNotExistException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

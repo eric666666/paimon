@@ -65,6 +65,7 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
     private final StoreSinkWrite.WithWriteBufferProvider storeSinkWriteProvider;
     private final String initialCommitUser;
     private final Catalog.Loader catalogLoader;
+    private  transient Catalog catalog;
 
     private MemoryPoolFactory memoryPoolFactory;
     private Map<Identifier, FileStoreTable> tables;
@@ -87,7 +88,7 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
-
+        this.catalog = catalogLoader.load();
         // Each job can only have one user name and this name must be consistent across restarts.
         // We cannot use job id as commit user name here because user may change job id by creating
         // a savepoint, stop the job and then resume from savepoint.
@@ -116,7 +117,7 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
 
-        FileStoreTable table = TableSelector.getTable(tables, tableId, record, catalogLoader);
+        FileStoreTable table = (FileStoreTable) catalog.getTable(tableId);
 
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables

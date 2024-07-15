@@ -61,6 +61,7 @@ public class StpMultiTableHashBucketAssignerOperator
     private final Map<Identifier, PartitionKeyExtractor<CdcMultiplexRecord>> extractors =
             new HashMap<>();
     private final Catalog.Loader catalogLoader;
+    private  transient Catalog catalog;
     private final long indexExpireTimestamp;
 
     private int numberTasks;
@@ -87,6 +88,7 @@ public class StpMultiTableHashBucketAssignerOperator
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
 
+        this.catalog = catalogLoader.load();
         // Each job can only have one user name and this name must be consistent across restarts.
         // We cannot use job id as commit user name here because user may change job id by creating
         // a savepoint, stop the job and then resume from savepoint.
@@ -102,7 +104,7 @@ public class StpMultiTableHashBucketAssignerOperator
     public void processElement(StreamRecord<CdcMultiplexRecord> streamRecord) throws Exception {
         CdcMultiplexRecord value = streamRecord.getValue();
         Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
-        FileStoreTable table = TableSelector.getTable(tables, identifier, value, catalogLoader);
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
         if (!this.assignerHolder.containsKey(identifier)) {
             long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
             BucketAssigner assigner =

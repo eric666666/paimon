@@ -23,7 +23,6 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataField;
 
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -35,6 +34,7 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * A {@link ProcessFunction} to handle schema changes. New schema is represented by a list of {@link
@@ -50,7 +50,6 @@ public class MultiTableUpdatedDataFieldsProcessFunction
             LoggerFactory.getLogger(MultiTableUpdatedDataFieldsProcessFunction.class);
 
     private final Map<Identifier, SchemaManager> schemaManagers = new HashMap<>();
-    private final Map<Identifier, FileStoreTable> tables = new HashMap<>();
 
     public MultiTableUpdatedDataFieldsProcessFunction(Catalog.Loader catalogLoader) {
         super(catalogLoader);
@@ -63,23 +62,26 @@ public class MultiTableUpdatedDataFieldsProcessFunction
             Collector<Void> collector)
             throws Exception {
         Identifier tableId = updatedDataFields.f0;
-
         SchemaManager schemaManager =
                 schemaManagers.computeIfAbsent(
                         tableId,
                         id -> {
-                            FileStoreTable table = null;
+                            FileStoreTable table;
                             try {
-                                table = TableSelector.getTable(tables, tableId, (Table) null, super.catalogLoader);
-                            } catch (Exception e) {
+                                table = (FileStoreTable) catalog.getTable(id);
+                            } catch (Catalog.TableNotExistException e) {
                                 throw new RuntimeException(e);
                             }
                             return new SchemaManager(table.fileIO(), table.location());
                         });
 
-        for (SchemaChange schemaChange :
-                extractSchemaChanges(schemaManager, updatedDataFields.f1)) {
-            applySchemaChange(schemaManager, schemaChange, tableId);
+        if (Objects.isNull(schemaManager)) {
+            LOG.error("Failed to get schema manager for table " + tableId);
+        } else {
+            for (SchemaChange schemaChange :
+                    extractSchemaChanges(schemaManager, updatedDataFields.f1)) {
+                applySchemaChange(schemaManager, schemaChange, tableId);
+            }
         }
     }
 }
