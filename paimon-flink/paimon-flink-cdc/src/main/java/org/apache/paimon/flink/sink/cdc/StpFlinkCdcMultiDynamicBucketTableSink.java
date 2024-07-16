@@ -295,7 +295,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private class RecordWithBucketChannelComputer
             implements ChannelComputer<Tuple2<CdcMultiplexRecord, Integer>> {
         private transient int numChannels;
-        private Catalog.Loader catalogLoader;
+        private final Catalog.Loader catalogLoader;
         private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
         private transient Map<Identifier, FileStoreTable> tables;
         private transient Catalog catalog;
