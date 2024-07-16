@@ -244,12 +244,24 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
 
     @Override
     public boolean dropTable(Identifier ident) {
-        return icebergCatalog.dropTable(ident) || sparkCatalog.dropTable(ident) || asTableCatalog().dropTable(ident);
+        if (sparkCatalog.tableExists(ident)) {
+            return sparkCatalog.dropTable(ident);
+        } else if (icebergCatalog.tableExists(ident)) {
+            return icebergCatalog.dropTable(ident);
+        } else {
+            return asTableCatalog().dropTable(ident);
+        }
     }
 
     @Override
     public boolean purgeTable(Identifier ident) {
-        return icebergCatalog.purgeTable(ident) || sparkCatalog.purgeTable(ident) || asTableCatalog().purgeTable(ident);
+        if (sparkCatalog.tableExists(ident)) {
+            return sparkCatalog.purgeTable(ident);
+        } else if (icebergCatalog.tableExists(ident)) {
+            return icebergCatalog.purgeTable(ident);
+        } else {
+            return asTableCatalog().purgeTable(ident);
+        }
     }
 
     @Override
