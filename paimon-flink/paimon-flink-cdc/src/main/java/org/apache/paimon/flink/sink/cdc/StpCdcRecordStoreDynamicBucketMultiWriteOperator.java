@@ -117,7 +117,7 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         String tableName = record.tableName();
         Identifier tableId = Identifier.create(databaseName, tableName);
 
-        FileStoreTable table = (FileStoreTable) catalog.getTable(tableId);
+        FileStoreTable table = TableSelector.getTable(this.tables, tableId, record, catalog);
 
         // all table write should share one write buffer so that writers can preempt memory
         // from those of other tables

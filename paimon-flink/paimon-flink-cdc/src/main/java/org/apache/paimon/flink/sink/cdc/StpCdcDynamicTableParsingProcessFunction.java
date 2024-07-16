@@ -104,7 +104,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
         parser.setRawEvent(raw);
         String tableName = parser.parseTableName();
         Identifier identifier = Identifier.fromString(tableName);
-        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
+        FileStoreTable table = TableSelector.getTable(this.tableMap, identifier, raw, catalog);
         if (!tableMap.containsKey(identifier)
                 && table == null) {
             throw new IllegalArgumentException(
