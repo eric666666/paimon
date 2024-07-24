@@ -123,8 +123,8 @@ public class CdcRecordStoreMultiWriteOperator
                                     ? memoryPool
                                     // currently, the options of all tables are the same in CDC
                                     : new HeapMemorySegmentPool(
-                                            table.coreOptions().writeBufferSize(),
-                                            table.coreOptions().pageSize()));
+                                    table.coreOptions().writeBufferSize(),
+                                    table.coreOptions().pageSize()));
         }
 
         StoreSinkWrite write =
@@ -142,13 +142,13 @@ public class CdcRecordStoreMultiWriteOperator
         ((StoreSinkWriteImpl) write).withCompactExecutor(compactExecutor);
 
         Optional<GenericRow> optionalConverted =
-                toGenericRow(record.record(), table.schema().fields());
+                toGenericRow(record.record(), table);
         if (!optionalConverted.isPresent()) {
             FileStoreTable latestTable = table;
             while (true) {
                 latestTable = latestTable.copyWithLatestSchema();
                 tables.put(tableId, latestTable);
-                optionalConverted = toGenericRow(record.record(), latestTable.schema().fields());
+                optionalConverted = toGenericRow(record.record(), latestTable);
                 if (optionalConverted.isPresent()) {
                     break;
                 }

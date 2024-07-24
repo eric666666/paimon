@@ -33,6 +33,8 @@ import org.apache.hadoop.hive.metastore.api.LockResponse;
 import org.apache.hadoop.hive.metastore.api.LockState;
 import org.apache.hadoop.hive.metastore.api.LockType;
 import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -43,9 +45,11 @@ import java.util.concurrent.Callable;
 import static org.apache.paimon.options.CatalogOptions.LOCK_ACQUIRE_TIMEOUT;
 import static org.apache.paimon.options.CatalogOptions.LOCK_CHECK_MAX_SLEEP;
 
-/** Hive {@link CatalogLock}. */
+/**
+ * Hive {@link CatalogLock}.
+ */
 public class HiveCatalogLock implements CatalogLock {
-
+    private static final Logger LOG = LoggerFactory.getLogger(HiveCatalogLock.class);
     static final String LOCK_IDENTIFIER = "hive";
 
     private final ClientPool<IMetaStoreClient, TException> clients;
@@ -95,9 +99,11 @@ public class HiveCatalogLock implements CatalogLock {
 
             final LockResponse tempLockResponse = lockResponse;
             lockResponse = clients.run(client -> client.checkLock(tempLockResponse.getLockid()));
-            if (System.currentTimeMillis() - startRetry > acquireTimeout) {
+            long duration = System.currentTimeMillis() - startRetry;
+            if (duration > acquireTimeout) {
                 break;
             }
+            LOG.warn("Cannot get hive lock for table {} in database {} since {}ms, retrying...", table, database, duration);
         }
         long retryDuration = System.currentTimeMillis() - startRetry;
 
@@ -107,7 +113,7 @@ public class HiveCatalogLock implements CatalogLock {
                 clients.execute(client -> client.unlock(tempLockResponse.getLockid()));
             }
             throw new RuntimeException(
-                    "Acquire lock failed with time: " + Duration.ofMillis(retryDuration));
+                    "Table " + table + " acquire lock failed with time: " + Duration.ofMillis(retryDuration));
         }
         return lockResponse.getLockid();
     }
