@@ -19,7 +19,6 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
-import org.apache.paimon.flink.VersionedSerializerWrapper;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
 import org.apache.paimon.flink.sink.CommitterOperator;
@@ -59,7 +58,7 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
     private static final long serialVersionUID = 1L;
     private static final String WRITER_NAME = "CDC unaware bucket MultiplexWriter";
-    private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
+    private static final String GLOBAL_COMMITTER_NAME = "StpFlinkCdcMultiUnawareBucketTable Global Committer";
 
     private final boolean isOverwrite = false;
     private final Catalog.Loader catalogLoader;

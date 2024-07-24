@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
@@ -74,8 +75,8 @@ import static org.apache.paimon.index.BucketAssigner.computeAssigner;
 public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private static final String WRITER_NAME = "CDC Dynamic bucket MultiplexWriter";
-    private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
+    private static final String WRITER_NAME = "StpFlinkCdcMultiDynamicBucketTable MultiplexWriter";
+    private static final String GLOBAL_COMMITTER_NAME = "StpFlinkCdcMultiDynamicBucketTable Global Committer";
 
     private final boolean isOverwrite = false;
     private final Catalog.Loader catalogLoader;
@@ -138,7 +139,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         // 1. shuffle by key hash
         Integer assignerParallelism = input.getParallelism();
 
-        Integer numAssigners = null;
+        Integer numAssigners = tableOption.getInteger(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), 1);
         DataStream<CdcMultiplexRecord> partitionByKeyHash =
                 partition(input, assignerChannelComputer(numAssigners), assignerParallelism);
 

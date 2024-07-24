@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
@@ -33,7 +34,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-/** Utils for {@link CdcRecord}. */
+/**
+ * Utils for {@link CdcRecord}.
+ */
 public class CdcRecordUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(CdcRecordUtils.class);
@@ -74,22 +77,23 @@ public class CdcRecordUtils {
      *
      * @param dataFields {@link DataField}s of the converted {@link GenericRow}.
      * @return if all field names of {@code dataFields} existed in keys of {@code fields} and all
-     *     values of {@code fields} can be correctly converted to the specified type, an {@code
-     *     Optional#of(GenericRow)} will be returned, otherwise an {@code Optional#empty()} will be
-     *     returned
+     * values of {@code fields} can be correctly converted to the specified type, an {@code
+     * Optional#of(GenericRow)} will be returned, otherwise an {@code Optional#empty()} will be
+     * returned
      */
-    public static Optional<GenericRow> toGenericRow(CdcRecord record, List<DataField> dataFields) {
+    public static Optional<GenericRow> toGenericRow(CdcRecord record, FileStoreTable table) {
+        List<DataField> dataFields = table.schema().fields();
         GenericRow genericRow = new GenericRow(record.kind(), dataFields.size());
         List<String> fieldNames =
                 dataFields.stream().map(DataField::name).collect(Collectors.toList());
-
+        String fullName = table.fullName();
         for (Map.Entry<String, String> field : record.fields().entrySet()) {
             String key = field.getKey();
             String value = field.getValue();
 
             int idx = fieldNames.indexOf(key);
             if (idx < 0) {
-                LOG.info("Field " + key + " not found. Waiting for schema update.");
+                LOG.info("Field {} not found in table {} . Waiting for schema update.", key, fullName);
                 return Optional.empty();
             }
 
@@ -108,7 +112,7 @@ public class CdcRecordUtils {
                                 + value
                                 + " to type "
                                 + type
-                                + ". Waiting for schema update.",
+                                + " with table " + fullName + ". Waiting for schema update.",
                         e);
                 return Optional.empty();
             }
