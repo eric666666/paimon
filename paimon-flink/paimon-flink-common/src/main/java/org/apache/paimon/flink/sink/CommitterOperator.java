@@ -171,6 +171,8 @@ public class CommitterOperator<CommitT, GlobalCommitT> extends AbstractStreamOpe
         super.snapshotState(context);
         pollInputs();
         committableStateManager.snapshotState(context, committables(committablesPerCheckpoint));
+        long checkpointId = context.getCheckpointId();
+        commitUpToCheckpoint(endInput ? END_INPUT_CHECKPOINT_ID : checkpointId);
     }
 
     private List<GlobalCommitT> committables(NavigableMap<Long, GlobalCommitT> map) {
@@ -195,7 +197,6 @@ public class CommitterOperator<CommitT, GlobalCommitT> extends AbstractStreamOpe
     @Override
     public void notifyCheckpointComplete(long checkpointId) throws Exception {
         super.notifyCheckpointComplete(checkpointId);
-        commitUpToCheckpoint(endInput ? END_INPUT_CHECKPOINT_ID : checkpointId);
     }
 
     private void commitUpToCheckpoint(long checkpointId) throws Exception {
