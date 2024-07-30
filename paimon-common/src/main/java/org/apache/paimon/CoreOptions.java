@@ -62,7 +62,9 @@ import static org.apache.paimon.options.MemorySize.VALUE_256_MB;
 import static org.apache.paimon.options.description.TextElement.text;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
-/** Core options for paimon. */
+/**
+ * Core options for paimon.
+ */
 public class CoreOptions implements Serializable {
 
     public static final String DEFAULT_VALUE_SUFFIX = "default-value";
@@ -1320,6 +1322,11 @@ public class CoreOptions implements Serializable {
                     .withDescription(
                             "Whether to enable asynchronous IO writing when writing files.");
 
+    public static final ConfigOption<DistributionMode> DISTRIBUTION_MODE = key("write.append.distribute-mode")
+            .enumType(DistributionMode.class)
+            .defaultValue(DistributionMode.NONE)
+            .withDescription("Defines distribution of append table.");
+
     private final Options options;
 
     public CoreOptions(Map<String, String> options) {
@@ -2086,7 +2093,37 @@ public class CoreOptions implements Serializable {
         return options.get(METADATA_ICEBERG_COMPATIBLE);
     }
 
-    /** Specifies the merge engine for table with primary key. */
+    /**
+     * Distribution mode of unaware table.
+     */
+    public enum DistributionMode implements DescribedEnum {
+        NONE("none", "Don't shuffle rows."),
+
+        HASH("hash", "Hash distribute by partition key."),
+        ;
+
+        private final String value;
+        private final String description;
+
+        DistributionMode(String value, String description) {
+            this.value = value;
+            this.description = description;
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+
+        @Override
+        public InlineElement getDescription() {
+            return text(description);
+        }
+    }
+
+    /**
+     * Specifies the merge engine for table with primary key.
+     */
     public enum MergeEngine implements DescribedEnum {
         DEDUPLICATE("deduplicate", "De-duplicate and keep the last row."),
 
@@ -2115,7 +2152,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the startup mode for log consumer. */
+    /**
+     * Specifies the startup mode for log consumer.
+     */
     public enum StartupMode implements DescribedEnum {
         DEFAULT(
                 "default",
@@ -2195,7 +2234,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the log consistency mode for table. */
+    /**
+     * Specifies the log consistency mode for table.
+     */
     public enum LogConsistency implements DescribedEnum {
         TRANSACTIONAL(
                 "transactional",
@@ -2225,7 +2266,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the log changelog mode for table. */
+    /**
+     * Specifies the log changelog mode for table.
+     */
     public enum LogChangelogMode implements DescribedEnum {
         AUTO("auto", "Upsert for table with primary key, all for table without primary key."),
 
@@ -2256,7 +2299,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the changelog producer for table. */
+    /**
+     * Specifies the changelog producer for table.
+     */
     public enum ChangelogProducer implements DescribedEnum {
         NONE("none", "No changelog file."),
 
@@ -2289,7 +2334,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the type for streaming read. */
+    /**
+     * Specifies the type for streaming read.
+     */
     public enum StreamingReadMode implements DescribedEnum {
         LOG("log", "Read from the data of table log store."),
         FILE("file", "Read from the data of table file store.");
@@ -2332,7 +2379,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Inner stream scan mode for some internal requirements. */
+    /**
+     * Inner stream scan mode for some internal requirements.
+     */
     public enum StreamScanMode implements DescribedEnum {
         NONE("none", "No requirement."),
         COMPACT_BUCKET_TABLE("compact-bucket-table", "Compaction for traditional bucket table."),
@@ -2363,7 +2412,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies this scan type for incremental scan . */
+    /**
+     * Specifies this scan type for incremental scan .
+     */
     public enum IncrementalBetweenScanMode implements DescribedEnum {
         AUTO(
                 "auto",
@@ -2433,7 +2484,7 @@ public class CoreOptions implements Serializable {
         }
 
         if ((options.contains(INCREMENTAL_BETWEEN_TIMESTAMP)
-                        || options.contains(INCREMENTAL_BETWEEN))
+                || options.contains(INCREMENTAL_BETWEEN))
                 && !options.contains(SCAN_MODE)) {
             options.set(SCAN_MODE, StartupMode.INCREMENTAL);
         }
@@ -2470,7 +2521,9 @@ public class CoreOptions implements Serializable {
                             })
                     .collect(Collectors.toSet());
 
-    /** Specifies the sort engine for table with primary key. */
+    /**
+     * Specifies the sort engine for table with primary key.
+     */
     public enum SortEngine implements DescribedEnum {
         MIN_HEAP("min-heap", "Use min-heap for multiway sorting."),
         LOSER_TREE(
@@ -2496,7 +2549,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** The mode for tag creation. */
+    /**
+     * The mode for tag creation.
+     */
     public enum TagCreationMode implements DescribedEnum {
         NONE("none", "No automatically created tags."),
         PROCESS_TIME(
@@ -2527,7 +2582,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** The period format options for tag creation. */
+    /**
+     * The period format options for tag creation.
+     */
     public enum TagPeriodFormatter implements DescribedEnum {
         WITH_DASHES("with_dashes", "Dates and hours with dashes, e.g., 'yyyy-MM-dd HH'"),
         WITHOUT_DASHES("without_dashes", "Dates and hours without dashes, e.g., 'yyyyMMdd HH'");
@@ -2551,7 +2608,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** The period for tag creation. */
+    /**
+     * The period for tag creation.
+     */
     public enum TagCreationPeriod implements DescribedEnum {
         DAILY("daily", "Generate a tag every day."),
         HOURLY("hourly", "Generate a tag every hour."),
@@ -2576,7 +2635,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** The execution mode for expire. */
+    /**
+     * The execution mode for expire.
+     */
     public enum ExpireExecutionMode implements DescribedEnum {
         SYNC(
                 "sync",
@@ -2604,13 +2665,17 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies range strategy. */
+    /**
+     * Specifies range strategy.
+     */
     public enum RangeStrategy {
         SIZE,
         QUANTITY
     }
 
-    /** Specifies the log consistency mode for table. */
+    /**
+     * Specifies the log consistency mode for table.
+     */
     public enum ConsumerMode implements DescribedEnum {
         EXACTLY_ONCE(
                 "exactly-once",
@@ -2639,7 +2704,9 @@ public class CoreOptions implements Serializable {
         }
     }
 
-    /** Specifies the expiration strategy for partition expiration. */
+    /**
+     * Specifies the expiration strategy for partition expiration.
+     */
     public enum PartitionExpireStrategy implements DescribedEnum {
         VALUES_TIME(
                 "values-time",

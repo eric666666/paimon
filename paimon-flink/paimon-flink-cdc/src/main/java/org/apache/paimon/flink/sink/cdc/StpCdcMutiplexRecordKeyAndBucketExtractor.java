@@ -32,7 +32,7 @@ import java.util.stream.IntStream;
 
 import static org.apache.paimon.flink.sink.cdc.CdcRecordUtils.projectAsInsert;
 
-/** {@link KeyAndBucketExtractor} for {@link CdcRecord}. */
+/** {@link KeyAndBucketExtractor} for {@link CdcMultiplexRecord}. */
 public class StpCdcMutiplexRecordKeyAndBucketExtractor
         implements KeyAndBucketExtractor<CdcMultiplexRecord> {
 

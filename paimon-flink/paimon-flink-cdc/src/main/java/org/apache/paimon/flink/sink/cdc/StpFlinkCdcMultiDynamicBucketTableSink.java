@@ -282,14 +282,14 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             KeyAndBucketExtractor<CdcMultiplexRecord> extractor = extractors.get(identifier);
 
             extractor.setRecord(record);
-            int partitionHash = extractor.partition().hashCode();
+            int tableAndPartitionHash = extractor.partition().hashCode() + identifier.hashCode();
             int keyHash = extractor.trimmedPrimaryKey().hashCode();
-            return computeAssigner(partitionHash, keyHash, numChannels, numAssigners);
+            return computeAssigner(tableAndPartitionHash, keyHash, numChannels, numAssigners);
         }
 
         @Override
         public String toString() {
-            return "shuffle by key hash";
+            return "shuffle by key hash and table partition hash";
         }
     }
 
