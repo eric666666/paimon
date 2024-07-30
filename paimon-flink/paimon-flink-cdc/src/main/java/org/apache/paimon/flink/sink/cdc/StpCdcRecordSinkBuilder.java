@@ -111,6 +111,7 @@ public class StpCdcRecordSinkBuilder implements Serializable {
         Preconditions.checkNotNull(input);
         Preconditions.checkNotNull(parserFactory);
         Preconditions.checkNotNull(catalogLoader);
+        Preconditions.checkNotNull(commitUser);
 
         buildCombinedCdcSink();
     }
