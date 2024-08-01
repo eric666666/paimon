@@ -39,16 +39,21 @@ import java.io.IOException;
 import java.util.List;
 
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY_FACTION;
 import static org.apache.paimon.flink.utils.ManagedMemoryUtils.computeManagedMemory;
 
-/** Prepare commit operator to emit {@link Committable}s. */
+/**
+ * Prepare commit operator to emit {@link Committable}s.
+ */
 public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOperator<OUT>
         implements OneInputStreamOperator<IN, OUT>, BoundedOneInput {
 
     private static final long serialVersionUID = 1L;
 
-    @Nullable protected transient MemorySegmentPool memoryPool;
-    @Nullable private transient MemorySegmentAllocator memoryAllocator;
+    @Nullable
+    protected transient MemorySegmentPool memoryPool;
+    @Nullable
+    private transient MemorySegmentAllocator memoryAllocator;
     protected final Options options;
     private boolean endOfInput = false;
 
@@ -66,9 +71,12 @@ public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOpera
         if (options.get(SINK_USE_MANAGED_MEMORY)) {
             MemoryManager memoryManager = containingTask.getEnvironment().getMemoryManager();
             memoryAllocator = new MemorySegmentAllocator(containingTask, memoryManager);
+            Double fraction = options.get(SINK_USE_MANAGED_MEMORY_FACTION);
+            long maxMemory = computeManagedMemory(this, fraction);
+            LOG.info("Use managed memory for committer, max memory: {}", maxMemory);
             memoryPool =
                     new FlinkMemorySegmentPool(
-                            computeManagedMemory(this),
+                            maxMemory,
                             memoryManager.getPageSize(),
                             memoryAllocator);
         }

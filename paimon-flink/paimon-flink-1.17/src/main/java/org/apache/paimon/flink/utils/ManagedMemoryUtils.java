@@ -35,6 +35,13 @@ public class ManagedMemoryUtils {
                         ManagedMemoryUseCase.OPERATOR, memorySize.getMebiBytes());
     }
 
+    public static long computeManagedMemory(AbstractStreamOperator<?> operator, double fraction) {
+        final Environment environment = operator.getContainingTask().getEnvironment();
+        return environment
+                .getMemoryManager()
+                .computeMemorySize(fraction);
+    }
+
     public static long computeManagedMemory(AbstractStreamOperator<?> operator) {
         final Environment environment = operator.getContainingTask().getEnvironment();
         return environment

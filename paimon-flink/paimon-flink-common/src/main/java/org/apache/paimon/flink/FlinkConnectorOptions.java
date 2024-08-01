@@ -39,7 +39,9 @@ import static org.apache.paimon.CoreOptions.STREAMING_READ_MODE;
 import static org.apache.paimon.options.ConfigOptions.key;
 import static org.apache.paimon.options.description.TextElement.text;
 
-/** Options for flink connector. */
+/**
+ * Options for flink connector.
+ */
 public class FlinkConnectorOptions {
 
     public static final String NONE = "none";
@@ -206,6 +208,14 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "If true, flink sink will use managed memory for merge tree; otherwise, "
                                     + "it will create an independent memory allocator.");
+
+    /* The fraction of managed memory for write buffer. */
+    public static final ConfigOption<Double> SINK_USE_MANAGED_MEMORY_FACTION =
+            ConfigOptions.key("sink.use-managed-memory.writer-fraction")
+                    .doubleType()
+                    .defaultValue(1.0)
+                    .withDescription(
+                            "The fraction of managed memory for write buffer.");
 
     public static final ConfigOption<Boolean> SCAN_REMOVE_NORMALIZE =
             key("scan.remove-normalize")
@@ -428,16 +438,24 @@ public class FlinkConnectorOptions {
         return list;
     }
 
-    /** The mode of lookup cache. */
+    /**
+     * The mode of lookup cache.
+     */
     public enum LookupCacheMode {
-        /** Auto mode, try to use partial mode. */
+        /**
+         * Auto mode, try to use partial mode.
+         */
         AUTO,
 
-        /** Use full caching mode. */
+        /**
+         * Use full caching mode.
+         */
         FULL
     }
 
-    /** Watermark emit strategy for scan. */
+    /**
+     * Watermark emit strategy for scan.
+     */
     public enum WatermarkEmitStrategy implements DescribedEnum {
         ON_PERIODIC(
                 "on-periodic",
