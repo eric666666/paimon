@@ -25,7 +25,9 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 
-/** Utils for using Flink managed memory. */
+/**
+ * Utils for using Flink managed memory.
+ */
 public class ManagedMemoryUtils {
 
     public static void declareManagedMemory(DataStream<?> dataStream, MemorySize memorySize) {
@@ -33,6 +35,13 @@ public class ManagedMemoryUtils {
                 .getTransformation()
                 .declareManagedMemoryUseCaseAtOperatorScope(
                         ManagedMemoryUseCase.OPERATOR, memorySize.getMebiBytes());
+    }
+
+    public static long computeManagedMemory(AbstractStreamOperator<?> operator, double fraction) {
+        final Environment environment = operator.getContainingTask().getEnvironment();
+        return environment
+                .getMemoryManager()
+                .computeMemorySize(fraction);
     }
 
     public static long computeManagedMemory(AbstractStreamOperator<?> operator) {

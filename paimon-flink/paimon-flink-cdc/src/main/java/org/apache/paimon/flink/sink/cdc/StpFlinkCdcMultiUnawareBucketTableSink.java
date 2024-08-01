@@ -55,6 +55,7 @@ import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -229,7 +230,7 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
             }
             KeyAndBucketExtractor<CdcMultiplexRecord> extractor = extractors.get(identifier);
             extractor.setRecord(record);
-            int tableAndPartitionHash = extractor.partition().hashCode() + identifier.hashCode();
+            int tableAndPartitionHash = Objects.hash(identifier, extractor.partition());
             if (distributionMode == CoreOptions.DistributionMode.HASH) {
                 return Math.abs(tableAndPartitionHash % numChannels);
             } else {

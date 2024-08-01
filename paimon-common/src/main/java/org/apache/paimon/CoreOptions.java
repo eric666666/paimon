@@ -1979,6 +1979,7 @@ public class CoreOptions implements Serializable {
      */
     public enum DistributionMode implements DescribedEnum {
         NONE("none", "Don't shuffle rows."),
+        RANDOM("random", "Shuffle by random."),
 
         HASH("hash", "Hash distribute by partition key."),
         ;
