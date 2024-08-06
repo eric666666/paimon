@@ -61,6 +61,7 @@ import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -137,16 +138,16 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         // writer --> committer
 
         // 1. shuffle by key hash
-        Integer assignerParallelism = input.getParallelism();
+        int assignerParallelism = input.getParallelism();
 
-        Integer numAssigners = tableOption.getInteger(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), 1);
+        Integer numAssigners = tableOption.getInteger(CoreOptions.DYNAMIC_BUCKET_INITIAL_BUCKETS.key(), assignerParallelism);
         DataStream<CdcMultiplexRecord> partitionByKeyHash =
                 partition(input, assignerChannelComputer(numAssigners), assignerParallelism);
 
         // 2. bucket-assigner
         StpMultiTableHashBucketAssignerOperator assignerOperator =
                 new StpMultiTableHashBucketAssignerOperator(
-                        commitUser, catalogLoader, numAssigners, extractorFunction(), false, -1);
+                        commitUser, catalogLoader, numAssigners, extractorFunction(), false);
         TupleTypeInfo<Tuple2<CdcMultiplexRecord, Integer>> rowWithBucketType =
                 new TupleTypeInfo<>(partitionByKeyHash.getType(), BasicTypeInfo.INT_TYPE_INFO);
         DataStream<Tuple2<CdcMultiplexRecord, Integer>> bucketAssigned =
@@ -282,7 +283,7 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
             KeyAndBucketExtractor<CdcMultiplexRecord> extractor = extractors.get(identifier);
 
             extractor.setRecord(record);
-            int tableAndPartitionHash = extractor.partition().hashCode() + identifier.hashCode();
+            int tableAndPartitionHash = Objects.hash(extractor.partition(), identifier);
             int keyHash = extractor.trimmedPrimaryKey().hashCode();
             return computeAssigner(tableAndPartitionHash, keyHash, numChannels, numAssigners);
         }

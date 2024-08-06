@@ -61,8 +61,7 @@ public class StpMultiTableHashBucketAssignerOperator
     private final Map<Identifier, PartitionKeyExtractor<CdcMultiplexRecord>> extractors =
             new HashMap<>();
     private final Catalog.Loader catalogLoader;
-    private  transient Catalog catalog;
-    private final long indexExpireTimestamp;
+    private transient Catalog catalog;
 
     private int numberTasks;
     private int taskId;
@@ -74,14 +73,12 @@ public class StpMultiTableHashBucketAssignerOperator
             Integer numAssigners,
             SerializableFunction<TableSchema, PartitionKeyExtractor<CdcMultiplexRecord>>
                     extractorFunction,
-            boolean overwrite,
-            long indexExpireTimestamp) {
+            boolean overwrite) {
         this.initialCommitUser = commitUser;
         this.catalogLoader = catalogLoader;
         this.numAssigners = numAssigners;
         this.extractorFunction = extractorFunction;
         this.overwrite = overwrite;
-        this.indexExpireTimestamp = indexExpireTimestamp;
     }
 
     @Override
@@ -118,7 +115,7 @@ public class StpMultiTableHashBucketAssignerOperator
                             MathUtils.min(numAssigners, numberTasks),
                             taskId,
                             targetRowNum,
-                            indexExpireTimestamp);
+                            identifier);
             PartitionKeyExtractor<CdcMultiplexRecord> extractor =
                     extractorFunction.apply(table.schema());
 
