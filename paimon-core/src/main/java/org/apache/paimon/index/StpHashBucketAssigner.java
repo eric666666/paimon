@@ -20,21 +20,18 @@ package org.apache.paimon.index;
 
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.VisibleForTesting;
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.utils.SnapshotManager;
 
-import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
-import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
-
-import org.checkerframework.checker.nullness.qual.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
 
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
@@ -53,8 +50,8 @@ public class StpHashBucketAssigner implements BucketAssigner {
     private final int assignId;
     private final long targetBucketRowNumber;
 
-    private final Cache<BinaryRow, PartitionIndex> partitionIndex;
-    private final long indexExpireTimestamp;
+    private final Map<BinaryRow, PartitionIndex> partitionIndex;
+    private final Identifier identifier;
 
     public StpHashBucketAssigner(
             SnapshotManager snapshotManager,
@@ -64,7 +61,7 @@ public class StpHashBucketAssigner implements BucketAssigner {
             int numAssigners,
             int assignId,
             long targetBucketRowNumber,
-            long indexExpireTimestamp) {
+            Identifier identifier) {
         this.snapshotManager = snapshotManager;
         this.commitUser = commitUser;
         this.indexFileHandler = indexFileHandler;
@@ -72,18 +69,8 @@ public class StpHashBucketAssigner implements BucketAssigner {
         this.numAssigners = numAssigners;
         this.assignId = assignId;
         this.targetBucketRowNumber = targetBucketRowNumber;
-        this.indexExpireTimestamp = indexExpireTimestamp;
-        Caffeine<Object, Object> builder = Caffeine.newBuilder();
-        if (indexExpireTimestamp > 0) {
-            builder.expireAfterAccess(indexExpireTimestamp, TimeUnit.MILLISECONDS);
-        }
-        this.partitionIndex = builder
-                .removalListener((o, o2, removalCause) -> {
-                    if (removalCause.wasEvicted()) {
-                        LOG.info("Partition {} expire.", o);
-                    }
-                })
-                .build();
+        this.partitionIndex = new HashMap<>();
+        this.identifier = identifier;
     }
 
     /**
@@ -91,18 +78,18 @@ public class StpHashBucketAssigner implements BucketAssigner {
      */
     @Override
     public int assign(BinaryRow partition, int hash) {
-        int partitionHash = partition.hashCode();
-        int recordAssignId = computeAssignId(partitionHash, hash);
+        int tableAndPartitionHash = Objects.hash(partition, identifier);
+        int recordAssignId = computeAssignId(tableAndPartitionHash, hash);
         checkArgument(
                 recordAssignId == assignId,
                 "This is a bug, record assign id %s should equal to assign id %s.",
                 recordAssignId,
                 assignId);
 
-        PartitionIndex index = this.partitionIndex.getIfPresent(partition);
+        PartitionIndex index = this.partitionIndex.get(partition);
         if (index == null) {
             partition = partition.copy();
-            index = loadIndex(partition, partitionHash);
+            index = loadIndex(partition, tableAndPartitionHash);
             this.partitionIndex.put(partition, index);
         }
 
@@ -120,8 +107,7 @@ public class StpHashBucketAssigner implements BucketAssigner {
     @Override
     public void prepareCommit(long commitIdentifier) {
         long latestCommittedIdentifier;
-        ConcurrentMap<@NonNull BinaryRow, @NonNull PartitionIndex> map = partitionIndex.asMap();
-        if (map.values().stream()
+        if (partitionIndex.values().stream()
                 .mapToLong(i -> i.lastAccessedCommitIdentifier)
                 .max()
                 .orElse(Long.MIN_VALUE)
@@ -143,7 +129,7 @@ public class StpHashBucketAssigner implements BucketAssigner {
         }
 
         Iterator<Map.Entry<BinaryRow, PartitionIndex>> iterator =
-                map.entrySet().iterator();
+                partitionIndex.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<BinaryRow, PartitionIndex> entry = iterator.next();
             BinaryRow partition = entry.getKey();
@@ -176,7 +162,7 @@ public class StpHashBucketAssigner implements BucketAssigner {
 
     @VisibleForTesting
     Set<BinaryRow> currentPartitions() {
-        return partitionIndex.asMap().keySet();
+        return partitionIndex.keySet();
     }
 
     private int computeAssignId(int partitionHash, int keyHash) {
