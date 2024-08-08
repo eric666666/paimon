@@ -108,10 +108,9 @@ public class CdcRecordUtils {
                 genericRow.setField(idx, TypeUtils.castFromCdcValueString(value, type));
             } catch (Exception e) {
                 LOG.info(
-                        "Failed to convert value "
-                                + value
-                                + " to type "
-                                + type
+                        "Failed to convert record:" + record + ",field index: " + idx
+                                + ", value: " + value
+                                + " to type " + type
                                 + " with table " + fullName + ". Waiting for schema update.",
                         e);
                 return Optional.empty();
