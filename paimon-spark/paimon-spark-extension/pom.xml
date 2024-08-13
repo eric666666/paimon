@@ -6,14 +6,15 @@
     <parent>
         <groupId>org.apache.paimon</groupId>
         <artifactId>paimon-spark</artifactId>
-        <version>0.9-SNAPSHOT</version>
+        <version>sl-0.9-SNAPSHOT</version>
     </parent>
 
     <artifactId>paimon-spark-extension</artifactId>
-    <version>sl-0.9-SNAPSHOT</version>
+    <name>Paimon : Spark : Extension</name>
 
     <properties>
         <spark.version>3.3.4</spark.version>
+        <spark-main.version>3.3</spark-main.version>
         <iceberg.version>1.5.1</iceberg.version>
     </properties>
 
@@ -21,7 +22,7 @@
 
         <dependency>
             <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-spark-3.3_2.12</artifactId>
+            <artifactId>iceberg-spark-${spark-main.version}_2.12</artifactId>
             <version>${iceberg.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -209,6 +210,7 @@
         </dependency>
     </dependencies>
 
+
     <build>
         <pluginManagement>
             <plugins>
@@ -230,7 +232,21 @@
                 </plugin>
             </plugins>
         </pluginManagement>
+
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>prepare-test-jar</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
@@ -257,6 +273,23 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-maven-plugin</artifactId>
+                <version>${antlr4.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>antlr4</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <visitor>true</visitor>
+                    <listener>true</listener>
+                    <sourceDirectory>src/main/antlr4</sourceDirectory>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.scalatest</groupId>
