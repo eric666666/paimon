@@ -27,6 +27,7 @@ import org.apache.paimon.index.StpHashBucketAssigner;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.PartitionKeyExtractor;
+import org.apache.paimon.utils.JsonSerdeUtil;
 import org.apache.paimon.utils.MathUtils;
 import org.apache.paimon.utils.SerializableFunction;
 
@@ -100,34 +101,38 @@ public class StpMultiTableHashBucketAssignerOperator
     @Override
     public void processElement(StreamRecord<CdcMultiplexRecord> streamRecord) throws Exception {
         CdcMultiplexRecord value = streamRecord.getValue();
-        Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
-        FileStoreTable table = TableSelector.getTable(tables, identifier, value, catalog);
-        if (!this.assignerHolder.containsKey(identifier)) {
-            long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
-            BucketAssigner assigner =
-                    overwrite
-                            ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
-                            : new StpHashBucketAssigner(
-                            table.snapshotManager(),
-                            commitUser,
-                            table.store().newIndexFileHandler(),
-                            numberTasks,
-                            MathUtils.min(numAssigners, numberTasks),
-                            taskId,
-                            targetRowNum,
-                            identifier);
-            PartitionKeyExtractor<CdcMultiplexRecord> extractor =
-                    extractorFunction.apply(table.schema());
+        try {
+            Identifier identifier = Identifier.create(value.databaseName(), value.tableName());
+            FileStoreTable table = TableSelector.getTable(tables, identifier, value, catalog);
+            if (!this.assignerHolder.containsKey(identifier)) {
+                long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
+                BucketAssigner assigner =
+                        overwrite
+                                ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
+                                : new StpHashBucketAssigner(
+                                table.snapshotManager(),
+                                commitUser,
+                                table.store().newIndexFileHandler(),
+                                numberTasks,
+                                MathUtils.min(numAssigners, numberTasks),
+                                taskId,
+                                targetRowNum,
+                                identifier);
+                PartitionKeyExtractor<CdcMultiplexRecord> extractor =
+                        extractorFunction.apply(table.schema());
 
-            this.assignerHolder.put(identifier, assigner);
-            this.extractors.put(identifier, extractor);
+                this.assignerHolder.put(identifier, assigner);
+                this.extractors.put(identifier, extractor);
+            }
+            BucketAssigner assigner = this.assignerHolder.get(identifier);
+            PartitionKeyExtractor<CdcMultiplexRecord> extractor = this.extractors.get(identifier);
+            int bucket =
+                    assigner.assign(
+                            extractor.partition(value), extractor.trimmedPrimaryKey(value).hashCode());
+            output.collect(new StreamRecord<>(new Tuple2<>(value, bucket)));
+        } catch (Exception e) {
+            throw new RuntimeException("Error when write value:" + JsonSerdeUtil.toJson(value), e);
         }
-        BucketAssigner assigner = this.assignerHolder.get(identifier);
-        PartitionKeyExtractor<CdcMultiplexRecord> extractor = this.extractors.get(identifier);
-        int bucket =
-                assigner.assign(
-                        extractor.partition(value), extractor.trimmedPrimaryKey(value).hashCode());
-        output.collect(new StreamRecord<>(new Tuple2<>(value, bucket)));
     }
 
     @Override
