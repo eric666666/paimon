@@ -33,6 +33,7 @@ import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.ExecutorThreadFactory;
+import org.apache.paimon.utils.JsonSerdeUtil;
 
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
@@ -165,7 +166,7 @@ public class CdcRecordStoreMultiWriteOperator
         try {
             write.write(optionalConverted.get());
         } catch (Exception e) {
-            throw new IOException(e);
+            throw new IOException("Error when write value" + JsonSerdeUtil.toJson(record), e);
         }
     }
 
