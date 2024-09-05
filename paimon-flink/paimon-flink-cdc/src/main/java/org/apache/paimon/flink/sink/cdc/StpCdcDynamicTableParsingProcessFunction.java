@@ -154,4 +154,12 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
     private CdcMultiplexRecord wrapRecord(String databaseName, String tableName, CdcRecord record) {
         return CdcMultiplexRecord.fromCdcRecord(databaseName, tableName, record);
     }
+
+    @Override
+    public void close() throws Exception {
+        if (catalog != null) {
+            catalog.close();
+            catalog = null;
+        }
+    }
 }

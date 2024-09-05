@@ -198,6 +198,10 @@ public class StpCdcRecordStoreDynamicBucketMultiWriteOperator
         if (compactExecutor != null) {
             compactExecutor.shutdownNow();
         }
+        if (catalog != null) {
+            catalog.close();
+            catalog = null;
+        }
     }
 
     @Override
