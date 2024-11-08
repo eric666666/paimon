@@ -234,6 +234,8 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
             int tableAndPartitionHash = Objects.hash(identifier, extractor.partition());
             if (distributionMode == CoreOptions.DistributionMode.HASH) {
                 return Math.abs(tableAndPartitionHash % numChannels);
+            } else if (distributionMode == CoreOptions.DistributionMode.RANDOM) {
+                return (int) (Math.random() * numChannels);
             } else {
                 throw new UnsupportedOperationException();
             }
@@ -245,7 +247,7 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
         @Override
         public String toString() {
-            return "shuffle by table and partition hash";
+            return "Distribute by " + distributionMode.name().toLowerCase();
         }
     }
 }
