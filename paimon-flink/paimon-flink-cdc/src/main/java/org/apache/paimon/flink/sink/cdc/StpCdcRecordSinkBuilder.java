@@ -151,7 +151,7 @@ public class StpCdcRecordSinkBuilder implements Serializable {
                         parallelism);
 
         if (!excludeBucketModes.contains(BucketMode.HASH_FIXED)) {
-            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining, commitUser)
+            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining, commitUser, tableOption)
                     .sinkFrom(partitioned);
         }
 

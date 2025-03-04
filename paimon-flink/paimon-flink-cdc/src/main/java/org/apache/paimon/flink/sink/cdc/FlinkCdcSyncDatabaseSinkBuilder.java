@@ -169,7 +169,7 @@ public class FlinkCdcSyncDatabaseSinkBuilder<T> {
 
         FlinkCdcMultiTableSink sink =
                 new FlinkCdcMultiTableSink(
-                        catalogLoader, committerCpu, committerMemory, commitChaining, commitUser);
+                        catalogLoader, committerCpu, committerMemory, commitChaining, commitUser, new Options());
         sink.sinkFrom(partitioned);
     }
 

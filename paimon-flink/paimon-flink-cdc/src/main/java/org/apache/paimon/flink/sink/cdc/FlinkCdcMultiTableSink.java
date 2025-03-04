@@ -47,6 +47,7 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Optional;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
@@ -67,18 +68,21 @@ public class FlinkCdcMultiTableSink implements Serializable {
     private final MemorySize commitHeapMemory;
     private final boolean commitChaining;
     private final String commitUser;
+    private final Options tableOption;
 
     public FlinkCdcMultiTableSink(
             Catalog.Loader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
             boolean commitChaining,
-            String commitUser) {
+            String commitUser,
+            Options tableOption) {
         this.catalogLoader = catalogLoader;
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitChaining = commitChaining;
         this.commitUser = commitUser;
+        this.tableOption = tableOption;
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -152,7 +156,7 @@ public class FlinkCdcMultiTableSink implements Serializable {
     protected OneInputStreamOperator<CdcMultiplexRecord, MultiTableCommittable> createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
         return new CdcRecordStoreMultiWriteOperator(
-                catalogLoader, writeProvider, commitUser, new Options());
+                catalogLoader, writeProvider, commitUser, Optional.ofNullable(this.tableOption).orElse(new Options()));
     }
 
     // Table committers are dynamically created at runtime

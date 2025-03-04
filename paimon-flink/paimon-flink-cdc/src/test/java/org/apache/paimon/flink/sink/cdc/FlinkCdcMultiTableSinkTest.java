@@ -61,7 +61,7 @@ public class FlinkCdcMultiTableSinkTest {
                         FlinkConnectorOptions.SINK_COMMITTER_CPU.defaultValue(),
                         null,
                         true,
-                        UUID.randomUUID().toString());
+                        UUID.randomUUID().toString(), new Options());
         DataStreamSink<?> dataStreamSink = sink.sinkFrom(input);
 
         // check the transformation graph
