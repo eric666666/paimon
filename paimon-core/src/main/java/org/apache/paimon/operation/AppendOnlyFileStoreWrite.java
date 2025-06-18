@@ -21,25 +21,20 @@ package org.apache.paimon.operation;
 import org.apache.paimon.AppendOnlyFileStore;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.AppendOnlyWriter;
-import org.apache.paimon.append.BucketedAppendCompactManager;
 import org.apache.paimon.compact.CompactManager;
-import org.apache.paimon.compact.NoopCompactManager;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
-import org.apache.paimon.deletionvectors.append.AppendDeletionFileMaintainer;
 import org.apache.paimon.fileindex.FileIndexOptions;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.io.BundleRecords;
 import org.apache.paimon.io.DataFileMeta;
-import org.apache.paimon.io.DataFilePathFactory;
 import org.apache.paimon.io.RowDataRollingFileWriter;
 import org.apache.paimon.manifest.FileSource;
-import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
-import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExceptionUtils;
@@ -56,14 +51,16 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.stream.Collectors;
+import java.util.function.Function;
 
 /** {@link FileStoreWrite} for {@link AppendOnlyFileStore}. */
-public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> {
+public abstract class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow>
+        implements BundleFileStoreWriter {
 
     private static final Logger LOG = LoggerFactory.getLogger(AppendOnlyFileStoreWrite.class);
 
@@ -73,74 +70,39 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
     private final RowType rowType;
     private final FileFormat fileFormat;
     private final FileStorePathFactory pathFactory;
-    private final long targetFileSize;
-    private final int compactionMinFileNum;
-    private final int compactionMaxFileNum;
-    private final boolean commitForceCompact;
-    private final String fileCompression;
-    private final String spillCompression;
-    private final boolean useWriteBuffer;
-    private final boolean spillable;
-    private final MemorySize maxDiskSize;
+
     private final SimpleColStatsCollector.Factory[] statsCollectors;
     private final FileIndexOptions fileIndexOptions;
-    private final BucketMode bucketMode;
     private boolean forceBufferSpill = false;
-    private boolean skipCompaction;
 
     public AppendOnlyFileStoreWrite(
             FileIO fileIO,
             RawFileSplitRead read,
             long schemaId,
-            String commitUser,
             RowType rowType,
+            RowType partitionType,
             FileStorePathFactory pathFactory,
             SnapshotManager snapshotManager,
             FileStoreScan scan,
             CoreOptions options,
-            BucketMode bucketMode,
-            @Nullable DeletionVectorsMaintainer.Factory deletionVectorsMaintainerFactory,
+            @Nullable DeletionVectorsMaintainer.Factory dvMaintainerFactory,
             String tableName) {
-        super(
-                commitUser,
-                snapshotManager,
-                scan,
-                options,
-                null,
-                deletionVectorsMaintainerFactory,
-                tableName);
+        super(snapshotManager, scan, options, partitionType, null, dvMaintainerFactory, tableName);
         this.fileIO = fileIO;
         this.read = read;
         this.schemaId = schemaId;
         this.rowType = rowType;
         this.fileFormat = options.fileFormat();
         this.pathFactory = pathFactory;
-        this.bucketMode = bucketMode;
-        this.targetFileSize = options.targetFileSize(false);
-        this.compactionMinFileNum = options.compactionMinFileNum();
-        this.compactionMaxFileNum = options.compactionMaxFileNum().orElse(5);
-        this.commitForceCompact = options.commitForceCompact();
-        // AppendOnlyFileStoreWrite is sensitive with bucket mode. It will act difference in
-        // unaware-bucket mode (no compaction and force empty-writer).
-        if (bucketMode == BucketMode.BUCKET_UNAWARE) {
-            super.withIgnorePreviousFiles(true);
-            skipCompaction = true;
-        } else {
-            this.skipCompaction = options.writeOnly();
-        }
-        this.fileCompression = options.fileCompression();
-        this.spillCompression = options.spillCompression();
-        this.useWriteBuffer = options.useWriteBufferForAppend();
-        this.spillable = options.writeBufferSpillable(fileIO.isObjectStore(), isStreamingMode);
-        this.maxDiskSize = options.writeBufferSpillDiskSize();
+
         this.statsCollectors =
-                StatsCollectorFactories.createStatsFactories(options, rowType.getFieldNames());
+                StatsCollectorFactories.createStatsFactories(
+                        options.statsMode(), options, rowType.getFieldNames());
         this.fileIndexOptions = options.indexColumnsOptions();
     }
 
     @Override
     protected RecordWriter<InternalRow> createWriter(
-            @Nullable Long snapshotId,
             BinaryRow partition,
             int bucket,
             List<DataFileMeta> restoredFiles,
@@ -148,65 +110,43 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
             @Nullable CommitIncrement restoreIncrement,
             ExecutorService compactExecutor,
             @Nullable DeletionVectorsMaintainer dvMaintainer) {
-        AppendDeletionFileMaintainer dvIndexFileMaintainer;
-        if (!skipCompaction && dvMaintainer != null) {
-            dvIndexFileMaintainer =
-                    AppendDeletionFileMaintainer.forBucketedAppend(
-                            dvMaintainer.indexFileHandler(), snapshotId, partition, bucket);
-        } else {
-            dvIndexFileMaintainer = null;
-        }
-        // let writer and compact manager hold the same reference
-        // and make restore files mutable to update
-        DataFilePathFactory factory = pathFactory.createDataFilePathFactory(partition, bucket);
-        CompactManager compactManager =
-                skipCompaction
-                        ? new NoopCompactManager()
-                        : new BucketedAppendCompactManager(
-                                compactExecutor,
-                                restoredFiles,
-                                dvIndexFileMaintainer,
-                                compactionMinFileNum,
-                                compactionMaxFileNum,
-                                targetFileSize,
-                                toCompact ->
-                                        compactRewrite(
-                                                partition,
-                                                bucket,
-                                                dvIndexFileMaintainer,
-                                                toCompact),
-                                compactionMetrics == null
-                                        ? null
-                                        : compactionMetrics.createReporter(partition, bucket));
-
         return new AppendOnlyWriter(
                 fileIO,
                 ioManager,
                 schemaId,
                 fileFormat,
-                targetFileSize,
+                options.targetFileSize(false),
                 rowType,
                 restoredMaxSeqNumber,
-                compactManager,
+                getCompactManager(partition, bucket, restoredFiles, compactExecutor, dvMaintainer),
                 // it is only for new files, no dv
                 files -> createFilesIterator(partition, bucket, files, null),
-                commitForceCompact,
+                options.commitForceCompact(),
                 pathFactory.createDataFilePathFactory(partition, bucket),
                 restoreIncrement,
-                useWriteBuffer || forceBufferSpill,
-                spillable || forceBufferSpill,
-                fileCompression,
-                spillCompression,
+                options.useWriteBufferForAppend() || forceBufferSpill,
+                options.writeBufferSpillable(fileIO.isObjectStore(), isStreamingMode, false)
+                        || forceBufferSpill,
+                options.fileCompression(),
+                options.spillCompressOptions(),
                 statsCollectors,
-                maxDiskSize,
+                options.writeBufferSpillDiskSize(),
                 fileIndexOptions,
-                options.asyncFileWrite());
+                options.asyncFileWrite(),
+                options.statsDenseStore());
     }
+
+    protected abstract CompactManager getCompactManager(
+            BinaryRow partition,
+            int bucket,
+            List<DataFileMeta> restoredFiles,
+            ExecutorService compactExecutor,
+            @Nullable DeletionVectorsMaintainer dvMaintainer);
 
     public List<DataFileMeta> compactRewrite(
             BinaryRow partition,
             int bucket,
-            @Nullable AppendDeletionFileMaintainer dvIndexFileMaintainer,
+            @Nullable Function<String, DeletionVector> dvFactory,
             List<DataFileMeta> toCompact)
             throws Exception {
         if (toCompact.isEmpty()) {
@@ -215,22 +155,14 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
         Exception collectedExceptions = null;
         RowDataRollingFileWriter rewriter =
                 createRollingFileWriter(
-                        partition,
-                        bucket,
-                        new LongCounter(toCompact.get(0).minSequenceNumber()),
-                        FileSource.COMPACT);
-        List<IOExceptionSupplier<DeletionVector>> dvFactories =
-                dvIndexFileMaintainer == null
-                        ? null
-                        : toCompact.stream()
-                                .map(
-                                        f ->
-                                                (IOExceptionSupplier<DeletionVector>)
-                                                        () ->
-                                                                dvIndexFileMaintainer
-                                                                        .getDeletionVector(
-                                                                                f.fileName()))
-                                .collect(Collectors.toList());
+                        partition, bucket, new LongCounter(toCompact.get(0).minSequenceNumber()));
+        List<IOExceptionSupplier<DeletionVector>> dvFactories = null;
+        if (dvFactory != null) {
+            dvFactories = new ArrayList<>(toCompact.size());
+            for (DataFileMeta file : toCompact) {
+                dvFactories.add(() -> dvFactory.apply(file.fileName()));
+            }
+        }
         try {
             rewriter.write(createFilesIterator(partition, bucket, toCompact, dvFactories));
         } catch (Exception e) {
@@ -249,20 +181,21 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
     }
 
     private RowDataRollingFileWriter createRollingFileWriter(
-            BinaryRow partition, int bucket, LongCounter seqNumCounter, FileSource fileSource) {
+            BinaryRow partition, int bucket, LongCounter seqNumCounter) {
         return new RowDataRollingFileWriter(
                 fileIO,
                 schemaId,
                 fileFormat,
-                targetFileSize,
+                options.targetFileSize(false),
                 rowType,
                 pathFactory.createDataFilePathFactory(partition, bucket),
                 seqNumCounter,
-                fileCompression,
+                options.fileCompression(),
                 statsCollectors,
                 fileIndexOptions,
-                fileSource,
-                options.asyncFileWrite());
+                FileSource.COMPACT,
+                options.asyncFileWrite(),
+                options.statsDenseStore());
     }
 
     private RecordReaderIterator<InternalRow> createFilesIterator(
@@ -275,14 +208,11 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
     }
 
     @Override
-    public void withIgnorePreviousFiles(boolean ignorePrevious) {
-        // in unaware bucket mode, we need all writers to be empty
-        super.withIgnorePreviousFiles(ignorePrevious || bucketMode == BucketMode.BUCKET_UNAWARE);
-    }
-
-    @Override
     protected void forceBufferSpill() throws Exception {
         if (ioManager == null) {
+            return;
+        }
+        if (forceBufferSpill) {
             return;
         }
         forceBufferSpill = true;
@@ -294,5 +224,12 @@ public class AppendOnlyFileStoreWrite extends MemoryFileStoreWrite<InternalRow> 
                 ((AppendOnlyWriter) writerContainer.writer).toBufferedWriter();
             }
         }
+    }
+
+    @Override
+    public void writeBundle(BinaryRow partition, int bucket, BundleRecords bundle)
+            throws Exception {
+        WriterContainer<InternalRow> container = getWriterWrapper(partition, bucket);
+        ((AppendOnlyWriter) container.writer).writeBundle(bundle);
     }
 }

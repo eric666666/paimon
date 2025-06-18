@@ -27,6 +27,12 @@ under the License.
     </thead>
     <tbody>
         <tr>
+            <td><h5>changelog.precommit-compact.thread-num</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>Integer</td>
+            <td>Maximum number of threads to copy bytes from small changelog files. By default is the number of processors available to the Java virtual machine.</td>
+        </tr>
+        <tr>
             <td><h5>end-input.watermark</h5></td>
             <td style="word-wrap: break-word;">(none)</td>
             <td>Long</td>
@@ -57,12 +63,6 @@ under the License.
             <td>The cache mode of lookup join.<br /><br />Possible values:<ul><li>"AUTO"</li><li>"FULL"</li></ul></td>
         </tr>
         <tr>
-            <td><h5>lookup.dynamic-partition</h5></td>
-            <td style="word-wrap: break-word;">(none)</td>
-            <td>String</td>
-            <td>Specific dynamic partition for lookup, only support 'max_pt()' currently.</td>
-        </tr>
-        <tr>
             <td><h5>lookup.dynamic-partition.refresh-interval</h5></td>
             <td style="word-wrap: break-word;">1 h</td>
             <td>Duration</td>
@@ -81,10 +81,10 @@ under the License.
             <td>If the pending snapshot count exceeds the threshold, lookup operator will refresh the table in sync.</td>
         </tr>
         <tr>
-            <td><h5>partition.end-input-to-done</h5></td>
-            <td style="word-wrap: break-word;">false</td>
-            <td>Boolean</td>
-            <td>Whether mark the done status to indicate that the data is ready when end input.</td>
+            <td><h5>lookup.refresh.time-periods-blacklist</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>The blacklist contains several time periods. During these time periods, the lookup table's cache refreshing is forbidden. Blacklist format is start1-&gt;end1,start2-&gt;end2,... , and the time format is yyyy-MM-dd HH:mm. Only used when lookup table is FULL cache mode.</td>
         </tr>
         <tr>
             <td><h5>partition.idle-time-to-done</h5></td>
@@ -93,10 +93,34 @@ under the License.
             <td>Set a time duration when a partition has no new data after this time duration, mark the done status to indicate that the data is ready.</td>
         </tr>
         <tr>
+            <td><h5>partition.mark-done-action.mode</h5></td>
+            <td style="word-wrap: break-word;">process-time</td>
+            <td><p>Enum</p></td>
+            <td>How to trigger partition mark done action.<br /><br />Possible values:<ul><li>"process-time": Based on the time of the machine, mark the partition done once the processing time passes period time plus delay.</li><li>"watermark": Based on the watermark of the input, mark the partition done once the watermark passes period time plus delay.</li></ul></td>
+        </tr>
+        <tr>
             <td><h5>partition.time-interval</h5></td>
             <td style="word-wrap: break-word;">(none)</td>
             <td>Duration</td>
             <td>You can specify time interval for partition, for example, daily partition is '1 d', hourly partition is '1 h'.</td>
+        </tr>
+        <tr>
+            <td><h5>postpone.default-bucket-num</h5></td>
+            <td style="word-wrap: break-word;">1</td>
+            <td>Integer</td>
+            <td>Bucket number for the partitions compacted for the first time in postpone bucket tables.</td>
+        </tr>
+        <tr>
+            <td><h5>precommit-compact</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>If true, it will add a compact coordinator and worker operator after the writer operator,in order to compact several changelog files (for primary key tables) or newly created data files (for unaware bucket tables) from the same partition into large ones, which can decrease the number of small files.</td>
+        </tr>
+        <tr>
+            <td><h5>scan.bounded</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>Boolean</td>
+            <td>Bounded mode for Paimon consumer. By default, Paimon automatically selects bounded mode based on the mode of the Flink job.</td>
         </tr>
         <tr>
             <td><h5>scan.infer-parallelism</h5></td>
@@ -117,10 +141,10 @@ under the License.
             <td>Define a custom parallelism for the scan source. By default, if this option is not defined, the planner will derive the parallelism for each statement individually by also considering the global configuration. If user enable the scan.infer-parallelism, the planner will derive the parallelism by inferred parallelism.</td>
         </tr>
         <tr>
-            <td><h5>scan.push-down</h5></td>
-            <td style="word-wrap: break-word;">true</td>
-            <td>Boolean</td>
-            <td>If true, flink will push down projection, filters, limit to the source. The cost is that it is difficult to reuse the source in a job. With flink 1.18 or higher version, it is possible to reuse the source even with projection push down.</td>
+            <td><h5>scan.partitions</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>Specify the partitions to scan. Partitions should be given in the form of key1=value1,key2=value2. Partition keys not specified will be filled with the value of partition.default-name. Multiple partitions should be separated by semicolon (;). This option can support normal source tables and lookup join tables. For lookup joins, two special values max_pt() and max_two_pt() are also supported, specifying the (two) partition(s) with the largest partition value.</td>
         </tr>
         <tr>
             <td><h5>scan.remove-normalize</h5></td>
@@ -225,6 +249,12 @@ under the License.
             <td>Weight of writer buffer in managed memory, Flink will compute the memory size for writer according to the weight, the actual memory used depends on the running environment.</td>
         </tr>
         <tr>
+            <td><h5>sink.operator-uid.suffix</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>Set the uid suffix for the writer, dynamic bucket assigner and committer operators. The uid format is ${UID_PREFIX}_${TABLE_NAME}_${USER_UID_SUFFIX}. If the uid suffix is not set, flink will automatically generate the operator uid, which may be incompatible when the topology changes.</td>
+        </tr>
+        <tr>
             <td><h5>sink.parallelism</h5></td>
             <td style="word-wrap: break-word;">(none)</td>
             <td>Integer</td>
@@ -253,6 +283,12 @@ under the License.
             <td style="word-wrap: break-word;">30 s</td>
             <td>Duration</td>
             <td>If the new snapshot has not been generated when the checkpoint starts to trigger, the enumerator will block the checkpoint and wait for the new snapshot. Set the maximum waiting time to avoid infinite waiting, if timeout, the checkpoint will fail. Note that it should be set smaller than the checkpoint timeout.</td>
+        </tr>
+        <tr>
+            <td><h5>source.operator-uid.suffix</h5></td>
+            <td style="word-wrap: break-word;">(none)</td>
+            <td>String</td>
+            <td>Set the uid suffix for the source operators. After setting, the uid format is ${UID_PREFIX}_${TABLE_NAME}_${USER_UID_SUFFIX}. If the uid suffix is not set, flink will automatically generate the operator uid, which may be incompatible when the topology changes.</td>
         </tr>
         <tr>
             <td><h5>streaming-read.shuffle-bucket-with-partition</h5></td>

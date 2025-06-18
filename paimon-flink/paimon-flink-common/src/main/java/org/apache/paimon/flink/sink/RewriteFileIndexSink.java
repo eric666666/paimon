@@ -42,14 +42,13 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.DataFilePathFactories;
 import org.apache.paimon.utils.FileStorePathFactory;
-import org.apache.paimon.utils.Pair;
 
-import org.apache.flink.streaming.api.graph.StreamConfig;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
-import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.runtime.tasks.StreamTask;
 
 import javax.annotation.Nullable;
 
@@ -76,9 +75,33 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
     }
 
     @Override
-    protected OneInputStreamOperator<ManifestEntry, Committable> createWriteOperator(
+    protected OneInputStreamOperatorFactory<ManifestEntry, Committable> createWriteOperatorFactory(
             StoreSinkWrite.Provider writeProvider, String commitUser) {
-        return new FileIndexModificationOperator(table.coreOptions().toConfiguration(), table);
+        return new FileIndexModificationOperatorFactory(
+                table.coreOptions().toConfiguration(), table);
+    }
+
+    private static class FileIndexModificationOperatorFactory
+            extends PrepareCommitOperator.Factory<ManifestEntry, Committable> {
+        private final FileStoreTable table;
+
+        public FileIndexModificationOperatorFactory(Options options, FileStoreTable table) {
+            super(options);
+            this.table = table;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T extends StreamOperator<Committable>> T createStreamOperator(
+                StreamOperatorParameters<Committable> parameters) {
+            return (T) new FileIndexModificationOperator(parameters, options, table);
+        }
+
+        @Override
+        @SuppressWarnings("rawtypes")
+        public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
+            return FileIndexModificationOperator.class;
+        }
     }
 
     /** File index modification operator to rewrite file index. */
@@ -87,23 +110,14 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
 
         private static final long serialVersionUID = 1L;
 
-        private final FileStoreTable table;
+        private final transient FileIndexProcessor fileIndexProcessor;
+        private final transient List<CommitMessage> messages;
 
-        private transient FileIndexProcessor fileIndexProcessor;
-        private transient List<CommitMessage> messages;
-
-        public FileIndexModificationOperator(Options options, FileStoreTable table) {
-            super(options);
-            this.table = table;
-        }
-
-        @Override
-        public void setup(
-                StreamTask<?, ?> containingTask,
-                StreamConfig config,
-                Output<StreamRecord<Committable>> output) {
-            super.setup(containingTask, config, output);
-
+        private FileIndexModificationOperator(
+                StreamOperatorParameters<Committable> parameters,
+                Options options,
+                FileStoreTable table) {
+            super(parameters, options);
             this.fileIndexProcessor = new FileIndexProcessor(table);
             this.messages = new ArrayList<>();
         }
@@ -113,16 +127,16 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
             ManifestEntry entry = element.getValue();
             BinaryRow partition = entry.partition();
             int bucket = entry.bucket();
-            DataFileMeta file = entry.file();
-            DataFileMeta indexedFile = fileIndexProcessor.process(partition, bucket, file);
+            DataFileMeta indexedFile = fileIndexProcessor.process(partition, bucket, entry);
 
             CommitMessageImpl commitMessage =
                     new CommitMessageImpl(
                             partition,
                             bucket,
+                            entry.totalBuckets(),
                             DataIncrement.emptyIncrement(),
                             new CompactIncrement(
-                                    Collections.singletonList(file),
+                                    Collections.singletonList(entry.file()),
                                     Collections.singletonList(indexedFile),
                                     Collections.emptyList()));
 
@@ -147,7 +161,7 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
         private final FileIndexOptions fileIndexOptions;
         private final FileIO fileIO;
         private final FileStorePathFactory pathFactory;
-        private final Map<Pair<BinaryRow, Integer>, DataFilePathFactory> dataFilePathFactoryMap;
+        private final DataFilePathFactories pathFactories;
         private final SchemaCache schemaInfoCache;
         private final long sizeInMeta;
 
@@ -156,19 +170,16 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
             this.fileIndexOptions = table.coreOptions().indexColumnsOptions();
             this.fileIO = table.fileIO();
             this.pathFactory = table.store().pathFactory();
-            this.dataFilePathFactoryMap = new HashMap<>();
+            this.pathFactories = new DataFilePathFactories(pathFactory);
             this.schemaInfoCache =
                     new SchemaCache(fileIndexOptions, new SchemaManager(fileIO, table.location()));
             this.sizeInMeta = table.coreOptions().fileIndexInManifestThreshold();
         }
 
-        public DataFileMeta process(BinaryRow partition, int bucket, DataFileMeta dataFileMeta)
+        public DataFileMeta process(BinaryRow partition, int bucket, ManifestEntry manifestEntry)
                 throws IOException {
-            DataFilePathFactory dataFilePathFactory =
-                    dataFilePathFactoryMap.computeIfAbsent(
-                            Pair.of(partition, bucket),
-                            p -> pathFactory.createDataFilePathFactory(partition, bucket));
-
+            DataFileMeta dataFileMeta = manifestEntry.file();
+            DataFilePathFactory dataFilePathFactory = pathFactories.get(partition, bucket);
             SchemaInfo schemaInfo = schemaInfoCache.schemaInfo(dataFileMeta.schemaId());
             List<String> extras = new ArrayList<>(dataFileMeta.extraFiles());
             List<String> indexFiles =
@@ -184,16 +195,17 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
                 String indexFile = indexFiles.get(0);
                 try (FileIndexFormat.Reader indexReader =
                         FileIndexFormat.createReader(
-                                fileIO.newInputStream(dataFilePathFactory.toPath(indexFile)),
+                                fileIO.newInputStream(
+                                        dataFilePathFactory.toAlignedPath(indexFile, dataFileMeta)),
                                 schemaInfo.fileSchema)) {
                     maintainers = indexReader.readAll();
                 }
-                newIndexPath = createNewFileIndexFilePath(dataFilePathFactory.toPath(indexFile));
+                newIndexPath =
+                        createNewFileIndexFilePath(
+                                dataFilePathFactory.toAlignedPath(indexFile, dataFileMeta));
             } else {
                 maintainers = new HashMap<>();
-                newIndexPath =
-                        dataFileToFileIndexPath(
-                                dataFilePathFactory.toPath(dataFileMeta.fileName()));
+                newIndexPath = dataFileToFileIndexPath(dataFilePathFactory.toPath(dataFileMeta));
             }
 
             // remove unnecessary
@@ -234,6 +246,7 @@ public class RewriteFileIndexSink extends FlinkWriteSink<ManifestEntry> {
                                                         pathFactory
                                                                 .bucketPath(partition, bucket)
                                                                 .toString())
+                                                .withTotalBuckets(manifestEntry.totalBuckets())
                                                 .withDataFiles(
                                                         Collections.singletonList(dataFileMeta))
                                                 .rawConvertible(true)

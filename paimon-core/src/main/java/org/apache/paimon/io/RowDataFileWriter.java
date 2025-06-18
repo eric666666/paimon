@@ -20,21 +20,20 @@ package org.apache.paimon.io;
 
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.fileindex.FileIndexOptions;
-import org.apache.paimon.format.FormatWriterFactory;
-import org.apache.paimon.format.SimpleStatsExtractor;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.FileSource;
-import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.stats.SimpleStats;
 import org.apache.paimon.stats.SimpleStatsConverter;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.LongCounter;
+import org.apache.paimon.utils.Pair;
 
 import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
 import java.util.function.Function;
 
 import static org.apache.paimon.io.DataFilePathFactory.dataFileToFileIndexPath;
@@ -47,36 +46,28 @@ public class RowDataFileWriter extends StatsCollectingSingleFileWriter<InternalR
 
     private final long schemaId;
     private final LongCounter seqNumCounter;
+    private final boolean isExternalPath;
     private final SimpleStatsConverter statsArraySerializer;
     @Nullable private final DataFileIndexWriter dataFileIndexWriter;
     private final FileSource fileSource;
 
     public RowDataFileWriter(
             FileIO fileIO,
-            FormatWriterFactory factory,
+            FileWriterContext context,
             Path path,
             RowType writeSchema,
-            @Nullable SimpleStatsExtractor simpleStatsExtractor,
             long schemaId,
             LongCounter seqNumCounter,
-            String fileCompression,
-            SimpleColStatsCollector.Factory[] statsCollectors,
             FileIndexOptions fileIndexOptions,
             FileSource fileSource,
-            boolean asyncFileWrite) {
-        super(
-                fileIO,
-                factory,
-                path,
-                Function.identity(),
-                writeSchema,
-                simpleStatsExtractor,
-                fileCompression,
-                statsCollectors,
-                asyncFileWrite);
+            boolean asyncFileWrite,
+            boolean statsDenseStore,
+            boolean isExternalPath) {
+        super(fileIO, context, path, Function.identity(), writeSchema, asyncFileWrite);
         this.schemaId = schemaId;
         this.seqNumCounter = seqNumCounter;
-        this.statsArraySerializer = new SimpleStatsConverter(writeSchema);
+        this.isExternalPath = isExternalPath;
+        this.statsArraySerializer = new SimpleStatsConverter(writeSchema, statsDenseStore);
         this.dataFileIndexWriter =
                 DataFileIndexWriter.create(
                         fileIO, dataFileToFileIndexPath(path), writeSchema, fileIndexOptions);
@@ -103,16 +94,19 @@ public class RowDataFileWriter extends StatsCollectingSingleFileWriter<InternalR
 
     @Override
     public DataFileMeta result() throws IOException {
-        SimpleStats stats = statsArraySerializer.toBinary(fieldStats());
+        long fileSize = outputBytes;
+        Pair<List<String>, SimpleStats> statsPair =
+                statsArraySerializer.toBinary(fieldStats(fileSize));
         DataFileIndexWriter.FileIndexResult indexResult =
                 dataFileIndexWriter == null
                         ? DataFileIndexWriter.EMPTY_RESULT
                         : dataFileIndexWriter.result();
+        String externalPath = isExternalPath ? path.toString() : null;
         return DataFileMeta.forAppend(
                 path.getName(),
-                fileIO.getFileSize(path),
+                fileSize,
                 recordCount(),
-                stats,
+                statsPair.getRight(),
                 seqNumCounter.getValue() - super.recordCount(),
                 seqNumCounter.getValue() - 1,
                 schemaId,
@@ -120,6 +114,8 @@ public class RowDataFileWriter extends StatsCollectingSingleFileWriter<InternalR
                         ? Collections.emptyList()
                         : Collections.singletonList(indexResult.independentIndexFile()),
                 indexResult.embeddedIndexBytes(),
-                fileSource);
+                fileSource,
+                statsPair.getKey(),
+                externalPath);
     }
 }

@@ -19,10 +19,18 @@
 package org.apache.paimon.flink;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.flink.util.AbstractTestBase;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.Table;
+import org.apache.paimon.table.source.snapshot.TimeTravelUtil;
 import org.apache.paimon.utils.BlockingIterator;
 import org.apache.paimon.utils.DateTimeUtils;
+import org.apache.paimon.utils.SnapshotNotExistException;
 
+import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
+
+import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.table.planner.factories.TestValuesTableFactory;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.CloseableIterator;
@@ -31,6 +39,8 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -53,30 +63,22 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
     public void testAQEWithWriteManifest() {
         batchSql("ALTER TABLE T SET ('write-manifest-cache' = '1 mb')");
         batchSql("INSERT INTO T VALUES (1, 11, 111), (2, 22, 222)");
-        assertThatThrownBy(() -> batchSql("INSERT INTO T SELECT a, b, c FROM T GROUP BY a,b,c"))
-                .hasMessageContaining(
-                        "Paimon Sink with [Write Manifest Cache] does not support Flink's Adaptive Parallelism mode.");
-
-        // work fine
-        batchSql(
-                "INSERT INTO T /*+ OPTIONS('sink.parallelism'='1') */ SELECT a, b, c FROM T GROUP BY a,b,c");
-
-        // work fine too
-        batchSql("ALTER TABLE T SET ('write-manifest-cache' = '0 b')");
         batchSql("INSERT INTO T SELECT a, b, c FROM T GROUP BY a,b,c");
+        assertThat(batchSql("SELECT * FROM T"))
+                .containsExactlyInAnyOrder(
+                        Row.of(1, 11, 111),
+                        Row.of(2, 22, 222),
+                        Row.of(1, 11, 111),
+                        Row.of(2, 22, 222));
     }
 
     @Test
     public void testAQEWithDynamicBucket() {
         batchSql("CREATE TABLE IF NOT EXISTS D_T (a INT PRIMARY KEY NOT ENFORCED, b INT, c INT)");
         batchSql("INSERT INTO T VALUES (1, 11, 111), (2, 22, 222)");
-        assertThatThrownBy(() -> batchSql("INSERT INTO D_T SELECT a, b, c FROM T GROUP BY a,b,c"))
-                .hasMessageContaining(
-                        "Paimon Sink with [Dynamic Bucket Mode] does not support Flink's Adaptive Parallelism mode.");
-
-        // work fine
-        batchSql(
-                "INSERT INTO D_T /*+ OPTIONS('sink.parallelism'='1') */ SELECT a, b, c FROM T GROUP BY a,b,c");
+        batchSql("INSERT INTO D_T SELECT a, b, c FROM T GROUP BY a,b,c");
+        assertThat(batchSql("SELECT * FROM D_T"))
+                .containsExactlyInAnyOrder(Row.of(1, 11, 111), Row.of(2, 22, 222));
     }
 
     @Test
@@ -117,8 +119,8 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
         assertThatThrownBy(() -> batchSql("SELECT * FROM T /*+ OPTIONS('scan.snapshot-id'='0') */"))
                 .satisfies(
                         anyCauseMatches(
-                                IllegalArgumentException.class,
-                                "The specified scan snapshotId 0 is out of available snapshotId range [1, 4]."));
+                                SnapshotNotExistException.class,
+                                "Specified parameter scan.snapshot-id = 0 is not exist, you can set it in range from 1 to 4."));
 
         assertThatThrownBy(
                         () ->
@@ -126,8 +128,8 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
                                         "SELECT * FROM T /*+ OPTIONS('scan.mode'='from-snapshot-full','scan.snapshot-id'='0') */"))
                 .satisfies(
                         anyCauseMatches(
-                                IllegalArgumentException.class,
-                                "The specified scan snapshotId 0 is out of available snapshotId range [1, 4]."));
+                                SnapshotNotExistException.class,
+                                "Specified parameter scan.snapshot-id = 0 is not exist, you can set it in range from 1 to 4."));
 
         assertThat(
                         batchSql(
@@ -301,6 +303,34 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
 
         assertThat(batchSql("SELECT * FROM T /*+ OPTIONS('scan.tag-name'='tag1') */"))
                 .containsExactlyInAnyOrder(Row.of(1, 11, 111), Row.of(2, 22, 222));
+    }
+
+    @Test
+    public void testIncrementBetweenReadWithSnapshotExpiration() throws Exception {
+        String tableName = "T";
+        batchSql(String.format("INSERT INTO %s VALUES (1, 11, 111)", tableName));
+
+        paimonTable(tableName).createTag("tag1", 1);
+
+        batchSql(String.format("INSERT INTO %s VALUES (2, 22, 222)", tableName));
+        paimonTable(tableName).createTag("tag2", 2);
+        batchSql(String.format("INSERT INTO %s VALUES (3, 33, 333)", tableName));
+        paimonTable(tableName).createTag("tag3", 3);
+
+        // expire snapshot 1
+        Map<String, String> expireOptions = new HashMap<>();
+        expireOptions.put(CoreOptions.SNAPSHOT_NUM_RETAINED_MAX.key(), "1");
+        expireOptions.put(CoreOptions.SNAPSHOT_NUM_RETAINED_MIN.key(), "1");
+        FileStoreTable table = (FileStoreTable) paimonTable(tableName);
+        table.copy(expireOptions).newCommit("").expireSnapshots();
+        assertThat(table.snapshotManager().snapshotCount()).isEqualTo(1);
+
+        assertThat(
+                        batchSql(
+                                String.format(
+                                        "SELECT * FROM %s /*+ OPTIONS('incremental-between' = 'tag1,tag2', 'deletion-vectors.enabled' = 'true') */",
+                                        tableName)))
+                .containsExactlyInAnyOrder(Row.of(2, 22, 222));
     }
 
     @Test
@@ -535,5 +565,248 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
                                 DateTimeUtils.formatTimestamp(
                                         DateTimeUtils.toInternal(timestamp, 0), 0)))
                 .containsExactlyInAnyOrder(Row.of(1, "a"), Row.of(2, "b"));
+    }
+
+    @Test
+    public void testCountStarAppend() {
+        sql("CREATE TABLE count_append (f0 INT, f1 STRING)");
+        sql("INSERT INTO count_append VALUES (1, 'a'), (2, 'b')");
+
+        String sql = "SELECT COUNT(*) FROM count_append";
+        assertThat(sql(sql)).containsOnly(Row.of(2L));
+        validateCount1PushDown(sql);
+    }
+
+    @Test
+    public void testCountStarPartAppend() {
+        sql("CREATE TABLE count_part_append (f0 INT, f1 STRING, dt STRING) PARTITIONED BY (dt)");
+        sql("INSERT INTO count_part_append VALUES (1, 'a', '1'), (1, 'a', '1'), (2, 'b', '2')");
+        String sql = "SELECT COUNT(*) FROM count_part_append WHERE dt = '1'";
+
+        assertThat(sql(sql)).containsOnly(Row.of(2L));
+        validateCount1PushDown(sql);
+    }
+
+    @Test
+    public void testCountStarAppendWithDv() {
+        sql(
+                "CREATE TABLE count_append_dv (f0 INT, f1 STRING) WITH ('deletion-vectors.enabled' = 'true')");
+        sql("INSERT INTO count_append_dv VALUES (1, 'a'), (2, 'b')");
+
+        String sql = "SELECT COUNT(*) FROM count_append_dv";
+        assertThat(sql(sql)).containsOnly(Row.of(2L));
+        validateCount1PushDown(sql);
+    }
+
+    @Test
+    public void testCountStarPK() {
+        sql(
+                "CREATE TABLE count_pk (f0 INT PRIMARY KEY NOT ENFORCED, f1 STRING) WITH ('file.format' = 'avro')");
+        sql("INSERT INTO count_pk VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')");
+        sql("INSERT INTO count_pk VALUES (1, 'e')");
+
+        String sql = "SELECT COUNT(*) FROM count_pk";
+        assertThat(sql(sql)).containsOnly(Row.of(4L));
+        validateCount1NotPushDown(sql);
+    }
+
+    @Test
+    public void testCountStarPKDv() {
+        sql(
+                "CREATE TABLE count_pk_dv (f0 INT PRIMARY KEY NOT ENFORCED, f1 STRING) WITH ("
+                        + "'file.format' = 'avro', "
+                        + "'deletion-vectors.enabled' = 'true')");
+        sql("INSERT INTO count_pk_dv VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')");
+        sql("INSERT INTO count_pk_dv VALUES (1, 'e')");
+
+        String sql = "SELECT COUNT(*) FROM count_pk_dv";
+        assertThat(sql(sql)).containsOnly(Row.of(4L));
+        validateCount1PushDown(sql);
+    }
+
+    private void validateCount1PushDown(String sql) {
+        Transformation<?> transformation = AbstractTestBase.translate(tEnv, sql);
+        while (!transformation.getInputs().isEmpty()) {
+            transformation = transformation.getInputs().get(0);
+        }
+        assertThat(transformation.getDescription()).contains("Count1AggFunction");
+    }
+
+    private void validateCount1NotPushDown(String sql) {
+        Transformation<?> transformation = AbstractTestBase.translate(tEnv, sql);
+        while (!transformation.getInputs().isEmpty()) {
+            transformation = transformation.getInputs().get(0);
+        }
+        assertThat(transformation.getDescription()).doesNotContain("Count1AggFunction");
+    }
+
+    @Test
+    public void testParquetRowDecimalAndTimestamp() {
+        sql(
+                "CREATE TABLE parquet_row_decimal(`row` ROW<f0 DECIMAL(2,1)>) WITH ('file.format' = 'parquet')");
+        sql("INSERT INTO parquet_row_decimal VALUES ( (ROW(1.2)) )");
+
+        assertThat(sql("SELECT * FROM parquet_row_decimal"))
+                .containsExactly(Row.of(Row.of(new BigDecimal("1.2"))));
+
+        sql(
+                "CREATE TABLE parquet_row_timestamp(`row` ROW<f0 TIMESTAMP(0)>) WITH ('file.format' = 'parquet')");
+        sql("INSERT INTO parquet_row_timestamp VALUES ( (ROW(TIMESTAMP'2024-11-13 18:00:00')) )");
+
+        assertThat(sql("SELECT * FROM parquet_row_timestamp"))
+                .containsExactly(
+                        Row.of(Row.of(DateTimeUtils.toLocalDateTime("2024-11-13 18:00:00", 0))));
+    }
+
+    @Test
+    public void testScanBounded() {
+        sql("INSERT INTO T VALUES (1, 11, 111), (2, 22, 222)");
+        List<Row> result;
+        try (CloseableIterator<Row> iter =
+                sEnv.executeSql("SELECT * FROM T /*+ OPTIONS('scan.bounded'='true') */")
+                        .collect()) {
+            result = ImmutableList.copyOf(iter);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertThat(result).containsExactlyInAnyOrder(Row.of(1, 11, 111), Row.of(2, 22, 222));
+    }
+
+    @Test
+    public void testIncrementTagQueryWithRescaleBucket() throws Exception {
+        sql("CREATE TABLE test (a INT PRIMARY KEY NOT ENFORCED, b INT) WITH ('bucket' = '1')");
+        Table table = paimonTable("test");
+
+        sql("INSERT INTO test VALUES (1, 11), (2, 22)");
+        sql("ALTER TABLE test SET ('bucket' = '2')");
+        sql("INSERT OVERWRITE test SELECT * FROM test");
+        sql("INSERT INTO test VALUES (3, 33)");
+
+        table.createTag("2024-01-01", 1);
+        table.createTag("2024-01-02", 3);
+
+        List<String> incrementalOptions =
+                Arrays.asList(
+                        "'incremental-between'='2024-01-01,2024-01-02'",
+                        "'incremental-to-auto-tag'='2024-01-02'");
+
+        for (String option : incrementalOptions) {
+            assertThatThrownBy(() -> sql("SELECT * FROM test /*+ OPTIONS (%s) */", option))
+                    .satisfies(
+                            anyCauseMatches(
+                                    TimeTravelUtil.InconsistentTagBucketException.class,
+                                    "The bucket number of two snapshots are different (1, 2), which is not supported in incremental diff query."));
+        }
+    }
+
+    @Test
+    public void testAggregationWithNullSequenceField() {
+        sql(
+                "CREATE TABLE test ("
+                        + "  pk INT PRIMARY KEY NOT ENFORCED,"
+                        + "  v STRING,"
+                        + "  s0 INT,"
+                        + "  s1 INT"
+                        + ") WITH ("
+                        + "  'merge-engine' = 'aggregation',"
+                        + "  'sequence.field' = 's0,s1')");
+
+        sql(
+                "INSERT INTO test VALUES (1, 'A1', CAST (NULL AS INT), 1), (1, 'A2', 1, CAST (NULL AS INT))");
+        assertThat(sql("SELECT * FROM test")).containsExactly(Row.of(1, "A2", 1, null));
+
+        sql("INSERT INTO test VALUES (1, 'A3', 1, 0)");
+        assertThat(sql("SELECT * FROM test")).containsExactly(Row.of(1, "A3", 1, 0));
+    }
+
+    @Test
+    public void testScanWithSpecifiedPartitions() {
+        sql("CREATE TABLE P (pt STRING, id INT, v INT) PARTITIONED BY (pt)");
+        sql("CREATE TABLE Q (id INT)");
+        sql(
+                "INSERT INTO P VALUES ('a', 1, 10), ('a', 2, 20), ('b', 1, 11), ('b', 3, 31), ('c', 1, 12), ('c', 2, 22), ('c', 3, 32)");
+        sql("INSERT INTO Q VALUES (1), (2)");
+        String query =
+                "SELECT Q.id, P.v FROM Q INNER JOIN P /*+ OPTIONS('scan.partitions' = 'pt=b;pt=c') */ ON Q.id = P.id ORDER BY Q.id, P.v";
+        assertThat(sql(query)).containsExactly(Row.of(1, 11), Row.of(1, 12), Row.of(2, 22));
+    }
+
+    @Test
+    public void testEmptyTableIncrementalBetweenTimestamp() {
+        assertThat(sql("SELECT * FROM T /*+ OPTIONS('incremental-between-timestamp'='0,1') */"))
+                .isEmpty();
+    }
+
+    @Test
+    public void testIncrementScanMode() throws Exception {
+        sql(
+                "CREATE TABLE test_scan_mode (id INT PRIMARY KEY NOT ENFORCED, v STRING) WITH ('changelog-producer' = 'lookup')");
+
+        // snapshot 1,2
+        sql("INSERT INTO test_scan_mode VALUES (1, 'A')");
+        // snapshot 3,4
+        sql("INSERT INTO test_scan_mode VALUES (2, 'B')");
+
+        // snapshot 5,6
+        String dataId =
+                TestValuesTableFactory.registerData(
+                        Collections.singletonList(Row.ofKind(RowKind.DELETE, 2, "B")));
+        sEnv.executeSql(
+                "CREATE TEMPORARY TABLE source (id INT, v STRING) "
+                        + "WITH ('connector' = 'values', 'bounded' = 'true', 'data-id' = '"
+                        + dataId
+                        + "')");
+        sEnv.executeSql("INSERT INTO test_scan_mode SELECT * FROM source").await();
+
+        //  snapshot 7,8
+        sql("INSERT INTO test_scan_mode VALUES (3, 'C')");
+
+        List<Row> result =
+                sql(
+                        "SELECT * FROM `test_scan_mode$audit_log` "
+                                + "/*+ OPTIONS('incremental-between'='1,8','incremental-between-scan-mode'='diff') */");
+        assertThat(result).containsExactlyInAnyOrder(Row.of("+I", 3, "C"));
+
+        result =
+                sql(
+                        "SELECT * FROM `test_scan_mode$audit_log` "
+                                + "/*+ OPTIONS('incremental-between'='1,8','incremental-between-scan-mode'='delta') */");
+        assertThat(result)
+                .containsExactlyInAnyOrder(
+                        Row.of("+I", 2, "B"), Row.of("-D", 2, "B"), Row.of("+I", 3, "C"));
+    }
+
+    @Test
+    public void testAuditLogTableWithComputedColumn() throws Exception {
+        sql("CREATE TABLE test_table (a int, b int, c AS a + b);");
+        String ddl = sql("SHOW CREATE TABLE `test_table$audit_log`").get(0).getFieldAs(0);
+        assertThat(ddl).contains("`c` AS `a` + `b`");
+
+        sql("INSERT INTO test_table VALUES (1, 1)");
+        assertThat(sql("SELECT * FROM `test_table$audit_log`"))
+                .containsExactly(Row.of("+I", 1, 1, 2));
+    }
+
+    @Test
+    public void testBinlogTableWithComputedColumn() {
+        sql("CREATE TABLE test_table (a int, b int, c AS a + b);");
+        String ddl = sql("SHOW CREATE TABLE `test_table$binlog`").get(0).getFieldAs(0);
+        assertThat(ddl).doesNotContain("`c` AS `a` + `b`");
+
+        sql("INSERT INTO test_table VALUES (1, 1)");
+        assertThat(sql("SELECT * FROM `test_table$binlog`"))
+                .containsExactly(Row.of("+I", new Integer[] {1}, new Integer[] {1}));
+    }
+
+    @Test
+    public void testBinlogTableWithProjection() {
+        sql("CREATE TABLE test_table (a int, b string);");
+        sql("INSERT INTO test_table VALUES (1, 'A')");
+        assertThat(sql("SELECT * FROM `test_table$binlog`"))
+                .containsExactly(Row.of("+I", new Integer[] {1}, new String[] {"A"}));
+        assertThat(sql("SELECT b FROM `test_table$binlog`"))
+                .containsExactly(Row.of((Object) new String[] {"A"}));
+        assertThat(sql("SELECT rowkind, b FROM `test_table$binlog`"))
+                .containsExactly(Row.of("+I", new String[] {"A"}));
     }
 }

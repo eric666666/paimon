@@ -39,12 +39,7 @@ public class MySqlSyncTableActionFactory extends SyncTableActionFactoryBase {
 
     @Override
     public MySqlSyncTableAction createAction() {
-        return new MySqlSyncTableAction(
-                this.tablePath.f0,
-                this.tablePath.f1,
-                this.tablePath.f2,
-                this.catalogConfig,
-                this.cdcSourceConfig);
+        return new MySqlSyncTableAction(database, table, this.catalogConfig, this.cdcSourceConfig);
     }
 
     @Override
@@ -56,15 +51,17 @@ public class MySqlSyncTableActionFactory extends SyncTableActionFactoryBase {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  mysql_sync_table --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> "
-                        + "[--partition_keys <partition_keys>] "
-                        + "[--primary_keys <primary_keys>] "
-                        + "[--type_mapping <option1,option2...>] "
-                        + "[--computed_column <'column_name=expr_name(args[, ...])'> [--computed_column ...]] "
-                        + "[--metadata_column <metadata_column>] "
-                        + "[--mysql_conf <mysql_cdc_source_conf> [--mysql_conf <mysql_cdc_source_conf> ...]] "
-                        + "[--catalog_conf <paimon_catalog_conf> [--catalog_conf <paimon_catalog_conf> ...]] "
+                "  mysql_sync_table \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <table_name> \\\n"
+                        + "[--partition_keys <partition_keys>] \\\n"
+                        + "[--primary_keys <primary_keys>] \\\n"
+                        + "[--type_mapping <option1,option2...>] \\\n"
+                        + "[--computed_column <'column_name=expr_name(args[, ...])'> [--computed_column ...]] \\\n"
+                        + "[--metadata_column <metadata_column>] \\\n"
+                        + "[--mysql_conf <mysql_cdc_source_conf> [--mysql_conf <mysql_cdc_source_conf> ...]] \\\n"
+                        + "[--catalog_conf <paimon_catalog_conf> [--catalog_conf <paimon_catalog_conf> ...]] \\\n"
                         + "[--table_conf <paimon_table_sink_conf> [--table_conf <paimon_table_sink_conf> ...]]");
         System.out.println();
 

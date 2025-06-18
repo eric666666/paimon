@@ -20,9 +20,9 @@ package org.apache.paimon.flink.action.cdc.mongodb.strategy;
 
 import org.apache.paimon.flink.action.cdc.ComputedColumn;
 import org.apache.paimon.flink.action.cdc.mongodb.SchemaAcquisitionMode;
+import org.apache.paimon.flink.sink.cdc.CdcSchema;
 import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
 import org.apache.paimon.types.DataTypes;
-import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.JsonSerdeUtil;
 
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
@@ -71,19 +71,19 @@ public interface MongoVersionStrategy {
      * Determines the extraction mode and retrieves the row accordingly.
      *
      * @param jsonNode The JsonNode representing the MongoDB document.
-     * @param rowTypeBuilder row type builder.
+     * @param schemaBuilder schema builder.
      * @param mongodbConfig Configuration for the MongoDB connection.
      * @return A map representing the extracted row.
      * @throws JsonProcessingException If there's an error during JSON processing.
      */
     default Map<String, String> getExtractRow(
             JsonNode jsonNode,
-            RowType.Builder rowTypeBuilder,
+            CdcSchema.Builder schemaBuilder,
             List<ComputedColumn> computedColumns,
             Configuration mongodbConfig)
             throws JsonProcessingException {
         SchemaAcquisitionMode mode =
-                SchemaAcquisitionMode.valueOf(mongodbConfig.getString(START_MODE).toUpperCase());
+                SchemaAcquisitionMode.valueOf(mongodbConfig.get(START_MODE).toUpperCase());
         ObjectNode objectNode =
                 JsonSerdeUtil.asSpecificNodeType(jsonNode.asText(), ObjectNode.class);
         JsonNode idNode = objectNode.get(ID_FIELD);
@@ -92,7 +92,7 @@ public interface MongoVersionStrategy {
                     "The provided MongoDB JSON document does not contain an _id field.");
         }
         JsonNode document =
-                mongodbConfig.getBoolean(DEFAULT_ID_GENERATION)
+                mongodbConfig.get(DEFAULT_ID_GENERATION)
                         ? objectNode.set(
                                 ID_FIELD,
                                 idNode.get(OID_FIELD) == null ? idNode : idNode.get(OID_FIELD))
@@ -101,12 +101,12 @@ public interface MongoVersionStrategy {
             case SPECIFIED:
                 return parseFieldsFromJsonRecord(
                         document.toString(),
-                        mongodbConfig.getString(PARSER_PATH),
-                        mongodbConfig.getString(FIELD_NAME),
+                        mongodbConfig.get(PARSER_PATH),
+                        mongodbConfig.get(FIELD_NAME),
                         computedColumns,
-                        rowTypeBuilder);
+                        schemaBuilder);
             case DYNAMIC:
-                return parseAndTypeJsonRow(document.toString(), rowTypeBuilder, computedColumns);
+                return parseAndTypeJsonRow(document.toString(), schemaBuilder, computedColumns);
             default:
                 throw new RuntimeException("Unsupported extraction mode: " + mode);
         }
@@ -114,9 +114,11 @@ public interface MongoVersionStrategy {
 
     /** Parses and types a JSON row based on the given parameters. */
     default Map<String, String> parseAndTypeJsonRow(
-            String evaluate, RowType.Builder rowTypeBuilder, List<ComputedColumn> computedColumns) {
+            String evaluate,
+            CdcSchema.Builder schemaBuilder,
+            List<ComputedColumn> computedColumns) {
         Map<String, String> parsedRow = JsonSerdeUtil.parseJsonMap(evaluate, String.class);
-        return processParsedData(parsedRow, rowTypeBuilder, computedColumns);
+        return processParsedData(parsedRow, schemaBuilder, computedColumns);
     }
 
     /** Parses fields from a JSON record based on the given parameters. */
@@ -125,7 +127,7 @@ public interface MongoVersionStrategy {
             String fieldPaths,
             String fieldNames,
             List<ComputedColumn> computedColumns,
-            RowType.Builder rowTypeBuilder) {
+            CdcSchema.Builder schemaBuilder) {
         String[] columnNames = fieldNames.split(",");
         String[] parseNames = fieldPaths.split(",");
         Map<String, String> parsedRow = new HashMap<>();
@@ -135,20 +137,20 @@ public interface MongoVersionStrategy {
             parsedRow.put(columnNames[i], Optional.ofNullable(evaluate).orElse("{}"));
         }
 
-        return processParsedData(parsedRow, rowTypeBuilder, computedColumns);
+        return processParsedData(parsedRow, schemaBuilder, computedColumns);
     }
 
     /** Processes the parsed data to generate the result map and update field types. */
     static Map<String, String> processParsedData(
             Map<String, String> parsedRow,
-            RowType.Builder rowTypeBuilder,
+            CdcSchema.Builder schemaBuilder,
             List<ComputedColumn> computedColumns) {
         int initialCapacity = parsedRow.size() + computedColumns.size();
         Map<String, String> resultMap = new HashMap<>(initialCapacity);
 
         parsedRow.forEach(
                 (column, value) -> {
-                    rowTypeBuilder.field(column, DataTypes.STRING());
+                    schemaBuilder.column(column, DataTypes.STRING());
                     resultMap.put(column, value);
                 });
         computedColumns.forEach(
@@ -158,7 +160,7 @@ public interface MongoVersionStrategy {
                     String computedValue = computedColumn.eval(parsedRow.get(fieldReference));
 
                     resultMap.put(columnName, computedValue);
-                    rowTypeBuilder.field(columnName, computedColumn.columnType());
+                    schemaBuilder.column(columnName, computedColumn.columnType());
                 });
         return resultMap;
     }

@@ -19,11 +19,13 @@
 package org.apache.paimon.table;
 
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.consumer.ConsumerManager;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.source.DataTableScan;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.utils.BranchManager;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
 
@@ -39,6 +41,12 @@ public interface DataTable extends InnerTable {
 
     SnapshotManager snapshotManager();
 
+    ChangelogManager changelogManager();
+
+    ConsumerManager consumerManager();
+
+    SchemaManager schemaManager();
+
     TagManager tagManager();
 
     BranchManager branchManager();
@@ -50,6 +58,4 @@ public interface DataTable extends InnerTable {
     DataTable switchToBranch(String branchName);
 
     Path location();
-
-    FileIO fileIO();
 }

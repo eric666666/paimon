@@ -19,16 +19,25 @@
 package org.apache.paimon.iceberg;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.FileSystemCatalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryRowWriter;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.Decimal;
+import org.apache.paimon.data.GenericArray;
+import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.disk.IOManagerImpl;
+import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
+import org.apache.paimon.iceberg.manifest.IcebergManifestFile;
+import org.apache.paimon.iceberg.manifest.IcebergManifestFileMeta;
+import org.apache.paimon.iceberg.manifest.IcebergManifestList;
+import org.apache.paimon.iceberg.metadata.IcebergMetadata;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
@@ -38,37 +47,51 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.sink.TableWriteImpl;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
 import org.apache.paimon.types.RowType;
 
+import org.apache.avro.file.DataFileReader;
+import org.apache.avro.file.SeekableFileInput;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumReader;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.hadoop.HadoopCatalog;
 import org.apache.iceberg.io.CloseableIterable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for Iceberg compatibility. */
 public class IcebergCompatibilityTest {
@@ -169,6 +192,68 @@ public class IcebergCompatibilityTest {
     }
 
     @Test
+    public void testDropPartition() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {
+                            DataTypes.STRING(), DataTypes.INT(), DataTypes.INT(), DataTypes.INT()
+                        },
+                        new String[] {"pt1", "pt2", "k", "v"});
+
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType,
+                        Arrays.asList("pt1", "pt2"),
+                        Arrays.asList("pt1", "pt2", "k"),
+                        1,
+                        Collections.emptyMap());
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(GenericRow.of(BinaryString.fromString("20250304"), 15, 1, 1));
+        write.write(GenericRow.of(BinaryString.fromString("20250304"), 16, 1, 1));
+        write.write(GenericRow.of(BinaryString.fromString("20250305"), 15, 1, 1));
+        commit.commit(1, write.prepareCommit(false, 1));
+
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder(
+                        "Record(20250304, 15, 1, 1)",
+                        "Record(20250304, 16, 1, 1)",
+                        "Record(20250305, 15, 1, 1)");
+
+        LocalFileIO fileIO = LocalFileIO.create();
+        Path path = new Path(tempDir.toString());
+
+        try (FileSystemCatalog paimonCatalog = new FileSystemCatalog(fileIO, path)) {
+            Identifier paimonIdentifier = Identifier.create("mydb", "t");
+            if (ThreadLocalRandom.current().nextBoolean()) {
+                // delete the second-level partition
+                Map<String, String> partition = new HashMap<>();
+                partition.put("pt1", "20250304");
+                partition.put("pt2", "16");
+                commit.truncatePartitions(Collections.singletonList(partition));
+
+                assertThat(getIcebergResult())
+                        .containsExactlyInAnyOrder(
+                                "Record(20250304, 15, 1, 1)", "Record(20250305, 15, 1, 1)");
+            } else {
+                // delete the first-level partition
+                Map<String, String> partition = new HashMap<>();
+                partition.put("pt1", "20250304");
+                commit.truncatePartitions(Collections.singletonList(partition));
+
+                assertThat(getIcebergResult())
+                        .containsExactlyInAnyOrder("Record(20250305, 15, 1, 1)");
+            }
+        }
+
+        write.close();
+        commit.close();
+    }
+
+    @Test
     public void testRetryCreateMetadata() throws Exception {
         RowType rowType =
                 RowType.of(
@@ -191,9 +276,10 @@ public class IcebergCompatibilityTest {
         write.compact(BinaryRow.EMPTY_ROW, 0, true);
         List<CommitMessage> commitMessages2 = write.prepareCommit(true, 2);
         commit.commit(2, commitMessages2);
-        assertThat(table.latestSnapshotId()).hasValue(3L);
+        assertThat(table.latestSnapshot()).isPresent().map(Snapshot::id).hasValue(3L);
 
-        IcebergPathFactory pathFactory = new IcebergPathFactory(table.location());
+        IcebergPathFactory pathFactory =
+                new IcebergPathFactory(new Path(table.location(), "metadata"));
         Path metadata3Path = pathFactory.toMetadataPath(3);
         assertThat(table.fileIO().exists(metadata3Path)).isTrue();
 
@@ -244,6 +330,443 @@ public class IcebergCompatibilityTest {
 
         write.close();
         commit.close();
+    }
+
+    @Test
+    public void testIcebergSnapshotExpire() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT(), DataTypes.INT()}, new String[] {"k", "v"});
+        Map<String, String> options = new HashMap<>();
+        options.put(CoreOptions.SNAPSHOT_NUM_RETAINED_MIN.key(), "3");
+        options.put(CoreOptions.SNAPSHOT_NUM_RETAINED_MAX.key(), "3");
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType,
+                        Collections.emptyList(),
+                        Collections.singletonList("k"),
+                        1,
+                        options);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(GenericRow.of(1, 10));
+        write.write(GenericRow.of(2, 20));
+        commit.commit(1, write.prepareCommit(false, 1));
+        assertThat(table.snapshotManager().latestSnapshotId()).isEqualTo(1L);
+        FileIO fileIO = table.fileIO();
+        IcebergMetadata metadata =
+                IcebergMetadata.fromPath(
+                        fileIO, new Path(table.location(), "metadata/v1.metadata.json"));
+        assertThat(metadata.snapshots()).hasSize(1);
+        assertThat(metadata.currentSnapshotId()).isEqualTo(1);
+
+        write.write(GenericRow.of(1, 11));
+        write.write(GenericRow.of(3, 30));
+        write.compact(BinaryRow.EMPTY_ROW, 0, true);
+        commit.commit(2, write.prepareCommit(true, 2));
+        assertThat(table.snapshotManager().latestSnapshotId()).isEqualTo(3L);
+        metadata =
+                IcebergMetadata.fromPath(
+                        fileIO, new Path(table.location(), "metadata/v3.metadata.json"));
+        assertThat(metadata.snapshots()).hasSize(3);
+        assertThat(metadata.currentSnapshotId()).isEqualTo(3);
+
+        // Number of snapshots will become 5 with the next commit, however only 3 Iceberg snapshots
+        // are kept. So the first 2 Iceberg snapshots will be expired.
+
+        IcebergPathFactory pathFactory =
+                new IcebergPathFactory(new Path(table.location(), "metadata"));
+        IcebergManifestList manifestList = IcebergManifestList.create(table, pathFactory);
+        assertThat(manifestList.compression()).isEqualTo("snappy");
+
+        IcebergManifestFile manifestFile = IcebergManifestFile.create(table, pathFactory);
+        assertThat(manifestFile.compression()).isEqualTo("snappy");
+
+        Set<String> usingManifests = new HashSet<>();
+        String manifestListFile = new Path(metadata.currentSnapshot().manifestList()).getName();
+
+        assertThat(fileIO.readFileUtf8(new Path(pathFactory.metadataDirectory(), manifestListFile)))
+                .contains("snappy");
+
+        for (IcebergManifestFileMeta fileMeta : manifestList.read(manifestListFile)) {
+            usingManifests.add(fileMeta.manifestPath());
+            assertThat(
+                            fileIO.readFileUtf8(
+                                    new Path(
+                                            pathFactory.metadataDirectory(),
+                                            fileMeta.manifestPath())))
+                    .contains("snappy");
+        }
+
+        IcebergManifestList legacyManifestList =
+                IcebergManifestList.create(
+                        table.copy(
+                                Collections.singletonMap(
+                                        IcebergOptions.MANIFEST_LEGACY_VERSION.key(), "true")),
+                        pathFactory);
+        assertThatThrownBy(() -> legacyManifestList.read(manifestListFile))
+                .rootCause()
+                .isInstanceOf(NullPointerException.class);
+
+        Set<String> unusedFiles = new HashSet<>();
+        for (int i = 0; i < 2; i++) {
+            unusedFiles.add(metadata.snapshots().get(i).manifestList());
+            for (IcebergManifestFileMeta fileMeta :
+                    manifestList.read(
+                            new Path(metadata.snapshots().get(i).manifestList()).getName())) {
+                String p = fileMeta.manifestPath();
+                if (!usingManifests.contains(p)) {
+                    unusedFiles.add(p);
+                }
+            }
+        }
+
+        write.write(GenericRow.of(2, 21));
+        write.write(GenericRow.of(3, 31));
+        write.compact(BinaryRow.EMPTY_ROW, 0, true);
+        commit.commit(3, write.prepareCommit(true, 3));
+        assertThat(table.snapshotManager().latestSnapshotId()).isEqualTo(5L);
+        metadata =
+                IcebergMetadata.fromPath(
+                        fileIO, new Path(table.location(), "metadata/v5.metadata.json"));
+        assertThat(metadata.snapshots()).hasSize(3);
+        assertThat(metadata.currentSnapshotId()).isEqualTo(5);
+
+        write.close();
+        commit.close();
+
+        // The old metadata.json is removed when the new metadata.json is created
+        // depending on the old metadata retention configuration.
+        for (int i = 1; i <= 3; i++) {
+            unusedFiles.add(pathFactory.toMetadataPath(i).toString());
+        }
+
+        for (String path : unusedFiles) {
+            assertThat(fileIO.exists(new Path(path))).isFalse();
+        }
+
+        // Check existence of retained Iceberg metadata.json files
+        for (int i = 4; i <= 5; i++) {
+            assertThat(fileIO.exists(new Path(pathFactory.toMetadataPath(i).toString()))).isTrue();
+        }
+
+        // Test all existing Iceberg snapshots are valid.
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder("Record(1, 11)", "Record(2, 21)", "Record(3, 31)");
+        assertThat(
+                        getIcebergResult(
+                                icebergTable ->
+                                        IcebergGenerics.read(icebergTable).useSnapshot(3).build(),
+                                Record::toString))
+                .containsExactlyInAnyOrder("Record(1, 11)", "Record(2, 20)", "Record(3, 30)");
+        assertThat(
+                        getIcebergResult(
+                                icebergTable ->
+                                        IcebergGenerics.read(icebergTable).useSnapshot(4).build(),
+                                Record::toString))
+                .containsExactlyInAnyOrder("Record(1, 11)", "Record(2, 20)", "Record(3, 30)");
+    }
+
+    @Test
+    public void testAllTypeStatistics() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {
+                            DataTypes.INT(),
+                            DataTypes.BOOLEAN(),
+                            DataTypes.BIGINT(),
+                            DataTypes.FLOAT(),
+                            DataTypes.DOUBLE(),
+                            DataTypes.DECIMAL(8, 3),
+                            DataTypes.CHAR(20),
+                            DataTypes.STRING(),
+                            DataTypes.BINARY(20),
+                            DataTypes.VARBINARY(20),
+                            DataTypes.DATE(),
+                            DataTypes.TIMESTAMP(6)
+                        },
+                        new String[] {
+                            "v_int",
+                            "v_boolean",
+                            "v_bigint",
+                            "v_float",
+                            "v_double",
+                            "v_decimal",
+                            "v_char",
+                            "v_varchar",
+                            "v_binary",
+                            "v_varbinary",
+                            "v_date",
+                            "v_timestamp"
+                        });
+        FileStoreTable table =
+                createPaimonTable(rowType, Collections.emptyList(), Collections.emptyList(), -1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        GenericRow lowerBounds =
+                GenericRow.of(
+                        1,
+                        true,
+                        10L,
+                        100.0f,
+                        1000.0,
+                        Decimal.fromUnscaledLong(123456, 8, 3),
+                        BinaryString.fromString("apple"),
+                        BinaryString.fromString("cat"),
+                        "B_apple".getBytes(),
+                        "B_cat".getBytes(),
+                        100,
+                        Timestamp.fromLocalDateTime(LocalDateTime.of(2024, 10, 10, 11, 22, 33)));
+        write.write(lowerBounds);
+        GenericRow upperBounds =
+                GenericRow.of(
+                        2,
+                        true,
+                        20L,
+                        200.0f,
+                        2000.0,
+                        Decimal.fromUnscaledLong(234567, 8, 3),
+                        BinaryString.fromString("banana"),
+                        BinaryString.fromString("dog"),
+                        "B_banana".getBytes(),
+                        "B_dog".getBytes(),
+                        200,
+                        Timestamp.fromLocalDateTime(LocalDateTime.of(2024, 10, 20, 11, 22, 33)));
+        write.write(upperBounds);
+        commit.commit(1, write.prepareCommit(false, 1));
+
+        write.close();
+        commit.close();
+
+        int numFields = rowType.getFieldCount();
+        for (int i = 0; i < numFields; i++) {
+            DataType type = rowType.getTypeAt(i);
+            String name = rowType.getFieldNames().get(i);
+            if (type.getTypeRoot() == DataTypeRoot.BOOLEAN
+                    || type.getTypeRoot() == DataTypeRoot.BINARY
+                    || type.getTypeRoot() == DataTypeRoot.VARBINARY) {
+                // lower bounds and upper bounds of these types have no actual use case
+                continue;
+            }
+
+            final Object lower;
+            final Object upper;
+            // change Paimon objects to Iceberg Java API objects
+            if (type.getTypeRoot() == DataTypeRoot.CHAR
+                    || type.getTypeRoot() == DataTypeRoot.VARCHAR) {
+                lower = lowerBounds.getField(i).toString();
+                upper = upperBounds.getField(i).toString();
+            } else if (type.getTypeRoot() == DataTypeRoot.DECIMAL) {
+                lower = new BigDecimal(lowerBounds.getField(i).toString());
+                upper = new BigDecimal(upperBounds.getField(i).toString());
+            } else if (type.getTypeRoot() == DataTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE) {
+                lower = ((Timestamp) lowerBounds.getField(i)).toMicros();
+                upper = ((Timestamp) upperBounds.getField(i)).toMicros();
+            } else {
+                lower = lowerBounds.getField(i);
+                upper = upperBounds.getField(i);
+            }
+
+            String expectedLower = lower.toString();
+            String expectedUpper = upper.toString();
+            if (type.getTypeRoot() == DataTypeRoot.DATE) {
+                expectedLower = LocalDate.ofEpochDay((int) lower).toString();
+                expectedUpper = LocalDate.ofEpochDay((int) upper).toString();
+            } else if (type.getTypeRoot() == DataTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE) {
+                expectedLower = Timestamp.fromMicros((long) lower).toString();
+                expectedUpper = Timestamp.fromMicros((long) upper).toString();
+            }
+
+            assertThat(
+                            getIcebergResult(
+                                    icebergTable ->
+                                            IcebergGenerics.read(icebergTable)
+                                                    .select(name)
+                                                    .where(Expressions.lessThan(name, upper))
+                                                    .build(),
+                                    Record::toString))
+                    .containsExactly("Record(" + expectedLower + ")");
+            assertThat(
+                            getIcebergResult(
+                                    icebergTable ->
+                                            IcebergGenerics.read(icebergTable)
+                                                    .select(name)
+                                                    .where(Expressions.greaterThan(name, lower))
+                                                    .build(),
+                                    Record::toString))
+                    .containsExactly("Record(" + expectedUpper + ")");
+            assertThat(
+                            getIcebergResult(
+                                    icebergTable ->
+                                            IcebergGenerics.read(icebergTable)
+                                                    .select(name)
+                                                    .where(Expressions.lessThan(name, lower))
+                                                    .build(),
+                                    Record::toString))
+                    .isEmpty();
+            assertThat(
+                            getIcebergResult(
+                                    icebergTable ->
+                                            IcebergGenerics.read(icebergTable)
+                                                    .select(name)
+                                                    .where(Expressions.greaterThan(name, upper))
+                                                    .build(),
+                                    Record::toString))
+                    .isEmpty();
+        }
+    }
+
+    @Test
+    public void testNestedTypes() throws Exception {
+        RowType innerType =
+                RowType.of(
+                        new DataField(2, "f1", DataTypes.STRING()),
+                        new DataField(3, "f2", DataTypes.INT()));
+        RowType rowType =
+                RowType.of(
+                        new DataField(0, "k", DataTypes.INT()),
+                        new DataField(
+                                1,
+                                "v",
+                                DataTypes.MAP(DataTypes.INT(), DataTypes.ARRAY(innerType))));
+        FileStoreTable table =
+                createPaimonTable(rowType, Collections.emptyList(), Collections.emptyList(), -1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        Map<Integer, GenericArray> map1 = new HashMap<>();
+        map1.put(
+                10,
+                new GenericArray(
+                        new GenericRow[] {
+                            GenericRow.of(BinaryString.fromString("apple"), 100),
+                            GenericRow.of(BinaryString.fromString("banana"), 101)
+                        }));
+        write.write(GenericRow.of(1, new GenericMap(map1)));
+
+        Map<Integer, GenericArray> map2 = new HashMap<>();
+        map2.put(
+                20,
+                new GenericArray(
+                        new GenericRow[] {
+                            GenericRow.of(BinaryString.fromString("cherry"), 200),
+                            GenericRow.of(BinaryString.fromString("pear"), 201)
+                        }));
+        write.write(GenericRow.of(2, new GenericMap(map2)));
+
+        commit.commit(1, write.prepareCommit(false, 1));
+        write.close();
+        commit.close();
+
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder(
+                        "Record(1, {10=[Record(apple, 100), Record(banana, 101)]})",
+                        "Record(2, {20=[Record(cherry, 200), Record(pear, 201)]})");
+    }
+
+    @Test
+    public void testStringPartitionNullPadding() throws Exception {
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT(), DataTypes.VARCHAR(20)},
+                        new String[] {"k", "country"});
+        FileStoreTable table =
+                createPaimonTable(
+                        rowType,
+                        Collections.singletonList("country"),
+                        Collections.singletonList("k"),
+                        -1);
+
+        String commitUser = UUID.randomUUID().toString();
+        TableWriteImpl<?> write = table.newWrite(commitUser);
+        TableCommitImpl commit = table.newCommit(commitUser);
+
+        write.write(GenericRow.of(1, BinaryString.fromString("Switzerland")), 1);
+        write.write(GenericRow.of(2, BinaryString.fromString("Australia")), 1);
+        write.write(GenericRow.of(3, BinaryString.fromString("Brazil")), 1);
+        write.write(GenericRow.of(4, BinaryString.fromString("Grand Duchy of Luxembourg")), 1);
+        commit.commit(1, write.prepareCommit(false, 1));
+        assertThat(getIcebergResult())
+                .containsExactlyInAnyOrder(
+                        "Record(1, Switzerland)",
+                        "Record(2, Australia)",
+                        "Record(3, Brazil)",
+                        "Record(4, Grand Duchy of Luxembourg)");
+
+        FileIO fileIO = table.fileIO();
+        IcebergMetadata metadata =
+                IcebergMetadata.fromPath(
+                        fileIO, new Path(table.location(), "metadata/v1.metadata.json"));
+
+        IcebergPathFactory pathFactory =
+                new IcebergPathFactory(new Path(table.location(), "metadata"));
+        IcebergManifestList manifestList = IcebergManifestList.create(table, pathFactory);
+        String currentSnapshotManifest = metadata.currentSnapshot().manifestList();
+
+        File snapShotAvroFile = new File(currentSnapshotManifest);
+        String expectedPartitionSummary =
+                "[{\"contains_null\": false, \"contains_nan\": false, \"lower_bound\": \"Australia\", \"upper_bound\": \"Switzerland\"}]";
+        try (DataFileReader<GenericRecord> dataFileReader =
+                new DataFileReader<>(
+                        new SeekableFileInput(snapShotAvroFile), new GenericDatumReader<>())) {
+            while (dataFileReader.hasNext()) {
+                GenericRecord record = dataFileReader.next();
+                String partitionSummary = record.get("partitions").toString();
+                assertThat(partitionSummary).doesNotContain("\\u0000");
+                assertThat(partitionSummary).isEqualTo(expectedPartitionSummary);
+            }
+        }
+
+        String tableManifest = manifestList.read(snapShotAvroFile.getName()).get(0).manifestPath();
+
+        try (DataFileReader<GenericRecord> dataFileReader =
+                new DataFileReader<>(
+                        new SeekableFileInput(new File(tableManifest)),
+                        new GenericDatumReader<>())) {
+
+            while (dataFileReader.hasNext()) {
+                GenericRecord record = dataFileReader.next();
+                GenericRecord dataFile = (GenericRecord) record.get("data_file");
+
+                // Check lower bounds
+                GenericData.Array<?> lowerBounds =
+                        (GenericData.Array<?>) dataFile.get("lower_bounds");
+                if (lowerBounds != null) {
+                    for (Object bound : lowerBounds) {
+                        GenericRecord boundRecord = (GenericRecord) bound;
+                        int key = (Integer) boundRecord.get("key");
+                        if (key == 1) { // key = 1 is the partition key
+                            ByteBuffer value = (ByteBuffer) boundRecord.get("value");
+                            String boundValue = new String(value.array(), StandardCharsets.UTF_8);
+                            assertThat(boundValue).doesNotContain("\u0000");
+                        }
+                    }
+                }
+
+                // Check upper bounds
+                GenericData.Array<?> upperBounds =
+                        (GenericData.Array<?>) dataFile.get("upper_bounds");
+                if (upperBounds != null) {
+                    for (Object bound : upperBounds) {
+                        GenericRecord boundRecord = (GenericRecord) bound;
+                        int key = (Integer) boundRecord.get("key");
+                        if (key == 1) { // key = 1 is the partition key
+                            ByteBuffer value = (ByteBuffer) boundRecord.get("value");
+                            String boundValue = new String(value.array(), StandardCharsets.UTF_8);
+                            assertThat(boundValue).doesNotContain("\u0000");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -361,126 +884,6 @@ public class IcebergCompatibilityTest {
                 Record::toString);
     }
 
-    @Test
-    public void testAppendOnlyTableWithAllTypes() throws Exception {
-        RowType rowType =
-                RowType.of(
-                        new DataType[] {
-                            DataTypes.INT(),
-                            DataTypes.BOOLEAN(),
-                            DataTypes.BIGINT(),
-                            DataTypes.FLOAT(),
-                            DataTypes.DOUBLE(),
-                            DataTypes.DECIMAL(8, 3),
-                            DataTypes.CHAR(20),
-                            DataTypes.STRING(),
-                            DataTypes.BINARY(20),
-                            DataTypes.VARBINARY(20),
-                            DataTypes.DATE()
-                        },
-                        new String[] {
-                            "pt",
-                            "v_boolean",
-                            "v_bigint",
-                            "v_float",
-                            "v_double",
-                            "v_decimal",
-                            "v_char",
-                            "v_varchar",
-                            "v_binary",
-                            "v_varbinary",
-                            "v_date"
-                        });
-
-        Function<Integer, BinaryRow> binaryRow =
-                (pt) -> {
-                    BinaryRow b = new BinaryRow(1);
-                    BinaryRowWriter writer = new BinaryRowWriter(b);
-                    writer.writeInt(0, pt);
-                    writer.complete();
-                    return b;
-                };
-
-        int numRounds = 5;
-        int numRecords = 500;
-        ThreadLocalRandom random = ThreadLocalRandom.current();
-        List<List<TestRecord>> testRecords = new ArrayList<>();
-        List<List<String>> expected = new ArrayList<>();
-        List<String> currentExpected = new ArrayList<>();
-        for (int r = 0; r < numRounds; r++) {
-            List<TestRecord> round = new ArrayList<>();
-            for (int i = 0; i < numRecords; i++) {
-                int pt = random.nextInt(0, 2);
-                Boolean vBoolean = random.nextBoolean() ? random.nextBoolean() : null;
-                Long vBigInt = random.nextBoolean() ? random.nextLong() : null;
-                Float vFloat = random.nextBoolean() ? random.nextFloat() : null;
-                Double vDouble = random.nextBoolean() ? random.nextDouble() : null;
-                Decimal vDecimal =
-                        random.nextBoolean()
-                                ? Decimal.fromUnscaledLong(random.nextLong(0, 100000000), 8, 3)
-                                : null;
-                String vChar = random.nextBoolean() ? String.valueOf(random.nextInt()) : null;
-                String vVarChar = random.nextBoolean() ? String.valueOf(random.nextInt()) : null;
-                byte[] vBinary =
-                        random.nextBoolean() ? String.valueOf(random.nextInt()).getBytes() : null;
-                byte[] vVarBinary =
-                        random.nextBoolean() ? String.valueOf(random.nextInt()).getBytes() : null;
-                Integer vDate = random.nextBoolean() ? random.nextInt(0, 30000) : null;
-
-                round.add(
-                        new TestRecord(
-                                binaryRow.apply(pt),
-                                GenericRow.of(
-                                        pt,
-                                        vBoolean,
-                                        vBigInt,
-                                        vFloat,
-                                        vDouble,
-                                        vDecimal,
-                                        BinaryString.fromString(vChar),
-                                        BinaryString.fromString(vVarChar),
-                                        vBinary,
-                                        vVarBinary,
-                                        vDate)));
-                currentExpected.add(
-                        String.format(
-                                "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
-                                pt,
-                                vBoolean,
-                                vBigInt,
-                                vFloat,
-                                vDouble,
-                                vDecimal,
-                                vChar,
-                                vVarChar,
-                                vBinary == null ? null : new String(vBinary),
-                                vVarBinary == null ? null : new String(vVarBinary),
-                                vDate == null ? null : LocalDate.ofEpochDay(vDate)));
-            }
-            testRecords.add(round);
-            expected.add(new ArrayList<>(currentExpected));
-        }
-
-        runCompatibilityTest(
-                rowType,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                testRecords,
-                expected,
-                r ->
-                        IntStream.range(0, rowType.getFieldCount())
-                                .mapToObj(
-                                        i -> {
-                                            Object field = r.get(i);
-                                            if (field instanceof ByteBuffer) {
-                                                return new String(((ByteBuffer) field).array());
-                                            } else {
-                                                return String.valueOf(field);
-                                            }
-                                        })
-                                .collect(Collectors.joining(", ")));
-    }
-
     private void runCompatibilityTest(
             RowType rowType,
             List<String> partitionKeys,
@@ -513,7 +916,11 @@ public class IcebergCompatibilityTest {
             }
             commit.commit(r, write.prepareCommit(true, r));
 
-            assertThat(getIcebergResult(icebergRecordToString)).hasSameElementsAs(expected.get(r));
+            assertThat(
+                            getIcebergResult(
+                                    icebergTable -> IcebergGenerics.read(icebergTable).build(),
+                                    icebergRecordToString))
+                    .hasSameElementsAs(expected.get(r));
         }
 
         write.close();
@@ -552,11 +959,14 @@ public class IcebergCompatibilityTest {
 
         Options options = new Options(customOptions);
         options.set(CoreOptions.BUCKET, numBuckets);
-        options.set(CoreOptions.METADATA_ICEBERG_COMPATIBLE, true);
+        options.set(
+                IcebergOptions.METADATA_ICEBERG_STORAGE, IcebergOptions.StorageType.TABLE_LOCATION);
         options.set(CoreOptions.FILE_FORMAT, "avro");
         options.set(CoreOptions.TARGET_FILE_SIZE, MemorySize.ofKibiBytes(32));
-        options.set(AbstractIcebergCommitCallback.COMPACT_MIN_FILE_NUM, 4);
-        options.set(AbstractIcebergCommitCallback.COMPACT_MIN_FILE_NUM, 8);
+        options.set(IcebergOptions.COMPACT_MIN_FILE_NUM, 4);
+        options.set(IcebergOptions.COMPACT_MIN_FILE_NUM, 8);
+        options.set(IcebergOptions.METADATA_DELETE_AFTER_COMMIT, true);
+        options.set(IcebergOptions.METADATA_PREVIOUS_VERSIONS_MAX, 1);
         options.set(CoreOptions.MANIFEST_TARGET_FILE_SIZE, MemorySize.ofKibiBytes(8));
         Schema schema =
                 new Schema(rowType.getFields(), partitionKeys, primaryKeys, options.toMap(), "");
@@ -570,15 +980,18 @@ public class IcebergCompatibilityTest {
     }
 
     private List<String> getIcebergResult() throws Exception {
-        return getIcebergResult(Record::toString);
+        return getIcebergResult(
+                icebergTable -> IcebergGenerics.read(icebergTable).build(), Record::toString);
     }
 
-    private List<String> getIcebergResult(Function<Record, String> icebergRecordToString)
+    private List<String> getIcebergResult(
+            Function<org.apache.iceberg.Table, CloseableIterable<Record>> query,
+            Function<Record, String> icebergRecordToString)
             throws Exception {
         HadoopCatalog icebergCatalog = new HadoopCatalog(new Configuration(), tempDir.toString());
         TableIdentifier icebergIdentifier = TableIdentifier.of("mydb.db", "t");
         org.apache.iceberg.Table icebergTable = icebergCatalog.loadTable(icebergIdentifier);
-        CloseableIterable<Record> result = IcebergGenerics.read(icebergTable).build();
+        CloseableIterable<Record> result = query.apply(icebergTable);
         List<String> actual = new ArrayList<>();
         for (Record record : result) {
             actual.add(icebergRecordToString.apply(record));

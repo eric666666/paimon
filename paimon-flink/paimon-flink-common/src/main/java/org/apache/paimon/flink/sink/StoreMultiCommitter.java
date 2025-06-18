@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.manifest.WrappedManifestCommittable;
@@ -56,20 +57,51 @@ public class StoreMultiCommitter
     private final boolean ignoreEmptyCommit;
     private final Map<String, String> dynamicOptions;
 
-    public StoreMultiCommitter(Catalog.Loader catalogLoader, Context context) {
+    private final TableFilter tableFilter;
+
+    public StoreMultiCommitter(CatalogLoader catalogLoader, Context context) {
         this(catalogLoader, context, false, Collections.emptyMap());
     }
 
     public StoreMultiCommitter(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             Context context,
             boolean ignoreEmptyCommit,
             Map<String, String> dynamicOptions) {
+        this(catalogLoader, context, ignoreEmptyCommit, dynamicOptions, false, null);
+    }
+
+    public StoreMultiCommitter(
+            CatalogLoader catalogLoader,
+            Context context,
+            boolean ignoreEmptyCommit,
+            Map<String, String> dynamicOptions,
+            boolean eagerInit,
+            TableFilter tableFilter) {
         this.catalog = catalogLoader.load();
         this.context = context;
         this.ignoreEmptyCommit = ignoreEmptyCommit;
         this.dynamicOptions = dynamicOptions;
         this.tableCommitters = new HashMap<>();
+
+        this.tableFilter = tableFilter;
+        int parallelism = context.getParallelism();
+        int index = context.getSubtaskIndex();
+
+        if (eagerInit) {
+            List<Identifier> tableIds =
+                    filterTables().stream()
+                            .filter(
+                                    identifier ->
+                                            MultiTableCommittableChannelComputer.computeChannel(
+                                                            identifier.getDatabaseName(),
+                                                            identifier.getTableName(),
+                                                            parallelism)
+                                                    == index)
+                            .collect(Collectors.toList());
+
+            tableIds.stream().forEach(this::getStoreCommitter);
+        }
     }
 
     @Override
@@ -92,11 +124,11 @@ public class StoreMultiCommitter
             WrappedManifestCommittable wrappedManifestCommittable,
             List<MultiTableCommittable> committables) {
         for (MultiTableCommittable committable : committables) {
+            Identifier identifier =
+                    Identifier.create(committable.getDatabase(), committable.getTable());
             ManifestCommittable manifestCommittable =
                     wrappedManifestCommittable.computeCommittableIfAbsent(
-                            Identifier.create(committable.getDatabase(), committable.getTable()),
-                            checkpointId,
-                            watermark);
+                            identifier, checkpointId, watermark);
 
             switch (committable.kind()) {
                 case FILE:
@@ -106,7 +138,9 @@ public class StoreMultiCommitter
                 case LOG_OFFSET:
                     LogOffsetCommittable offset =
                             (LogOffsetCommittable) committable.wrappedCommittable();
-                    manifestCommittable.addLogOffset(offset.bucket(), offset.offset());
+                    StoreCommitter committer = tableCommitters.get(identifier);
+                    manifestCommittable.addLogOffset(
+                            offset.bucket(), offset.offset(), committer.allowLogOffsetDuplicate());
                     break;
             }
         }
@@ -214,5 +248,20 @@ public class StoreMultiCommitter
         if (catalog != null) {
             catalog.close();
         }
+    }
+
+    private List<Identifier> filterTables() {
+        // Get all tables in the catalog
+        List<String> allTables = null;
+        try {
+            allTables = catalog.listTables(this.tableFilter.getDbName());
+        } catch (Catalog.DatabaseNotExistException e) {
+            allTables = Collections.emptyList();
+        }
+
+        List<String> tblList = tableFilter.filterTables(allTables);
+        return tblList.stream()
+                .map(t -> Identifier.create(tableFilter.getDbName(), t))
+                .collect(Collectors.toList());
     }
 }

@@ -43,14 +43,14 @@ import static org.apache.paimon.codegen.CodeGenUtils.newRecordEqualiser;
 /** Collect elements into an ARRAY. */
 public class FieldCollectAgg extends FieldAggregator {
 
-    public static final String NAME = "collect";
+    private static final long serialVersionUID = 1L;
 
     private final boolean distinct;
     private final InternalArray.ElementGetter elementGetter;
     @Nullable private final BiFunction<Object, Object, Boolean> equaliser;
 
-    public FieldCollectAgg(ArrayType dataType, boolean distinct) {
-        super(dataType);
+    public FieldCollectAgg(String name, ArrayType dataType, boolean distinct) {
+        super(name, dataType);
         this.distinct = distinct;
         this.elementGetter = InternalArray.createElementGetter(dataType.getElementType());
 
@@ -80,11 +80,6 @@ public class FieldCollectAgg extends FieldAggregator {
         } else {
             equaliser = null;
         }
-    }
-
-    @Override
-    String name() {
-        return NAME;
     }
 
     @Override
@@ -160,18 +155,26 @@ public class FieldCollectAgg extends FieldAggregator {
 
     @Override
     public Object retract(Object accumulator, Object retractField) {
+        // it's hard to mark the input is retracted without accumulator
         if (accumulator == null) {
             return null;
         }
 
-        InternalArray acc = (InternalArray) accumulator;
+        // nothing to be retracted
+        if (retractField == null) {
+            return accumulator;
+        }
         InternalArray retract = (InternalArray) retractField;
+        if (retract.size() == 0) {
+            return accumulator;
+        }
 
         List<Object> retractedElements = new ArrayList<>();
         for (int i = 0; i < retract.size(); i++) {
             retractedElements.add(elementGetter.getElementOrNull(retract, i));
         }
 
+        InternalArray acc = (InternalArray) accumulator;
         List<Object> accElements = new ArrayList<>();
         for (int i = 0; i < acc.size(); i++) {
             Object candidate = elementGetter.getElementOrNull(acc, i);

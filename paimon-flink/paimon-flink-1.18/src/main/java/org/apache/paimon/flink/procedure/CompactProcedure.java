@@ -31,6 +31,9 @@ import org.apache.flink.table.procedure.ProcedureContext;
 import java.util.Collections;
 import java.util.Map;
 
+import static org.apache.paimon.flink.action.ActionFactory.FULL;
+import static org.apache.paimon.flink.action.CompactActionFactory.checkCompactStrategy;
+
 /**
  * Stay compatible with 1.18 procedure which doesn't support named argument. Usage:
  *
@@ -44,7 +47,13 @@ import java.util.Map;
  *  CALL sys.compact('tableId', 'pt1=A,pt2=a;pt1=B,pt2=b')
  *
  *  -- compact a table with sorting
+ *  CALL sys.compact('tableId', 'ORDER/ZORDER', 'col1,col2')
+ *
+ *  -- compact specific partitions with sorting
  *  CALL sys.compact('tableId', 'partitions', 'ORDER/ZORDER', 'col1,col2', 'sink.parallelism=6')
+ *
+ *  -- compact with specific compact strategy
+ *  CALL sys.compact('tableId', 'partitions', 'ORDER/ZORDER', 'col1,col2', 'sink.parallelism=6', 'minor')
  *
  * </code></pre>
  */
@@ -59,6 +68,15 @@ public class CompactProcedure extends ProcedureBase {
     public String[] call(ProcedureContext procedureContext, String tableId, String partitions)
             throws Exception {
         return call(procedureContext, tableId, partitions, "", "", "", "");
+    }
+
+    public String[] call(
+            ProcedureContext procedureContext,
+            String tableId,
+            String orderStrategy,
+            String orderByColumns)
+            throws Exception {
+        return call(procedureContext, tableId, "", orderStrategy, orderByColumns, "", "");
     }
 
     public String[] call(
@@ -106,7 +124,8 @@ public class CompactProcedure extends ProcedureBase {
                 orderByColumns,
                 tableOptions,
                 whereSql,
-                "");
+                "",
+                null);
     }
 
     public String[] call(
@@ -117,13 +136,12 @@ public class CompactProcedure extends ProcedureBase {
             String orderByColumns,
             String tableOptions,
             String whereSql,
-            String partitionIdleTime)
+            String partitionIdleTime,
+            String compactStrategy)
             throws Exception {
-
-        String warehouse = catalog.warehouse();
         Map<String, String> catalogOptions = catalog.options();
         Map<String, String> tableConf =
-                StringUtils.isBlank(tableOptions)
+                StringUtils.isNullOrWhitespaceOnly(tableOptions)
                         ? Collections.emptyMap()
                         : ParameterUtils.parseCommaSeparatedKeyValues(tableOptions);
         Identifier identifier = Identifier.fromString(tableId);
@@ -132,22 +150,24 @@ public class CompactProcedure extends ProcedureBase {
         if (orderStrategy.isEmpty() && orderByColumns.isEmpty()) {
             action =
                     new CompactAction(
-                            warehouse,
                             identifier.getDatabaseName(),
                             identifier.getObjectName(),
                             catalogOptions,
                             tableConf);
-            if (!(StringUtils.isBlank(partitionIdleTime))) {
+            if (!(StringUtils.isNullOrWhitespaceOnly(partitionIdleTime))) {
                 action.withPartitionIdleTime(TimeUtils.parseDuration(partitionIdleTime));
+            }
+
+            if (checkCompactStrategy(compactStrategy)) {
+                action.withFullCompaction(compactStrategy.trim().equalsIgnoreCase(FULL));
             }
             jobName = "Compact Job";
         } else if (!orderStrategy.isEmpty() && !orderByColumns.isEmpty()) {
             Preconditions.checkArgument(
-                    StringUtils.isBlank(partitionIdleTime),
+                    StringUtils.isNullOrWhitespaceOnly(partitionIdleTime),
                     "sort compact do not support 'partition_idle_time'.");
             action =
                     new SortCompactAction(
-                                    warehouse,
                                     identifier.getDatabaseName(),
                                     identifier.getObjectName(),
                                     catalogOptions,
@@ -160,11 +180,11 @@ public class CompactProcedure extends ProcedureBase {
                     "You must specify 'order strategy' and 'order by columns' both.");
         }
 
-        if (!(StringUtils.isBlank(partitions))) {
+        if (!(StringUtils.isNullOrWhitespaceOnly(partitions))) {
             action.withPartitions(ParameterUtils.getPartitions(partitions.split(";")));
         }
 
-        if (!StringUtils.isBlank(whereSql)) {
+        if (!StringUtils.isNullOrWhitespaceOnly(whereSql)) {
             action.withWhereSql(whereSql);
         }
 

@@ -38,17 +38,19 @@ public class OrcFileFormatTest {
     @Test
     public void testAbsent() {
         Options options = new Options();
-        options.setString("haha", "1");
-        OrcFileFormat orc = new OrcFileFormatFactory().create(new FormatContext(options, 1024));
+        options.setString("orc.haha", "1");
+        OrcFileFormat orc =
+                new OrcFileFormatFactory().create(new FormatContext(options, 1024, 1024));
         assertThat(orc.orcProperties().getProperty(IDENTIFIER + ".haha", "")).isEqualTo("1");
     }
 
     @Test
     public void testPresent() {
         Options options = new Options();
-        options.setString("haha", "1");
-        options.setString("compress", "zlib");
-        OrcFileFormat orc = new OrcFileFormatFactory().create(new FormatContext(options, 1024));
+        options.setString("orc.haha", "1");
+        options.setString("orc.compress", "zlib");
+        OrcFileFormat orc =
+                new OrcFileFormatFactory().create(new FormatContext(options, 1024, 1024));
         assertThat(orc.orcProperties().getProperty(IDENTIFIER + ".haha", "")).isEqualTo("1");
         assertThat(orc.orcProperties().getProperty(IDENTIFIER + ".compress", "")).isEqualTo("zlib");
     }
@@ -56,7 +58,7 @@ public class OrcFileFormatTest {
     @Test
     public void testSupportedDataTypes() {
         OrcFileFormat orc =
-                new OrcFileFormatFactory().create(new FormatContext(new Options(), 1024));
+                new OrcFileFormatFactory().create(new FormatContext(new Options(), 1024, 1024));
 
         int index = 0;
         List<DataField> dataFields = new ArrayList<DataField>();
@@ -80,5 +82,69 @@ public class OrcFileFormatTest {
         dataFields.add(new DataField(index++, "date_type", DataTypes.DATE()));
         dataFields.add(new DataField(index++, "decimal_type", DataTypes.DECIMAL(10, 3)));
         orc.validateDataFields(new RowType(dataFields));
+    }
+
+    @Test
+    public void testCreateCost() {
+        double createConfCost = createConfigCost();
+        for (int i = 0; i < 1000; i++) {
+            create();
+        }
+        int times = 10_000;
+        long start = System.nanoTime();
+        for (int i = 0; i < times; i++) {
+            create();
+        }
+        double cost = ((double) (System.nanoTime() - start)) / 1000_000 / times;
+        assertThat(cost * 500 < createConfCost).isTrue();
+    }
+
+    @Test
+    public void testCreateCostWithRandomConfig() {
+        double createConfCost = createConfigCost();
+        for (int i = 0; i < 1000; i++) {
+            createRandomConfig();
+        }
+        int times = 10_000;
+        long start = System.nanoTime();
+        for (int i = 0; i < times; i++) {
+            createRandomConfig();
+        }
+        double cost = ((double) (System.nanoTime() - start)) / 1000_000 / times;
+        assertThat(cost * 10 < createConfCost).isTrue();
+    }
+
+    private double createConfigCost() {
+        for (int i = 0; i < 1000; i++) {
+            createConfig();
+        }
+        int times = 10_000;
+        long start = System.nanoTime();
+        for (int i = 0; i < times; i++) {
+            createConfig();
+        }
+        return ((double) (System.nanoTime() - start)) / 1000_000 / times;
+    }
+
+    private void createConfig() {
+        org.apache.hadoop.conf.Configuration conf = new org.apache.hadoop.conf.Configuration();
+        conf.set("a", "a");
+    }
+
+    private void create() {
+        Options options = new Options();
+        options.setString("haha", "1");
+        options.setString("compress", "zlib");
+        OrcFileFormat orcFileFormat =
+                new OrcFileFormatFactory().create(new FormatContext(options, 1024, 1024));
+    }
+
+    private void createRandomConfig() {
+        Options options = new Options();
+        options.setString("haha", "1");
+        options.setString("compress", "zlib");
+        options.setString("a", Math.random() + "");
+        OrcFileFormat orcFileFormat =
+                new OrcFileFormatFactory().create(new FormatContext(options, 1024, 1024));
     }
 }

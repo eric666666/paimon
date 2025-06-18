@@ -19,14 +19,22 @@
 package org.apache.paimon.table.source;
 
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileMeta08Serializer;
+import org.apache.paimon.io.DataFileMeta09Serializer;
+import org.apache.paimon.io.DataFileMeta10LegacySerializer;
 import org.apache.paimon.io.DataFileMetaSerializer;
 import org.apache.paimon.io.DataInputView;
 import org.apache.paimon.io.DataInputViewStreamWrapper;
 import org.apache.paimon.io.DataOutputView;
 import org.apache.paimon.io.DataOutputViewStreamWrapper;
+import org.apache.paimon.predicate.CompareUtils;
+import org.apache.paimon.stats.SimpleStatsEvolution;
+import org.apache.paimon.stats.SimpleStatsEvolutions;
+import org.apache.paimon.types.DataField;
 import org.apache.paimon.utils.FunctionWithIOException;
+import org.apache.paimon.utils.InternalRowUtils;
 import org.apache.paimon.utils.SerializationUtils;
 
 import javax.annotation.Nullable;
@@ -43,18 +51,20 @@ import java.util.stream.Collectors;
 
 import static org.apache.paimon.io.DataFilePathFactory.INDEX_PATH_SUFFIX;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
+import static org.apache.paimon.utils.Preconditions.checkState;
 
 /** Input splits. Needed by most batch computation engines. */
 public class DataSplit implements Split {
 
     private static final long serialVersionUID = 7L;
     private static final long MAGIC = -2394839472490812314L;
-    private static final int VERSION = 2;
+    private static final int VERSION = 6;
 
     private long snapshotId = 0;
     private BinaryRow partition;
     private int bucket = -1;
     private String bucketPath;
+    @Nullable private Integer totalBuckets;
 
     private List<DataFileMeta> beforeFiles = new ArrayList<>();
     @Nullable private List<DeletionFile> beforeDeletionFiles;
@@ -81,6 +91,10 @@ public class DataSplit implements Split {
 
     public String bucketPath() {
         return bucketPath;
+    }
+
+    public @Nullable Integer totalBuckets() {
+        return totalBuckets;
     }
 
     public List<DataFileMeta> beforeFiles() {
@@ -125,6 +139,83 @@ public class DataSplit implements Split {
         return rowCount;
     }
 
+    /** Whether it is possible to calculate the merged row count. */
+    public boolean mergedRowCountAvailable() {
+        return rawConvertible
+                && (dataDeletionFiles == null
+                        || dataDeletionFiles.stream()
+                                .allMatch(f -> f == null || f.cardinality() != null));
+    }
+
+    public long mergedRowCount() {
+        checkState(mergedRowCountAvailable());
+        return partialMergedRowCount();
+    }
+
+    public Object minValue(int fieldIndex, DataField dataField, SimpleStatsEvolutions evolutions) {
+        Object minValue = null;
+        for (DataFileMeta dataFile : dataFiles) {
+            SimpleStatsEvolution evolution = evolutions.getOrCreate(dataFile.schemaId());
+            InternalRow minValues =
+                    evolution.evolution(
+                            dataFile.valueStats().minValues(), dataFile.valueStatsCols());
+            Object other = InternalRowUtils.get(minValues, fieldIndex, dataField.type());
+            if (minValue == null) {
+                minValue = other;
+            } else if (other != null) {
+                if (CompareUtils.compareLiteral(dataField.type(), minValue, other) > 0) {
+                    minValue = other;
+                }
+            }
+        }
+        return minValue;
+    }
+
+    public Object maxValue(int fieldIndex, DataField dataField, SimpleStatsEvolutions evolutions) {
+        Object maxValue = null;
+        for (DataFileMeta dataFile : dataFiles) {
+            SimpleStatsEvolution evolution = evolutions.getOrCreate(dataFile.schemaId());
+            InternalRow maxValues =
+                    evolution.evolution(
+                            dataFile.valueStats().maxValues(), dataFile.valueStatsCols());
+            Object other = InternalRowUtils.get(maxValues, fieldIndex, dataField.type());
+            if (maxValue == null) {
+                maxValue = other;
+            } else if (other != null) {
+                if (CompareUtils.compareLiteral(dataField.type(), maxValue, other) < 0) {
+                    maxValue = other;
+                }
+            }
+        }
+        return maxValue;
+    }
+
+    /**
+     * Obtain merged row count as much as possible. There are two scenarios where accurate row count
+     * can be calculated:
+     *
+     * <p>1. raw file and no deletion file.
+     *
+     * <p>2. raw file + deletion file with cardinality.
+     */
+    public long partialMergedRowCount() {
+        long sum = 0L;
+        if (rawConvertible) {
+            List<RawFile> rawFiles = convertToRawFiles().orElse(null);
+            if (rawFiles != null) {
+                for (int i = 0; i < rawFiles.size(); i++) {
+                    RawFile rawFile = rawFiles.get(i);
+                    if (dataDeletionFiles == null || dataDeletionFiles.get(i) == null) {
+                        sum += rawFile.rowCount();
+                    } else if (dataDeletionFiles.get(i).cardinality() != null) {
+                        sum += rawFile.rowCount() - dataDeletionFiles.get(i).cardinality();
+                    }
+                }
+            }
+        }
+        return sum;
+    }
+
     @Override
     public Optional<List<RawFile>> convertToRawFiles() {
         if (rawConvertible) {
@@ -139,7 +230,7 @@ public class DataSplit implements Split {
 
     private RawFile makeRawTableFile(String bucketPath, DataFileMeta file) {
         return new RawFile(
-                bucketPath + "/" + file.fileName(),
+                file.externalPath().orElse(bucketPath + "/" + file.fileName()),
                 file.fileSize(),
                 0,
                 file.fileSize(),
@@ -190,6 +281,7 @@ public class DataSplit implements Split {
                 && rawConvertible == dataSplit.rawConvertible
                 && Objects.equals(partition, dataSplit.partition)
                 && Objects.equals(bucketPath, dataSplit.bucketPath)
+                && Objects.equals(totalBuckets, dataSplit.totalBuckets)
                 && Objects.equals(beforeFiles, dataSplit.beforeFiles)
                 && Objects.equals(beforeDeletionFiles, dataSplit.beforeDeletionFiles)
                 && Objects.equals(dataFiles, dataSplit.dataFiles)
@@ -203,6 +295,7 @@ public class DataSplit implements Split {
                 partition,
                 bucket,
                 bucketPath,
+                totalBuckets,
                 beforeFiles,
                 beforeDeletionFiles,
                 dataFiles,
@@ -224,6 +317,7 @@ public class DataSplit implements Split {
         this.partition = other.partition;
         this.bucket = other.bucket;
         this.bucketPath = other.bucketPath;
+        this.totalBuckets = other.totalBuckets;
         this.beforeFiles = other.beforeFiles;
         this.beforeDeletionFiles = other.beforeDeletionFiles;
         this.dataFiles = other.dataFiles;
@@ -239,6 +333,12 @@ public class DataSplit implements Split {
         SerializationUtils.serializeBinaryRow(partition, out);
         out.writeInt(bucket);
         out.writeUTF(bucketPath);
+        if (totalBuckets != null) {
+            out.writeBoolean(true);
+            out.writeInt(totalBuckets);
+        } else {
+            out.writeBoolean(false);
+        }
 
         DataFileMetaSerializer dataFileSer = new DataFileMetaSerializer();
         out.writeInt(beforeFiles.size());
@@ -268,16 +368,20 @@ public class DataSplit implements Split {
         BinaryRow partition = SerializationUtils.deserializeBinaryRow(in);
         int bucket = in.readInt();
         String bucketPath = in.readUTF();
+        Integer totalBuckets = version >= 6 && in.readBoolean() ? in.readInt() : null;
 
         FunctionWithIOException<DataInputView, DataFileMeta> dataFileSer =
                 getFileMetaSerde(version);
+        FunctionWithIOException<DataInputView, DeletionFile> deletionFileSerde =
+                getDeletionFileSerde(version);
         int beforeNumber = in.readInt();
         List<DataFileMeta> beforeFiles = new ArrayList<>(beforeNumber);
         for (int i = 0; i < beforeNumber; i++) {
             beforeFiles.add(dataFileSer.apply(in));
         }
 
-        List<DeletionFile> beforeDeletionFiles = DeletionFile.deserializeList(in);
+        List<DeletionFile> beforeDeletionFiles =
+                DeletionFile.deserializeList(in, deletionFileSerde);
 
         int fileNumber = in.readInt();
         List<DataFileMeta> dataFiles = new ArrayList<>(fileNumber);
@@ -285,7 +389,7 @@ public class DataSplit implements Split {
             dataFiles.add(dataFileSer.apply(in));
         }
 
-        List<DeletionFile> dataDeletionFiles = DeletionFile.deserializeList(in);
+        List<DeletionFile> dataDeletionFiles = DeletionFile.deserializeList(in, deletionFileSerde);
 
         boolean isStreaming = in.readBoolean();
         boolean rawConvertible = in.readBoolean();
@@ -296,6 +400,7 @@ public class DataSplit implements Split {
                         .withPartition(partition)
                         .withBucket(bucket)
                         .withBucketPath(bucketPath)
+                        .withTotalBuckets(totalBuckets)
                         .withBeforeFiles(beforeFiles)
                         .withDataFiles(dataFiles)
                         .isStreaming(isStreaming)
@@ -316,15 +421,27 @@ public class DataSplit implements Split {
             DataFileMeta08Serializer serializer = new DataFileMeta08Serializer();
             return serializer::deserialize;
         } else if (version == 2) {
+            DataFileMeta09Serializer serializer = new DataFileMeta09Serializer();
+            return serializer::deserialize;
+        } else if (version == 3 || version == 4) {
+            DataFileMeta10LegacySerializer serializer = new DataFileMeta10LegacySerializer();
+            return serializer::deserialize;
+        } else if (version >= 5) {
             DataFileMetaSerializer serializer = new DataFileMetaSerializer();
             return serializer::deserialize;
         } else {
-            throw new UnsupportedOperationException(
-                    "Expecting DataSplit version to be smaller or equal than "
-                            + VERSION
-                            + ", but found "
-                            + version
-                            + ".");
+            throw new UnsupportedOperationException("Unsupported version: " + version);
+        }
+    }
+
+    private static FunctionWithIOException<DataInputView, DeletionFile> getDeletionFileSerde(
+            int version) {
+        if (version >= 1 && version <= 3) {
+            return DeletionFile::deserializeV3;
+        } else if (version >= 4) {
+            return DeletionFile::deserialize;
+        } else {
+            throw new UnsupportedOperationException("Unsupported version: " + version);
         }
     }
 
@@ -354,6 +471,11 @@ public class DataSplit implements Split {
 
         public Builder withBucketPath(String bucketPath) {
             this.split.bucketPath = bucketPath;
+            return this;
+        }
+
+        public Builder withTotalBuckets(Integer totalBuckets) {
+            this.split.totalBuckets = totalBuckets;
             return this;
         }
 

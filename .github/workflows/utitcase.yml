@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 
-name: UTCase and ITCase Non Flink
+name: UTCase and ITCase Others
 
 on:
   push:
@@ -38,21 +38,26 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
       - name: Set up JDK ${{ env.JDK_VERSION }}
-        uses: actions/setup-java@v2
+        uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JDK_VERSION }}
-          distribution: 'adopt'
-      - name: Build
-        run:  mvn -T 1C -B clean install -DskipTests
-      - name: Test
+          distribution: 'temurin'
+
+      - name: Build And Test Others
         timeout-minutes: 60
         run: |
-          # run tests with random timezone to find out timezone related bugs
           . .github/workflows/utils.sh
           jvm_timezone=$(random_timezone)
           echo "JVM timezone is set to $jvm_timezone"
-          mvn -T 1C -B clean install -pl '!paimon-e2e-tests' -Pskip-paimon-flink-tests -Duser.timezone=$jvm_timezone
+          
+          TEST_MODULES="!paimon-e2e-tests,"
+          for suffix in 3.5 3.4 3.3 3.2 ut; do
+            TEST_MODULES+="!org.apache.paimon:paimon-spark-${suffix},"
+          done
+          TEST_MODULES="${TEST_MODULES%,}"
+          mvn -T 2C -B clean install -pl "${TEST_MODULES}" -Pskip-paimon-flink-tests -Duser.timezone=$jvm_timezone
         env:
-          MAVEN_OPTS: -Xmx4096m
+          MAVEN_OPTS: -Xmx4096m -XX:+UseG1GC -XX:CICompilerCount=2

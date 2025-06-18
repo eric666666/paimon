@@ -21,6 +21,7 @@ package org.apache.paimon.sort;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.codegen.RecordComparator;
 import org.apache.paimon.compression.BlockCompressionFactory;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.BinaryRowSerializer;
@@ -49,7 +50,7 @@ public class BinaryExternalSortBuffer implements SortBuffer {
     private final BinaryRowSerializer serializer;
     private final BinaryInMemorySortBuffer inMemorySortBuffer;
     private final IOManager ioManager;
-    private SpillChannelManager channelManager;
+    private final SpillChannelManager channelManager;
     private final int maxNumFileHandles;
     private final BlockCompressionFactory compressionCodecFactory;
     private final int compressionBlockSize;
@@ -68,7 +69,7 @@ public class BinaryExternalSortBuffer implements SortBuffer {
             BinaryInMemorySortBuffer inMemorySortBuffer,
             IOManager ioManager,
             int maxNumFileHandles,
-            String compression,
+            CompressOptions compression,
             MemorySize maxDiskSize) {
         this.serializer = serializer;
         this.inMemorySortBuffer = inMemorySortBuffer;
@@ -99,8 +100,9 @@ public class BinaryExternalSortBuffer implements SortBuffer {
             long bufferSize,
             int pageSize,
             int maxNumFileHandles,
-            String compression,
-            MemorySize maxDiskSize) {
+            CompressOptions compression,
+            MemorySize maxDiskSize,
+            boolean sequenceOrder) {
         return create(
                 ioManager,
                 rowType,
@@ -108,7 +110,8 @@ public class BinaryExternalSortBuffer implements SortBuffer {
                 new HeapMemorySegmentPool(bufferSize, pageSize),
                 maxNumFileHandles,
                 compression,
-                maxDiskSize);
+                maxDiskSize,
+                sequenceOrder);
     }
 
     public static BinaryExternalSortBuffer create(
@@ -117,9 +120,11 @@ public class BinaryExternalSortBuffer implements SortBuffer {
             int[] keyFields,
             MemorySegmentPool pool,
             int maxNumFileHandles,
-            String compression,
-            MemorySize maxDiskSize) {
-        RecordComparator comparator = newRecordComparator(rowType.getFieldTypes(), keyFields);
+            CompressOptions compression,
+            MemorySize maxDiskSize,
+            boolean sequenceOrder) {
+        RecordComparator comparator =
+                newRecordComparator(rowType.getFieldTypes(), keyFields, sequenceOrder);
         BinaryInMemorySortBuffer sortBuffer =
                 BinaryInMemorySortBuffer.createBuffer(
                         newNormalizedKeyComputer(rowType.getFieldTypes(), keyFields),
@@ -149,8 +154,7 @@ public class BinaryExternalSortBuffer implements SortBuffer {
         inMemorySortBuffer.clear();
         spillChannelIDs.clear();
         // delete files
-        channelManager.close();
-        channelManager = new SpillChannelManager();
+        channelManager.reset();
     }
 
     @Override

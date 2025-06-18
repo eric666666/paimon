@@ -93,6 +93,7 @@ SELECT * FROM t /*+ OPTIONS('incremental-between' = '12,20') */;
 
 -- incremental between snapshot time mills
 SELECT * FROM t /*+ OPTIONS('incremental-between-timestamp' = '1692169000000,1692169900000') */;
+SELECT * FROM t /*+ OPTIONS('incremental-between-timestamp' = '2025-03-12 00:00:00,2025-03-12 00:08:00') */;
 ```
 
 By default, will scan changelog files for the table which produces changelog files. Otherwise, scan newly changed files.
@@ -104,6 +105,23 @@ If you want see `DELETE` records, you can use audit_log table:
 ```sql
 SELECT * FROM t$audit_log /*+ OPTIONS('incremental-between' = '12,20') */;
 ```
+
+### Batch Incremental between Auto-created Tags
+
+You can use `incremental-between` to query incremental changes between two tags. But for auto-created tag, the tag may
+not be created in-time because of data delay.
+
+For example, assume that tags '2024-12-01', '2024-12-02' and '2024-12-04' are auto created daily. Data for 12/03 are delayed
+and ingested with data for 12/04. Now if you want to query the incremental changes between tags, and you don't know the tag 
+of 12/03 is not created, you will use `incremental-between` with '2024-12-01,2024-12-02', '2024-12-02,2024-12-03' and 
+'2024-12-03,2024-12-04' respectively, then you will get an error that the tag '2024-12-03' doesn't exist.
+
+We introduced a new option `incremental-to-auto-tag` for this scenario. You can only specify the end tag, and Paimon will 
+find an earlier tag and return changes between them. If the tag doesn't exist or the earlier tag doesn't exist, return empty. 
+
+For example, when you query 'incremental-to-auto-tag=2024-12-01' or 'incremental-to-auto-tag=2024-12-03', the result is 
+empty; Query 'incremental-to-auto-tag=2024-12-02', the result is change between 12/01 and 12/02; Query 'incremental-to-auto-tag=2024-12-04', 
+the result is change between 12/02 and 12/04.
 
 ## Streaming Query
 
@@ -171,58 +189,6 @@ prevent you from reading older incremental data. So, Paimon also provides anothe
 ```sql
 SELECT * FROM t /*+ OPTIONS('scan.file-creation-time-millis' = '1678883047356') */;
 ```
-
-### Consumer ID
-
-You can specify the `consumer-id` when streaming read table:
-```sql
-SELECT * FROM t /*+ OPTIONS('consumer-id' = 'myid') */;
-```
-
-When stream read Paimon tables, the next snapshot id to be recorded into the file system. This has several advantages:
-
-1. When previous job is stopped, the newly started job can continue to consume from the previous progress without
-   resuming from the state. The newly reading will start reading from next snapshot id found in consumer files. 
-   If you don't want this behavior, you can set `'consumer.ignore-progress'` to true.
-2. When deciding whether a snapshot has expired, Paimon looks at all the consumers of the table in the file system,
-   and if there are consumers that still depend on this snapshot, then this snapshot will not be deleted by expiration.
-
-{{< hint info >}}
-NOTE: The consumer will prevent expiration of the snapshot. You can specify 'consumer.expiration-time' to manage the 
-lifetime of consumers.
-{{< /hint >}}
-
-By default, the consumer uses `exactly-once` mode to record consumption progress, which strictly ensures that what is 
-recorded in the consumer is the snapshot-id + 1 that all readers have exactly consumed. You can set `consumer.mode` to 
-`at-least-once` to allow readers consume snapshots at different rates and record the slowest snapshot-id among all 
-readers into the consumer. This mode can provide more capabilities, such as watermark alignment.
-
-{{< hint warning >}}
-Since the implementation of `exactly-once` mode and `at-least-once` mode are completely different, the state of 
-flink is incompatible and cannot be restored from the state when switching modes.
-{{< /hint >}}
-
-You can reset a consumer with a given consumer ID and next snapshot ID and delete a consumer with a given consumer ID.
-
-{{< hint info >}}
-First, you need to stop the streaming task using this consumer ID, and then execute the reset consumer action job.
-{{< /hint >}}
-
-Run the following command:
-
-```bash
-<FLINK_HOME>/bin/flink run \
-    /path/to/paimon-flink-action-{{< version >}}.jar \
-    reset-consumer \
-    --warehouse <warehouse-path> \
-    --database <database-name> \ 
-    --table <table-name> \
-    --consumer_id <consumer-id> \
-    [--next_snapshot <next-snapshot-id>] \
-    [--catalog_conf <paimon-catalog-conf> [--catalog_conf <paimon-catalog-conf> ...]]
-```
-
-please don't specify --next_snapshot parameter if you want to delete the consumer.
 
 ### Read Overwrite
 

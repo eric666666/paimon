@@ -21,26 +21,26 @@ package org.apache.paimon.table;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.KeyValue;
 import org.apache.paimon.KeyValueFileStore;
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
-import org.apache.paimon.iceberg.PrimaryKeyIcebergCommitCallback;
 import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.mergetree.compact.LookupMergeFunction;
 import org.apache.paimon.mergetree.compact.MergeFunctionFactory;
 import org.apache.paimon.operation.FileStoreScan;
 import org.apache.paimon.operation.KeyValueFileStoreScan;
-import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.schema.KeyValueFieldsExtractor;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.query.LocalTableQuery;
-import org.apache.paimon.table.sink.CommitCallback;
 import org.apache.paimon.table.sink.TableWriteImpl;
 import org.apache.paimon.table.source.InnerTableRead;
 import org.apache.paimon.table.source.KeyValueTableRead;
 import org.apache.paimon.table.source.MergeTreeSplitGenerator;
 import org.apache.paimon.table.source.SplitGenerator;
 import org.apache.paimon.types.RowType;
+
+import javax.annotation.Nullable;
 
 import java.util.List;
 import java.util.function.BiConsumer;
@@ -50,17 +50,18 @@ import static org.apache.paimon.predicate.PredicateBuilder.pickTransformFieldMap
 import static org.apache.paimon.predicate.PredicateBuilder.splitAnd;
 
 /** {@link FileStoreTable} for primary key table. */
-class PrimaryKeyFileStoreTable extends AbstractFileStoreTable {
+public class PrimaryKeyFileStoreTable extends AbstractFileStoreTable {
 
     private static final long serialVersionUID = 1L;
 
     private transient KeyValueFileStore lazyStore;
 
+    @VisibleForTesting
     PrimaryKeyFileStoreTable(FileIO fileIO, Path path, TableSchema tableSchema) {
         this(fileIO, path, tableSchema, CatalogEnvironment.empty());
     }
 
-    PrimaryKeyFileStoreTable(
+    public PrimaryKeyFileStoreTable(
             FileIO fileIO,
             Path path,
             TableSchema tableSchema,
@@ -72,17 +73,14 @@ class PrimaryKeyFileStoreTable extends AbstractFileStoreTable {
     public KeyValueFileStore store() {
         if (lazyStore == null) {
             RowType rowType = tableSchema.logicalRowType();
-            Options conf = Options.fromMap(tableSchema.options());
-            CoreOptions options = new CoreOptions(conf);
+            CoreOptions options = CoreOptions.fromMap(tableSchema.options());
             KeyValueFieldsExtractor extractor =
                     PrimaryKeyTableUtils.PrimaryKeyFieldsExtractor.EXTRACTOR;
 
             MergeFunctionFactory<KeyValue> mfFactory =
                     PrimaryKeyTableUtils.createMergeFunctionFactory(tableSchema, extractor);
             if (options.needLookup()) {
-                mfFactory =
-                        LookupMergeFunction.wrap(
-                                mfFactory, new RowType(extractor.keyFields(tableSchema)), rowType);
+                mfFactory = LookupMergeFunction.wrap(mfFactory);
             }
 
             lazyStore =
@@ -137,7 +135,7 @@ class PrimaryKeyFileStoreTable extends AbstractFileStoreTable {
                             splitAnd(predicate),
                             tableSchema.fieldNames(),
                             tableSchema.trimmedPrimaryKeys());
-            if (keyFilters.size() > 0) {
+            if (!keyFilters.isEmpty()) {
                 ((KeyValueFileStoreScan) scan).withKeyFilter(and(keyFilters));
             }
 
@@ -181,14 +179,12 @@ class PrimaryKeyFileStoreTable extends AbstractFileStoreTable {
     }
 
     @Override
-    protected List<CommitCallback> createCommitCallbacks(String commitUser) {
-        List<CommitCallback> callbacks = super.createCommitCallbacks(commitUser);
-        CoreOptions options = coreOptions();
-
-        if (options.metadataIcebergCompatible()) {
-            callbacks.add(new PrimaryKeyIcebergCommitCallback(this, commitUser));
+    @Nullable
+    protected Runnable newExpireRunnable() {
+        if (coreOptions().bucket() == BucketMode.POSTPONE_BUCKET) {
+            return null;
+        } else {
+            return super.newExpireRunnable();
         }
-
-        return callbacks;
     }
 }

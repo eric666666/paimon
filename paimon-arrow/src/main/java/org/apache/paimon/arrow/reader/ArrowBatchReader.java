@@ -23,6 +23,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.columnar.ColumnVector;
 import org.apache.paimon.data.columnar.ColumnarRow;
 import org.apache.paimon.data.columnar.VectorizedColumnBatch;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 
@@ -33,14 +34,19 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import java.util.Iterator;
 import java.util.List;
 
+import static org.apache.paimon.utils.StringUtils.toLowerCaseIfNeed;
+
 /** Reader from a {@link VectorSchemaRoot} to paimon rows. */
 public class ArrowBatchReader {
 
+    private final InternalRowSerializer internalRowSerializer;
     private final VectorizedColumnBatch batch;
     private final Arrow2PaimonVectorConverter[] convertors;
     private final RowType projectedRowType;
+    private final boolean caseSensitive;
 
-    public ArrowBatchReader(RowType rowType) {
+    public ArrowBatchReader(RowType rowType, boolean caseSensitive) {
+        this.internalRowSerializer = new InternalRowSerializer(rowType);
         ColumnVector[] columnVectors = new ColumnVector[rowType.getFieldCount()];
         this.convertors = new Arrow2PaimonVectorConverter[rowType.getFieldCount()];
         this.batch = new VectorizedColumnBatch(columnVectors);
@@ -49,6 +55,7 @@ public class ArrowBatchReader {
         for (int i = 0; i < columnVectors.length; i++) {
             this.convertors[i] = Arrow2PaimonVectorConverter.construct(rowType.getTypeAt(i));
         }
+        this.caseSensitive = caseSensitive;
     }
 
     public Iterable<InternalRow> readBatch(VectorSchemaRoot vsr) {
@@ -57,7 +64,8 @@ public class ArrowBatchReader {
         List<DataField> dataFields = projectedRowType.getFields();
         for (int i = 0; i < dataFields.size(); ++i) {
             try {
-                Field field = arrowSchema.findField(dataFields.get(i).name().toLowerCase());
+                String fieldName = dataFields.get(i).name();
+                Field field = arrowSchema.findField(toLowerCaseIfNeed(fieldName, caseSensitive));
                 int idx = arrowSchema.getFields().indexOf(field);
                 mapping[i] = idx;
             } catch (IllegalArgumentException e) {
@@ -85,7 +93,11 @@ public class ArrowBatchReader {
                     public InternalRow next() {
                         columnarRow.setRowId(position);
                         position++;
-                        return columnarRow;
+                        // when pk merge, the last value will be referenced by maxKey. If reader
+                        // close, the maxKey will be useless. We must avoid this situation
+                        return position == rowCount
+                                ? internalRowSerializer.toBinaryRow(columnarRow)
+                                : columnarRow;
                     }
                 };
     }

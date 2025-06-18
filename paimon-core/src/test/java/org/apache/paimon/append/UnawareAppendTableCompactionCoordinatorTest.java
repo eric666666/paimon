@@ -29,6 +29,7 @@ import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
+import org.apache.paimon.table.source.EndOfScanException;
 import org.apache.paimon.types.DataTypes;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -43,7 +44,9 @@ import java.util.UUID;
 
 import static org.apache.paimon.mergetree.compact.MergeTreeCompactManagerTest.row;
 import static org.apache.paimon.stats.StatsTestUtils.newSimpleStats;
+import static org.apache.paimon.testutils.assertj.PaimonAssertions.anyCauseMatches;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link UnawareAppendTableCompactionCoordinator}. */
 public class UnawareAppendTableCompactionCoordinatorTest {
@@ -56,7 +59,7 @@ public class UnawareAppendTableCompactionCoordinatorTest {
     @Test
     public void testForCompactPlan() {
         List<DataFileMeta> files = generateNewFiles(200, 0);
-        assertTasks(files, 200 / 6);
+        assertTasks(files, 2);
     }
 
     @Test
@@ -70,7 +73,7 @@ public class UnawareAppendTableCompactionCoordinatorTest {
         List<DataFileMeta> files =
                 generateNewFiles(
                         100, appendOnlyFileStoreTable.coreOptions().targetFileSize(false) / 3 + 1);
-        assertTasks(files, 100 / 3);
+        assertTasks(files, 17);
     }
 
     @Test
@@ -79,6 +82,32 @@ public class UnawareAppendTableCompactionCoordinatorTest {
                 generateNewFiles(
                         100, appendOnlyFileStoreTable.coreOptions().targetFileSize(false) / 10 * 8);
         assertTasks(files, 0);
+    }
+
+    @Test
+    public void testCompactGroupSplit() {
+        List<DataFileMeta> files =
+                generateNewFiles(
+                        1000, appendOnlyFileStoreTable.coreOptions().targetFileSize(false) / 10);
+        compactionCoordinator.notifyNewFiles(partition, files);
+
+        assertThat(compactionCoordinator.compactPlan().size()).isEqualTo(56);
+        files.clear();
+
+        files =
+                generateNewFiles(
+                        1050, appendOnlyFileStoreTable.coreOptions().targetFileSize(false) / 5);
+        compactionCoordinator.notifyNewFiles(partition, files);
+        assertThat(compactionCoordinator.compactPlan().size()).isEqualTo(105);
+    }
+
+    @Test
+    public void testCompactGroupSplit2() {
+        List<DataFileMeta> files =
+                generateNewFiles(
+                        1089, appendOnlyFileStoreTable.coreOptions().targetFileSize(false) / 5);
+        compactionCoordinator.notifyNewFiles(partition, files);
+        assertThat(compactionCoordinator.compactPlan().size()).isEqualTo(109);
     }
 
     @Test
@@ -135,6 +164,14 @@ public class UnawareAppendTableCompactionCoordinatorTest {
                 .isEqualTo(0);
     }
 
+    @Test
+    public void testBatchScanEmptyTable() {
+        compactionCoordinator =
+                new UnawareAppendTableCompactionCoordinator(appendOnlyFileStoreTable, false);
+        assertThatThrownBy(() -> compactionCoordinator.scan())
+                .satisfies(anyCauseMatches(EndOfScanException.class));
+    }
+
     private void assertTasks(List<DataFileMeta> files, int taskNum) {
         compactionCoordinator.notifyNewFiles(partition, files);
         List<UnawareAppendCompactionTask> tasks = compactionCoordinator.compactPlan();
@@ -148,7 +185,6 @@ public class UnawareAppendTableCompactionCoordinatorTest {
         schemaBuilder.column("f2", DataTypes.STRING());
         schemaBuilder.column("f3", DataTypes.STRING());
         schemaBuilder.option(CoreOptions.COMPACTION_MIN_FILE_NUM.key(), "3");
-        schemaBuilder.option(CoreOptions.COMPACTION_MAX_FILE_NUM.key(), "6");
         return schemaBuilder.build();
     }
 
@@ -190,6 +226,7 @@ public class UnawareAppendTableCompactionCoordinatorTest {
                 0,
                 0L,
                 null,
-                FileSource.APPEND);
+                FileSource.APPEND,
+                null);
     }
 }

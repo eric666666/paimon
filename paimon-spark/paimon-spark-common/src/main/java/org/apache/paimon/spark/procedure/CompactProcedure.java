@@ -19,6 +19,7 @@
 package org.apache.paimon.spark.procedure;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.CoreOptions.OrderType;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.append.UnawareAppendCompactionTask;
 import org.apache.paimon.append.UnawareAppendTableCompactionCoordinator;
@@ -43,9 +44,11 @@ import org.apache.paimon.table.sink.CommitMessageSerializer;
 import org.apache.paimon.table.sink.CompactionTaskSerializer;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.table.source.EndOfScanException;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.ParameterUtils;
+import org.apache.paimon.utils.ProcedureUtils;
 import org.apache.paimon.utils.SerializationUtils;
 import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.utils.TimeUtils;
@@ -56,6 +59,7 @@ import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.PaimonUtils;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.Expression;
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan;
@@ -99,12 +103,13 @@ import static org.apache.spark.sql.types.DataTypes.StringType;
  */
 public class CompactProcedure extends BaseProcedure {
 
-    private static final Logger LOG = LoggerFactory.getLogger(CompactProcedure.class.getName());
+    private static final Logger LOG = LoggerFactory.getLogger(CompactProcedure.class);
 
     private static final ProcedureParameter[] PARAMETERS =
             new ProcedureParameter[] {
                 ProcedureParameter.required("table", StringType),
                 ProcedureParameter.optional("partitions", StringType),
+                ProcedureParameter.optional("compact_strategy", StringType),
                 ProcedureParameter.optional("order_strategy", StringType),
                 ProcedureParameter.optional("order_by", StringType),
                 ProcedureParameter.optional("where", StringType),
@@ -117,6 +122,9 @@ public class CompactProcedure extends BaseProcedure {
                     new StructField[] {
                         new StructField("result", DataTypes.BooleanType, true, Metadata.empty())
                     });
+
+    private static final String MINOR = "minor";
+    private static final String FULL = "full";
 
     protected CompactProcedure(TableCatalog tableCatalog) {
         super(tableCatalog);
@@ -136,23 +144,33 @@ public class CompactProcedure extends BaseProcedure {
     public InternalRow[] call(InternalRow args) {
         Identifier tableIdent = toIdentifier(args.getString(0), PARAMETERS[0].name());
         String partitions = blank(args, 1) ? null : args.getString(1);
-        String sortType = blank(args, 2) ? TableSorter.OrderType.NONE.name() : args.getString(2);
+        // make full compact strategy as default.
+        String compactStrategy = blank(args, 2) ? FULL : args.getString(2);
+        String sortType = blank(args, 3) ? OrderType.NONE.name() : args.getString(3);
         List<String> sortColumns =
-                blank(args, 3)
+                blank(args, 4)
                         ? Collections.emptyList()
-                        : Arrays.asList(args.getString(3).split(","));
-        String where = blank(args, 4) ? null : args.getString(4);
-        String options = args.isNullAt(5) ? null : args.getString(5);
+                        : Arrays.asList(args.getString(4).split(","));
+        String where = blank(args, 5) ? null : args.getString(5);
+        String options = args.isNullAt(6) ? null : args.getString(6);
         Duration partitionIdleTime =
-                blank(args, 6) ? null : TimeUtils.parseDuration(args.getString(6));
-        if (TableSorter.OrderType.NONE.name().equals(sortType) && !sortColumns.isEmpty()) {
+                blank(args, 7) ? null : TimeUtils.parseDuration(args.getString(7));
+        if (OrderType.NONE.name().equals(sortType) && !sortColumns.isEmpty()) {
             throw new IllegalArgumentException(
                     "order_strategy \"none\" cannot work with order_by columns.");
         }
-        if (partitionIdleTime != null && (!TableSorter.OrderType.NONE.name().equals(sortType))) {
+        if (partitionIdleTime != null && (!OrderType.NONE.name().equals(sortType))) {
             throw new IllegalArgumentException(
                     "sort compact do not support 'partition_idle_time'.");
         }
+
+        if (!(compactStrategy.equalsIgnoreCase(FULL) || compactStrategy.equalsIgnoreCase(MINOR))) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "The compact strategy only supports 'full' or 'minor', but '%s' is configured.",
+                            compactStrategy));
+        }
+
         checkArgument(
                 partitions == null || where == null,
                 "partitions and where cannot be used together.");
@@ -168,7 +186,7 @@ public class CompactProcedure extends BaseProcedure {
                             table.partitionKeys());
                     DataSourceV2Relation relation = createRelation(tableIdent);
                     Expression condition = null;
-                    if (!StringUtils.isBlank(finalWhere)) {
+                    if (!StringUtils.isNullOrWhitespaceOnly(finalWhere)) {
                         condition = ExpressionUtils.resolveFilter(spark(), relation, finalWhere);
                         checkArgument(
                                 ExpressionUtils.isValidPredicate(
@@ -180,17 +198,16 @@ public class CompactProcedure extends BaseProcedure {
                                 table.partitionKeys());
                     }
 
-                    Map<String, String> dynamicOptions = new HashMap<>();
-                    dynamicOptions.put(CoreOptions.WRITE_ONLY.key(), "false");
-                    if (!StringUtils.isBlank(options)) {
-                        dynamicOptions.putAll(ParameterUtils.parseCommaSeparatedKeyValues(options));
-                    }
+                    HashMap<String, String> dynamicOptions = new HashMap<>();
+                    ProcedureUtils.putIfNotEmpty(
+                            dynamicOptions, CoreOptions.WRITE_ONLY.key(), "false");
+                    ProcedureUtils.putAllOptions(dynamicOptions, options);
                     table = table.copy(dynamicOptions);
-
                     InternalRow internalRow =
                             newInternalRow(
                                     execute(
                                             (FileStoreTable) table,
+                                            compactStrategy,
                                             sortType,
                                             sortColumns,
                                             relation,
@@ -206,18 +223,20 @@ public class CompactProcedure extends BaseProcedure {
     }
 
     private boolean blank(InternalRow args, int index) {
-        return args.isNullAt(index) || StringUtils.isBlank(args.getString(index));
+        return args.isNullAt(index) || StringUtils.isNullOrWhitespaceOnly(args.getString(index));
     }
 
     private boolean execute(
             FileStoreTable table,
+            String compactStrategy,
             String sortType,
             List<String> sortColumns,
             DataSourceV2Relation relation,
             @Nullable Expression condition,
             @Nullable Duration partitionIdleTime) {
         BucketMode bucketMode = table.bucketMode();
-        TableSorter.OrderType orderType = TableSorter.OrderType.of(sortType);
+        OrderType orderType = OrderType.of(sortType);
+        boolean fullCompact = compactStrategy.equalsIgnoreCase(FULL);
         Predicate filter =
                 condition == null
                         ? null
@@ -227,12 +246,13 @@ public class CompactProcedure extends BaseProcedure {
                                         table.rowType(),
                                         false)
                                 .getOrElse(null);
-        if (orderType.equals(TableSorter.OrderType.NONE)) {
+        if (orderType.equals(OrderType.NONE)) {
             JavaSparkContext javaSparkContext = new JavaSparkContext(spark().sparkContext());
             switch (bucketMode) {
                 case HASH_FIXED:
                 case HASH_DYNAMIC:
-                    compactAwareBucketTable(table, filter, partitionIdleTime, javaSparkContext);
+                    compactAwareBucketTable(
+                            table, fullCompact, filter, partitionIdleTime, javaSparkContext);
                     break;
                 case BUCKET_UNAWARE:
                     compactUnAwareBucketTable(table, filter, partitionIdleTime, javaSparkContext);
@@ -258,6 +278,7 @@ public class CompactProcedure extends BaseProcedure {
 
     private void compactAwareBucketTable(
             FileStoreTable table,
+            boolean fullCompact,
             @Nullable Predicate filter,
             @Nullable Duration partitionIdleTime,
             JavaSparkContext javaSparkContext) {
@@ -268,9 +289,8 @@ public class CompactProcedure extends BaseProcedure {
         Set<BinaryRow> partitionToBeCompacted =
                 getHistoryPartition(snapshotReader, partitionIdleTime);
         List<Pair<byte[], Integer>> partitionBuckets =
-                snapshotReader.read().splits().stream()
-                        .map(split -> (DataSplit) split)
-                        .map(dataSplit -> Pair.of(dataSplit.partition(), dataSplit.bucket()))
+                snapshotReader.bucketEntries().stream()
+                        .map(entry -> Pair.of(entry.partition(), entry.bucket()))
                         .distinct()
                         .filter(pair -> partitionToBeCompacted.contains(pair.getKey()))
                         .map(
@@ -281,13 +301,15 @@ public class CompactProcedure extends BaseProcedure {
                         .collect(Collectors.toList());
 
         if (partitionBuckets.isEmpty()) {
+            LOG.info("Partition bucket is empty, no compact job to execute.");
             return;
         }
 
+        int readParallelism = readParallelism(partitionBuckets, spark());
         BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
         JavaRDD<byte[]> commitMessageJavaRDD =
                 javaSparkContext
-                        .parallelize(partitionBuckets)
+                        .parallelize(partitionBuckets, readParallelism)
                         .mapPartitions(
                                 (FlatMapFunction<Iterator<Pair<byte[], Integer>>, byte[]>)
                                         pairIterator -> {
@@ -302,7 +324,7 @@ public class CompactProcedure extends BaseProcedure {
                                                             SerializationUtils.deserializeBinaryRow(
                                                                     pair.getLeft()),
                                                             pair.getRight(),
-                                                            true);
+                                                            fullCompact);
                                                 }
                                                 CommitMessageSerializer serializer =
                                                         new CommitMessageSerializer();
@@ -339,8 +361,13 @@ public class CompactProcedure extends BaseProcedure {
             @Nullable Predicate filter,
             @Nullable Duration partitionIdleTime,
             JavaSparkContext javaSparkContext) {
-        List<UnawareAppendCompactionTask> compactionTasks =
-                new UnawareAppendTableCompactionCoordinator(table, false, filter).run();
+        List<UnawareAppendCompactionTask> compactionTasks;
+        try {
+            compactionTasks =
+                    new UnawareAppendTableCompactionCoordinator(table, false, filter).run();
+        } catch (EndOfScanException e) {
+            compactionTasks = new ArrayList<>();
+        }
         if (partitionIdleTime != null) {
             Map<BinaryRow, Long> partitionInfo =
                     table.newSnapshotReader().partitionEntries().stream()
@@ -360,6 +387,7 @@ public class CompactProcedure extends BaseProcedure {
                             .collect(Collectors.toList());
         }
         if (compactionTasks.isEmpty()) {
+            LOG.info("Task plan is empty, no compact job to execute.");
             return;
         }
 
@@ -373,10 +401,11 @@ public class CompactProcedure extends BaseProcedure {
             throw new RuntimeException("serialize compaction task failed");
         }
 
+        int readParallelism = readParallelism(serializedTasks, spark());
         String commitUser = createCommitUser(table.coreOptions().toConfiguration());
         JavaRDD<byte[]> commitMessageJavaRDD =
                 javaSparkContext
-                        .parallelize(serializedTasks)
+                        .parallelize(serializedTasks, readParallelism)
                         .mapPartitions(
                                 (FlatMapFunction<Iterator<byte[]>, byte[]>)
                                         taskIterator -> {
@@ -446,7 +475,7 @@ public class CompactProcedure extends BaseProcedure {
 
     private void sortCompactUnAwareBucketTable(
             FileStoreTable table,
-            TableSorter.OrderType orderType,
+            OrderType orderType,
             List<String> sortColumns,
             DataSourceV2Relation relation,
             @Nullable Predicate filter) {
@@ -488,6 +517,22 @@ public class CompactProcedure extends BaseProcedure {
                                 Collectors.collectingAndThen(
                                         Collectors.toList(),
                                         list -> list.toArray(new DataSplit[0]))));
+    }
+
+    private int readParallelism(List<?> groupedTasks, SparkSession spark) {
+        int sparkParallelism =
+                Math.max(
+                        spark.sparkContext().defaultParallelism(),
+                        spark.sessionState().conf().numShufflePartitions());
+        int readParallelism = Math.min(groupedTasks.size(), sparkParallelism);
+        if (sparkParallelism > readParallelism) {
+            LOG.warn(
+                    String.format(
+                            "Spark default parallelism (%s) is greater than bucket or task parallelism (%s),"
+                                    + "we use %s as the final read parallelism",
+                            sparkParallelism, readParallelism, readParallelism));
+        }
+        return readParallelism;
     }
 
     @VisibleForTesting

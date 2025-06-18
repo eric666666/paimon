@@ -28,6 +28,7 @@ import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.operation.metrics.WriterBufferMetric;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -49,6 +50,7 @@ import java.util.Map;
  * @param <T> type of record to write.
  */
 public abstract class MemoryFileStoreWrite<T> extends AbstractFileStoreWrite<T> {
+
     private static final Logger LOG = LoggerFactory.getLogger(MemoryFileStoreWrite.class);
 
     protected final CoreOptions options;
@@ -58,23 +60,25 @@ public abstract class MemoryFileStoreWrite<T> extends AbstractFileStoreWrite<T> 
     private WriterBufferMetric writerBufferMetric;
 
     public MemoryFileStoreWrite(
-            String commitUser,
             SnapshotManager snapshotManager,
             FileStoreScan scan,
             CoreOptions options,
+            RowType partitionType,
             @Nullable IndexMaintainer.Factory<T> indexFactory,
-            @Nullable DeletionVectorsMaintainer.Factory deletionVectorsMaintainerFactory,
+            @Nullable DeletionVectorsMaintainer.Factory dvMaintainerFactory,
             String tableName) {
         super(
-                commitUser,
                 snapshotManager,
                 scan,
                 indexFactory,
-                deletionVectorsMaintainerFactory,
+                dvMaintainerFactory,
                 tableName,
-                options.writeMaxWritersToSpill());
+                options,
+                partitionType);
         this.options = options;
-        this.cacheManager = new CacheManager(options.lookupCacheMaxMemory());
+        this.cacheManager =
+                new CacheManager(
+                        options.lookupCacheMaxMemory(), options.lookupCacheHighPrioPoolRatio());
     }
 
     @Override

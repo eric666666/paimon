@@ -75,7 +75,8 @@ public class PredicateConverterTest {
     @ParameterizedTest
     public void testVisitAndAutoTypeInference(ResolvedExpression expression, Predicate expected) {
         if (expression instanceof CallExpression) {
-            assertThat(CONVERTER.visit((CallExpression) expression)).isEqualTo(expected);
+            assertThat(CONVERTER.visit((CallExpression) expression).toString())
+                    .isEqualTo(expected.toString());
         } else {
             assertThatThrownBy(() -> CONVERTER.visit(expression))
                     .isInstanceOf(PredicateConverter.UnsupportedExpression.class);
@@ -244,7 +245,13 @@ public class PredicateConverterTest {
                                 BuiltInFunctionDefinitions.EQUALS,
                                 Arrays.asList(stringLitExpr2, stringRefExpr),
                                 DataTypes.STRING()),
-                        BUILDER.equal(2, BinaryString.fromString("haha"))));
+                        BUILDER.equal(2, BinaryString.fromString("haha"))),
+                Arguments.of(
+                        CallExpression.permanent(
+                                BuiltInFunctionDefinitions.BETWEEN,
+                                Arrays.asList(longRefExpr, intLitExpr, intLitExpr2),
+                                DataTypes.BOOLEAN()),
+                        BUILDER.between(0, 10, 20)));
     }
 
     @MethodSource("provideLikeExpressions")
@@ -789,6 +796,6 @@ public class PredicateConverterTest {
     }
 
     private static CallExpression call(FunctionDefinition function, ResolvedExpression... args) {
-        return new CallExpression(function, Arrays.asList(args), DataTypes.BOOLEAN());
+        return new CallExpression(false, null, function, Arrays.asList(args), DataTypes.BOOLEAN());
     }
 }

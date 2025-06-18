@@ -20,13 +20,20 @@ package org.apache.paimon.oss;
 
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.FileStatus;
+import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.RemoteIterator;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.utils.IOUtils;
 
+import com.aliyun.oss.model.ObjectMetadata;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -35,11 +42,15 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+
+import static org.apache.paimon.options.CatalogOptions.FILE_IO_ALLOW_CACHE;
+import static org.apache.paimon.options.CatalogOptions.FILE_IO_POPULATE_META;
 
 /** OSS {@link FileIO}. */
 public class OSSFileIO extends HadoopCompliantFileIO {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private static final Logger LOG = LoggerFactory.getLogger(OSSFileIO.class);
 
@@ -68,7 +79,12 @@ public class OSSFileIO extends HadoopCompliantFileIO {
      */
     private static final Map<CacheKey, AliyunOSSFileSystem> CACHE = new ConcurrentHashMap<>();
 
+    // create a shared config to avoid load properties everytime
+    private static final Configuration SHARED_CONFIG = new Configuration();
+
     private Options hadoopOptions;
+    private boolean allowCache = true;
+    private boolean populateMeta = false;
 
     @Override
     public boolean isObjectStore() {
@@ -77,6 +93,8 @@ public class OSSFileIO extends HadoopCompliantFileIO {
 
     @Override
     public void configure(CatalogContext context) {
+        allowCache = context.options().get(FILE_IO_ALLOW_CACHE);
+        populateMeta = context.options().get(FILE_IO_POPULATE_META);
         hadoopOptions = new Options();
         // read all configuration with prefix 'CONFIG_PREFIXES'
         for (String key : context.options().keySet()) {
@@ -98,14 +116,15 @@ public class OSSFileIO extends HadoopCompliantFileIO {
     }
 
     @Override
-    protected FileSystem createFileSystem(org.apache.hadoop.fs.Path path) {
+    protected AliyunOSSFileSystem createFileSystem(org.apache.hadoop.fs.Path path) {
         final String scheme = path.toUri().getScheme();
         final String authority = path.toUri().getAuthority();
-        return CACHE.computeIfAbsent(
-                new CacheKey(hadoopOptions, scheme, authority),
-                key -> {
-                    Configuration hadoopConf = new Configuration();
-                    key.options.toMap().forEach(hadoopConf::set);
+        Supplier<AliyunOSSFileSystem> supplier =
+                () -> {
+                    // create config from base config, if initializing a new config, it will
+                    // retrieve props from the file, which comes at a high cost
+                    Configuration hadoopConf = new Configuration(SHARED_CONFIG);
+                    hadoopOptions.toMap().forEach(hadoopConf::set);
                     URI fsUri = path.toUri();
                     if (scheme == null && authority == null) {
                         fsUri = FileSystem.getDefaultUri(hadoopConf);
@@ -124,7 +143,22 @@ public class OSSFileIO extends HadoopCompliantFileIO {
                         throw new UncheckedIOException(e);
                     }
                     return fs;
-                });
+                };
+
+        if (allowCache) {
+            return CACHE.computeIfAbsent(
+                    new CacheKey(hadoopOptions, scheme, authority), key -> supplier.get());
+        } else {
+            return supplier.get();
+        }
+    }
+
+    @Override
+    public void close() {
+        if (!allowCache) {
+            fsMap.values().forEach(IOUtils::closeQuietly);
+            fsMap.clear();
+        }
     }
 
     private static class CacheKey {
@@ -156,6 +190,158 @@ public class OSSFileIO extends HadoopCompliantFileIO {
         @Override
         public int hashCode() {
             return Objects.hash(options, scheme, authority);
+        }
+    }
+
+    @Override
+    public FileStatus getFileStatus(Path path) throws IOException {
+        FileStatus basic = super.getFileStatus(path);
+        if (!populateMeta) {
+            return basic;
+        }
+        AliyunOSSFileSystem fs = (AliyunOSSFileSystem) getFileSystem(path(path));
+        return getExtendedFileStatus(fs, basic);
+    }
+
+    @Override
+    public FileStatus[] listStatus(Path path) throws IOException {
+        FileStatus[] basic = super.listStatus(path);
+        if (!populateMeta) {
+            return basic;
+        }
+        AliyunOSSFileSystem fs = (AliyunOSSFileSystem) getFileSystem(path(path));
+        FileStatus[] extended = new FileStatus[basic.length];
+        for (int i = 0; i < basic.length; i++) {
+            extended[i] = getExtendedFileStatus(fs, basic[i]);
+        }
+        return extended;
+    }
+
+    @Override
+    public RemoteIterator<FileStatus> listFilesIterative(Path path, boolean recursive)
+            throws IOException {
+        RemoteIterator<FileStatus> basicIter = super.listFilesIterative(path, recursive);
+        if (!populateMeta) {
+            return basicIter;
+        }
+        AliyunOSSFileSystem fs = (AliyunOSSFileSystem) getFileSystem(path(path));
+        return new RemoteIterator<FileStatus>() {
+            @Override
+            public boolean hasNext() throws IOException {
+                return basicIter.hasNext();
+            }
+
+            @Override
+            public FileStatus next() throws IOException {
+                FileStatus basic = basicIter.next();
+                return getExtendedFileStatus(fs, basic);
+            }
+
+            @Override
+            public void close() throws IOException {
+                basicIter.close();
+            }
+        };
+    }
+
+    private ExtendedFileStatus getExtendedFileStatus(AliyunOSSFileSystem fs, FileStatus status) {
+        org.apache.hadoop.fs.Path path = path(status.getPath());
+        if (!path.isAbsolute()) {
+            path = new org.apache.hadoop.fs.Path(fs.getWorkingDirectory(), path);
+        }
+        String objKey = path.toUri().getPath().substring(1);
+        ObjectMetadata meta = fs.getStore().getObjectMetadata(objKey);
+        return new ExtendedFileStatus(status, meta);
+    }
+
+    private static class ExtendedFileStatus implements FileStatus {
+
+        private final FileStatus basic;
+        @Nullable private final com.aliyun.oss.model.ObjectMetadata meta;
+
+        private ExtendedFileStatus(
+                FileStatus basic, @Nullable com.aliyun.oss.model.ObjectMetadata meta) {
+            this.basic = basic;
+            this.meta = meta;
+        }
+
+        @Override
+        public long getLen() {
+            return basic.getLen();
+        }
+
+        @Override
+        public boolean isDir() {
+            return basic.isDir();
+        }
+
+        @Override
+        public Path getPath() {
+            return basic.getPath();
+        }
+
+        @Override
+        public long getModificationTime() {
+            return basic.getModificationTime();
+        }
+
+        @Override
+        public long getAccessTime() {
+            return basic.getAccessTime();
+        }
+
+        @Nullable
+        @Override
+        public String getOwner() {
+            return basic.getOwner();
+        }
+
+        @Nullable
+        @Override
+        public Integer getGeneration() {
+            return basic.getGeneration();
+        }
+
+        @Nullable
+        @Override
+        public String getContentType() {
+            if (meta == null) {
+                return basic.getContentType();
+            }
+            return meta.getContentType();
+        }
+
+        @Nullable
+        @Override
+        public String getStorageClass() {
+            return basic.getStorageClass();
+        }
+
+        @Nullable
+        @Override
+        public String getMd5Hash() {
+            if (meta == null) {
+                return basic.getMd5Hash();
+            }
+            return meta.getContentMD5();
+        }
+
+        @Nullable
+        @Override
+        public Long getMetadataModificationTime() {
+            if (meta == null) {
+                return basic.getMetadataModificationTime();
+            }
+            return meta.getLastModified().getTime();
+        }
+
+        @Nullable
+        @Override
+        public Map<String, String> getMetadata() {
+            if (meta == null) {
+                return basic.getMetadata();
+            }
+            return meta.getUserMetadata();
         }
     }
 }

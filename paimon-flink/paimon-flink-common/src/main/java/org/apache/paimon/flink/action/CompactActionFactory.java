@@ -21,8 +21,6 @@ package org.apache.paimon.flink.action;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.TimeUtils;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,9 +44,10 @@ public class CompactActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
+        String database = params.getRequired(DATABASE);
+        String table = params.getRequired(TABLE);
+        Map<String, String> catalogConfig = catalogConfigMap(params);
+        Map<String, String> tableConfig = optionalConfigMap(params, TABLE_CONF);
 
         CompactAction action;
         if (params.has(ORDER_STRATEGY)) {
@@ -56,25 +55,18 @@ public class CompactActionFactory implements ActionFactory {
                     !params.has(PARTITION_IDLE_TIME),
                     "sort compact do not support 'partition_idle_time'.");
             action =
-                    new SortCompactAction(
-                                    tablePath.f0,
-                                    tablePath.f1,
-                                    tablePath.f2,
-                                    catalogConfig,
-                                    optionalConfigMap(params, TABLE_CONF))
+                    new SortCompactAction(database, table, catalogConfig, tableConfig)
                             .withOrderStrategy(params.get(ORDER_STRATEGY))
-                            .withOrderColumns(getRequiredValue(params, ORDER_BY).split(","));
+                            .withOrderColumns(params.getRequired(ORDER_BY).split(","));
         } else {
-            action =
-                    new CompactAction(
-                            tablePath.f0,
-                            tablePath.f1,
-                            tablePath.f2,
-                            catalogConfig,
-                            optionalConfigMap(params, TABLE_CONF));
+            action = new CompactAction(database, table, catalogConfig, tableConfig);
             if (params.has(PARTITION_IDLE_TIME)) {
                 action.withPartitionIdleTime(
                         TimeUtils.parseDuration(params.get(PARTITION_IDLE_TIME)));
+            }
+            String compactStrategy = params.get(COMPACT_STRATEGY);
+            if (checkCompactStrategy(compactStrategy)) {
+                action.withFullCompaction(compactStrategy.trim().equalsIgnoreCase(FULL));
             }
         }
 
@@ -88,6 +80,19 @@ public class CompactActionFactory implements ActionFactory {
         return Optional.of(action);
     }
 
+    public static boolean checkCompactStrategy(String compactStrategy) {
+        if (compactStrategy != null) {
+            Preconditions.checkArgument(
+                    compactStrategy.equalsIgnoreCase(MINOR)
+                            || compactStrategy.equalsIgnoreCase(FULL),
+                    String.format(
+                            "The compact strategy only supports 'full' or 'minor', but '%s' is configured.",
+                            compactStrategy));
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public void printHelp() {
         System.out.println(
@@ -96,16 +101,16 @@ public class CompactActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  compact --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> [--partition <partition_name>]"
-                        + "[--order_strategy <order_strategy>]"
-                        + "[--table_conf <key>=<value>]"
-                        + "[--order_by <order_columns>]"
-                        + "[--partition_idle_time <partition_idle_time>]");
+                "  compact --warehouse <warehouse_path> --database <database_name> \n"
+                        + "--table <table_name> [--partition <partition_name>] \n"
+                        + "[--order_strategy <order_strategy>] \n"
+                        + "[--table_conf <key>=<value>] \n"
+                        + "[--order_by <order_columns>] \n"
+                        + "[--partition_idle_time <partition_idle_time>] \n"
+                        + "[--compact_strategy <compact_strategy>]");
         System.out.println(
                 "  compact --warehouse s3://path/to/warehouse --database <database_name> "
                         + "--table <table_name> [--catalog_conf <paimon_catalog_conf> [--catalog_conf <paimon_catalog_conf> ...]]");
-        System.out.println("  compact --path <table_path> [--partition <partition_name>]");
         System.out.println();
 
         System.out.println("Partition name syntax:");
@@ -125,22 +130,24 @@ public class CompactActionFactory implements ActionFactory {
         System.out.println(
                 "  compact --warehouse hdfs:///path/to/warehouse --database test_db --table test_table");
         System.out.println(
-                "  compact --path hdfs:///path/to/warehouse/test_db.db/test_table --partition dt=20221126,hh=08");
-        System.out.println(
                 "  compact --warehouse hdfs:///path/to/warehouse --database test_db --table test_table "
                         + "--partition dt=20221126,hh=08 --partition dt=20221127,hh=09");
         System.out.println(
                 "  compact --warehouse hdfs:///path/to/warehouse --database test_db --table test_table "
                         + "--partition_idle_time 10s");
         System.out.println(
-                "  compact --warehouse s3:///path/to/warehouse "
-                        + "--database test_db "
-                        + "--table test_table "
-                        + "--order_strategy zorder "
-                        + "--order_by a,b,c "
-                        + "--table_conf sink.parallelism=9 "
-                        + "--catalog_conf s3.endpoint=https://****.com "
-                        + "--catalog_conf s3.access-key=***** "
+                "--compact_strategy determines how to pick files to be merged, the default is determined by the runtime execution mode. "
+                        + "`full` : Only supports batch mode. All files will be selected for merging."
+                        + "`minor`: Pick the set of files that need to be merged based on specified conditions.");
+        System.out.println(
+                "  compact --warehouse s3:///path/to/warehouse \n"
+                        + "--database test_db \n"
+                        + "--table test_table \n"
+                        + "--order_strategy zorder \n"
+                        + "--order_by a,b,c \n"
+                        + "--table_conf sink.parallelism=9 \n"
+                        + "--catalog_conf s3.endpoint=https://****.com \n"
+                        + "--catalog_conf s3.access-key=***** \n"
                         + "--catalog_conf s3.secret-key=***** ");
     }
 }

@@ -19,9 +19,10 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
-import org.apache.paimon.types.DataField;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -32,13 +33,11 @@ import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
-
 /**
- * A {@link ProcessFunction} to parse CDC change event to either a list of {@link DataField}s or
- * {@link CdcRecord} and send them to different side outputs according to table name. This process
- * function will capture newly added tables when syncing entire database and in cases where the
- * newly added tables are including by attesting table filters.
+ * A {@link ProcessFunction} to parse CDC change event to either a {@link CdcSchema}s or {@link
+ * CdcRecord} and send them to different side outputs according to table name. This process function
+ * will capture newly added tables when syncing entire database and in cases where the newly added
+ * tables are including by attesting table filters.
  *
  * <p>This {@link ProcessFunction} can handle records for different tables at the same time.
  *
@@ -52,30 +51,37 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
     public static final OutputTag<CdcMultiplexRecord> DYNAMIC_OUTPUT_TAG =
             new OutputTag<>("paimon-dynamic-table", TypeInformation.of(CdcMultiplexRecord.class));
 
-    public static final OutputTag<Tuple2<Identifier, List<DataField>>>
-            DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG =
-                    new OutputTag<>(
-                            "paimon-dynamic-table-schema-change",
-                            TypeInformation.of(
-                                    new TypeHint<Tuple2<Identifier, List<DataField>>>() {}));
+    public static final OutputTag<Tuple2<Identifier, CdcSchema>> DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG =
+            new OutputTag<>(
+                    "paimon-dynamic-table-schema-change",
+                    TypeInformation.of(new TypeHint<Tuple2<Identifier, CdcSchema>>() {}));
 
     private final EventParser.Factory<T> parserFactory;
     private final String database;
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
 
     private transient EventParser<T> parser;
     private transient Catalog catalog;
 
 
     public CdcDynamicTableParsingProcessFunction(
-            String database, Catalog.Loader catalogLoader, EventParser.Factory<T> parserFactory) {
+            String database, CatalogLoader catalogLoader, EventParser.Factory<T> parserFactory) {
         // for now, only support single database
         this.database = database;
         this.catalogLoader = catalogLoader;
         this.parserFactory = parserFactory;
     }
 
-    @Override
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 1.18-.
+     */
+    public void open(OpenContext openContext) throws Exception {
+        open(new Configuration());
+    }
+
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 2.0+.
+     */
     public void open(Configuration parameters) throws Exception {
         parser = parserFactory.create();
         catalog = catalogLoader.load();
@@ -107,8 +113,8 @@ public class CdcDynamicTableParsingProcessFunction<T> extends ProcessFunction<T,
                             }
                         });
 
-        List<DataField> schemaChange = parser.parseSchemaChange();
-        if (!schemaChange.isEmpty()) {
+        CdcSchema schemaChange = parser.parseSchemaChange();
+        if (schemaChange != null) {
             context.output(
                     DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG,
                     Tuple2.of(Identifier.create(database, tableName), schemaChange));

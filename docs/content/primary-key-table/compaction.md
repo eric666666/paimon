@@ -35,7 +35,7 @@ procedure is called compaction.
 
 However, compaction is a resource intensive procedure which consumes a certain amount of CPU time and disk IO, so too 
 frequent compaction may in turn result in slower writes. It is a trade-off between query and write performance. Paimon
-currently adapts a compaction strategy similar to Rocksdb's [universal compaction](https://github.com/facebook/rocksdb/wiki/Universal-Compaction).
+currently adopts a compaction strategy similar to Rocksdb's [universal compaction](https://github.com/facebook/rocksdb/wiki/Universal-Compaction).
 
 Compaction solves:
 
@@ -52,8 +52,8 @@ Writing performance is almost always affected by compaction, so its tuning is cr
 
 ## Asynchronous Compaction
 
-Compaction is inherently asynchronous, but if you want it to be completely asynchronous and not blocking writing,
-expect a mode to have maximum writing throughput, the compaction can be done slowly and not in a hurry.
+Compaction is inherently asynchronous, but if you want it to be completely asynchronous without blocking writes,
+expecting a mode for maximum writing throughput, the compaction can be done slowly and not in a hurry.
 You can use the following strategies for your table:
 
 ```shell
@@ -62,7 +62,7 @@ sort-spill-threshold = 10
 lookup-wait = false
 ```
 
-This configuration will generate more files during peak write periods and gradually merge into optimal read
+This configuration will generate more files during peak write periods and gradually merge them for optimal read
 performance during low write periods.
 
 ## Dedicated compaction job
@@ -76,9 +76,9 @@ In compaction, you can configure record-Level expire time to expire records, you
 
 1. `'record-level.expire-time'`: time retain for records.
 2. `'record-level.time-field'`: time field for record level expire.
-3. `'record-level.time-field-type'`: time field type for record level expire, it can be seconds-int or millis-long.
 
 Expiration happens in compaction, and there is no strong guarantee to expire records in time.
+You can trigger a full compaction manually to expire records which were not expired in time.
 
 ## Full Compaction
 
@@ -90,8 +90,26 @@ Paimon also provides a configuration that allows for regular execution of Full C
 
 1. 'compaction.optimization-interval': Implying how often to perform an optimization full compaction, this
     configuration is used to ensure the query timeliness of the read-optimized system table.
-2. 'full-compaction.delta-commits': Full compaction will be constantly triggered after delta commits. its disadvantage
+2. 'full-compaction.delta-commits': Full compaction will be constantly triggered after delta commits. Its disadvantage
     is that it can only perform compaction synchronously, which will affect writing efficiency.
+
+## Lookup Compaction
+
+When primary key table is configured with `lookup` [changelog producer]({{< ref "primary-key-table/changelog-producer" >}}) 
+or `first-row` [merge-engine]({{< ref "primary-key-table/merge-engine" >}})
+or has enabled `deletion vectors` for [MOW mode]({{< ref "primary-key-table/table-mode#merge-on-write" >}}), Paimon will
+use a radical compaction strategy to force compacting level 0 files to higher levels for every compaction trigger.
+
+Paimon also provides configurations to optimize the frequency of this compaction.
+
+1. 'lookup-compact': compact mode used for lookup compaction. Possible values: `radical`, will use
+   `ForceUpLevel0Compaction` strategy to radically compact new files; `gentle`, will use `UniversalCompaction` strategy
+   to gently compact new files;
+2. 'lookup-compact.max-interval': The max interval for a forced L0 lookup compaction to be triggered in `gentle` mode.
+   This option is only valid when `lookup-compact` mode is `gentle`.
+
+By configuring 'lookup-compact' as `gentle`, new files in L0 will not be compacted immediately, this may greatly
+reduce the overall resource usage at the expense of worse data freshness in certain cases.
 
 ## Compaction Options
 
@@ -153,7 +171,7 @@ Its value depends on your memory size.
 
 Paimon uses [LSM tree]({{< ref "primary-key-table/overview#lsm-trees" >}}) which supports a large number of updates. LSM organizes files in several [sorted runs]({{< ref "primary-key-table/overview#sorted-runs" >}}). When querying records from an LSM tree, all sorted runs must be combined to produce a complete view of all records.
 
-One can easily see that too many sorted runs will result in poor query performance. To keep the number of sorted runs in a reasonable range, Paimon writers will automatically perform [compactions]({{< ref "primary-key-table/overview#compaction" >}}). The following table property determines the minimum number of sorted runs to trigger a compaction.
+One can easily see that too many sorted runs will result in poor query performance. To keep the number of sorted runs in a reasonable range, Paimon writers will automatically perform [compactions]({{< ref "primary-key-table/compaction" >}}). The following table property determines the minimum number of sorted runs to trigger a compaction.
 
 <table class="table table-bordered">
     <thead>

@@ -18,19 +18,26 @@
 
 package org.apache.paimon.catalog;
 
-import org.apache.paimon.fs.FileIO;
-import org.apache.paimon.fs.Path;
-import org.apache.paimon.metastore.MetastoreClient;
+import org.apache.paimon.PagedList;
+import org.apache.paimon.Snapshot;
+import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.TableSnapshot;
+import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
+
+import javax.annotation.Nullable;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /** A {@link Catalog} to delegate all operations to another {@link Catalog}. */
-public class DelegateCatalog implements Catalog {
+public abstract class DelegateCatalog implements Catalog {
 
     protected final Catalog wrapped;
 
@@ -43,13 +50,8 @@ public class DelegateCatalog implements Catalog {
     }
 
     @Override
-    public boolean allowUpperCase() {
-        return wrapped.allowUpperCase();
-    }
-
-    @Override
-    public String warehouse() {
-        return wrapped.warehouse();
+    public boolean caseSensitive() {
+        return wrapped.caseSensitive();
     }
 
     @Override
@@ -58,28 +60,13 @@ public class DelegateCatalog implements Catalog {
     }
 
     @Override
-    public FileIO fileIO() {
-        return wrapped.fileIO();
-    }
-
-    @Override
-    public Optional<CatalogLockFactory> lockFactory() {
-        return wrapped.lockFactory();
-    }
-
-    @Override
-    public Optional<CatalogLockContext> lockContext() {
-        return wrapped.lockContext();
-    }
-
-    @Override
-    public Optional<MetastoreClient.Factory> metastoreClientFactory(Identifier identifier) {
-        return wrapped.metastoreClientFactory(identifier);
-    }
-
-    @Override
     public List<String> listDatabases() {
         return wrapped.listDatabases();
+    }
+
+    @Override
+    public PagedList<String> listDatabasesPaged(Integer maxResults, String pageToken) {
+        return wrapped.listDatabasesPaged(maxResults, pageToken);
     }
 
     @Override
@@ -89,9 +76,8 @@ public class DelegateCatalog implements Catalog {
     }
 
     @Override
-    public Map<String, String> loadDatabaseProperties(String name)
-            throws DatabaseNotExistException {
-        return wrapped.loadDatabaseProperties(name);
+    public Database getDatabase(String name) throws DatabaseNotExistException {
+        return wrapped.getDatabase(name);
     }
 
     @Override
@@ -101,8 +87,28 @@ public class DelegateCatalog implements Catalog {
     }
 
     @Override
+    public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+            throws DatabaseNotExistException {
+        wrapped.alterDatabase(name, changes, ignoreIfNotExists);
+    }
+
+    @Override
     public List<String> listTables(String databaseName) throws DatabaseNotExistException {
         return wrapped.listTables(databaseName);
+    }
+
+    @Override
+    public PagedList<String> listTablesPaged(
+            String databaseName, Integer maxResults, String pageToken)
+            throws DatabaseNotExistException {
+        return wrapped.listTablesPaged(databaseName, maxResults, pageToken);
+    }
+
+    @Override
+    public PagedList<Table> listTableDetailsPaged(
+            String databaseName, Integer maxResults, String pageToken)
+            throws DatabaseNotExistException {
+        return wrapped.listTableDetailsPaged(databaseName, maxResults, pageToken);
     }
 
     @Override
@@ -131,19 +137,142 @@ public class DelegateCatalog implements Catalog {
     }
 
     @Override
+    public boolean supportsListObjectsPaged() {
+        return wrapped.supportsListObjectsPaged();
+    }
+
+    @Override
+    public boolean supportsVersionManagement() {
+        return wrapped.supportsVersionManagement();
+    }
+
+    @Override
+    public Optional<TableSnapshot> loadSnapshot(Identifier identifier)
+            throws TableNotExistException {
+        return wrapped.loadSnapshot(identifier);
+    }
+
+    @Override
+    public void rollbackTo(Identifier identifier, Instant instant)
+            throws Catalog.TableNotExistException {
+        wrapped.rollbackTo(identifier, instant);
+    }
+
+    @Override
+    public void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
+            throws TableNotExistException, BranchAlreadyExistException, TagNotExistException {
+        wrapped.createBranch(identifier, branch, fromTag);
+    }
+
+    @Override
+    public void dropBranch(Identifier identifier, String branch) throws BranchNotExistException {
+        wrapped.dropBranch(identifier, branch);
+    }
+
+    @Override
+    public void fastForward(Identifier identifier, String branch) throws BranchNotExistException {
+        wrapped.fastForward(identifier, branch);
+    }
+
+    @Override
+    public List<String> listBranches(Identifier identifier) throws TableNotExistException {
+        return wrapped.listBranches(identifier);
+    }
+
+    @Override
+    public boolean commitSnapshot(
+            Identifier identifier, Snapshot snapshot, List<PartitionStatistics> statistics)
+            throws TableNotExistException {
+        return wrapped.commitSnapshot(identifier, snapshot, statistics);
+    }
+
+    @Override
+    public void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException {
+        wrapped.createPartitions(identifier, partitions);
+    }
+
+    @Override
+    public void dropPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException {
+        wrapped.dropPartitions(identifier, partitions);
+    }
+
+    @Override
+    public void alterPartitions(Identifier identifier, List<PartitionStatistics> partitions)
+            throws TableNotExistException {
+        wrapped.alterPartitions(identifier, partitions);
+    }
+
+    @Override
+    public void markDonePartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException {
+        wrapped.markDonePartitions(identifier, partitions);
+    }
+
+    @Override
     public Table getTable(Identifier identifier) throws TableNotExistException {
         return wrapped.getTable(identifier);
     }
 
     @Override
-    public Path getTableLocation(Identifier identifier) {
-        return wrapped.getTableLocation(identifier);
+    public View getView(Identifier identifier) throws ViewNotExistException {
+        return wrapped.getView(identifier);
     }
 
     @Override
-    public void dropPartition(Identifier identifier, Map<String, String> partitions)
-            throws TableNotExistException, PartitionNotExistException {
-        wrapped.dropPartition(identifier, partitions);
+    public void dropView(Identifier identifier, boolean ignoreIfNotExists)
+            throws ViewNotExistException {
+        wrapped.dropView(identifier, ignoreIfNotExists);
+    }
+
+    @Override
+    public void createView(Identifier identifier, View view, boolean ignoreIfExists)
+            throws ViewAlreadyExistException, DatabaseNotExistException {
+        wrapped.createView(identifier, view, ignoreIfExists);
+    }
+
+    @Override
+    public List<String> listViews(String databaseName) throws DatabaseNotExistException {
+        return wrapped.listViews(databaseName);
+    }
+
+    @Override
+    public PagedList<String> listViewsPaged(
+            String databaseName, Integer maxResults, String pageToken)
+            throws DatabaseNotExistException {
+        return wrapped.listViewsPaged(databaseName, maxResults, pageToken);
+    }
+
+    @Override
+    public PagedList<View> listViewDetailsPaged(
+            String databaseName, Integer maxResults, String pageToken)
+            throws DatabaseNotExistException {
+        return wrapped.listViewDetailsPaged(databaseName, maxResults, pageToken);
+    }
+
+    @Override
+    public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+            throws ViewNotExistException, ViewAlreadyExistException {
+        wrapped.renameView(fromView, toView, ignoreIfNotExists);
+    }
+
+    @Override
+    public void alterView(Identifier view, List<ViewChange> viewChanges, boolean ignoreIfNotExists)
+            throws ViewNotExistException, DialectAlreadyExistException, DialectNotExistException {
+        wrapped.alterView(view, viewChanges, ignoreIfNotExists);
+    }
+
+    @Override
+    public List<Partition> listPartitions(Identifier identifier) throws TableNotExistException {
+        return wrapped.listPartitions(identifier);
+    }
+
+    @Override
+    public PagedList<Partition> listPartitionsPaged(
+            Identifier identifier, Integer maxResults, String pageToken)
+            throws TableNotExistException {
+        return wrapped.listPartitionsPaged(identifier, maxResults, pageToken);
     }
 
     @Override
@@ -164,5 +293,12 @@ public class DelegateCatalog implements Catalog {
     @Override
     public void close() throws Exception {
         wrapped.close();
+    }
+
+    public static Catalog rootCatalog(Catalog catalog) {
+        while (catalog instanceof DelegateCatalog) {
+            catalog = ((DelegateCatalog) catalog).wrapped();
+        }
+        return catalog;
     }
 }

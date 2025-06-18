@@ -58,6 +58,8 @@ import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.SnapshotTest.newSnapshotManager;
+
 /** ITCase for catalog. */
 public abstract class CatalogITCaseBase extends AbstractTestBase {
 
@@ -75,7 +77,9 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
 
         Map<String, String> options = new HashMap<>(catalogOptions());
         options.put("type", "paimon");
-        options.put("warehouse", toWarehouse(path));
+        if (supportDefineWarehouse()) {
+            options.put("warehouse", toWarehouse(path));
+        }
         tEnv.executeSql(
                 String.format(
                         "CREATE CATALOG %s WITH (" + "%s" + inferScan + ")",
@@ -97,11 +101,15 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
         return Collections.emptyMap();
     }
 
+    protected boolean supportDefineWarehouse() {
+        return true;
+    }
+
     protected boolean inferScanParallelism() {
         return false;
     }
 
-    private void prepareEnv() {
+    protected void prepareEnv() {
         Parser parser = ((TableEnvironmentImpl) tEnv).getParser();
         for (String ddl : ddl()) {
             tEnv.executeSql(ddl);
@@ -185,7 +193,7 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
                 catalog.getTable(Identifier.create(tEnv.getCurrentDatabase(), tableName));
     }
 
-    private FlinkCatalog flinkCatalog() {
+    protected FlinkCatalog flinkCatalog() {
         return (FlinkCatalog) tEnv.getCatalog(tEnv.getCurrentCatalog()).get();
     }
 
@@ -198,7 +206,7 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
     @Nullable
     protected Snapshot findLatestSnapshot(String tableName) {
         SnapshotManager snapshotManager =
-                new SnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
+                newSnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
         Long id = snapshotManager.latestSnapshotId();
         return id == null ? null : snapshotManager.snapshot(id);
     }
@@ -206,7 +214,7 @@ public abstract class CatalogITCaseBase extends AbstractTestBase {
     @Nullable
     protected Snapshot findSnapshot(String tableName, long snapshotId) {
         SnapshotManager snapshotManager =
-                new SnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
+                newSnapshotManager(LocalFileIO.create(), getTableDirectory(tableName));
         Long id = snapshotManager.latestSnapshotId();
         return id == null ? null : id >= snapshotId ? snapshotManager.snapshot(snapshotId) : null;
     }

@@ -22,53 +22,53 @@ import org.apache.paimon.arrow.ArrowUtils;
 import org.apache.paimon.arrow.writer.ArrowFieldWriter;
 import org.apache.paimon.arrow.writer.ArrowFieldWriterFactoryVisitor;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowType;
 
-import org.apache.arrow.c.ArrowArray;
-import org.apache.arrow.c.ArrowSchema;
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.util.OversizedAllocationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Write from {@link InternalRow} to {@link VectorSchemaRoot}. */
 public class ArrowFormatWriter implements AutoCloseable {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ArrowFormatWriter.class);
+
     private final VectorSchemaRoot vectorSchemaRoot;
     private final ArrowFieldWriter[] fieldWriters;
-    private final ArrowArray array;
-    private final ArrowSchema schema;
 
     private final int batchSize;
 
-    private final RootAllocator allocator;
+    private final BufferAllocator allocator;
     private int rowId;
 
-    public ArrowFormatWriter(RowType rowType, int writeBatchSize) {
-        allocator = new RootAllocator();
-        array = ArrowArray.allocateNew(allocator);
-        schema = ArrowSchema.allocateNew(allocator);
+    public ArrowFormatWriter(RowType rowType, int writeBatchSize, boolean caseSensitive) {
+        this(rowType, writeBatchSize, caseSensitive, new RootAllocator());
+    }
 
-        vectorSchemaRoot = ArrowUtils.createVectorSchemaRoot(rowType, allocator, false);
+    public ArrowFormatWriter(
+            RowType rowType, int writeBatchSize, boolean caseSensitive, BufferAllocator allocator) {
+        this.allocator = allocator;
+
+        vectorSchemaRoot = ArrowUtils.createVectorSchemaRoot(rowType, allocator, caseSensitive);
 
         fieldWriters = new ArrowFieldWriter[rowType.getFieldCount()];
 
         for (int i = 0; i < fieldWriters.length; i++) {
+            DataType type = rowType.getFields().get(i).type();
             fieldWriters[i] =
-                    rowType.getFields()
-                            .get(i)
-                            .type()
-                            .accept(ArrowFieldWriterFactoryVisitor.INSTANCE)
-                            .create(vectorSchemaRoot.getVector(i));
+                    type.accept(ArrowFieldWriterFactoryVisitor.INSTANCE)
+                            .create(vectorSchemaRoot.getVector(i), type.isNullable());
         }
 
         this.batchSize = writeBatchSize;
     }
 
-    public ArrowCStruct flush() {
+    public void flush() {
         vectorSchemaRoot.setRowCount(rowId);
-        ArrowCStruct arrowCStruct = ArrowUtils.serializeToCStruct(vectorSchemaRoot, array, schema);
-        rowId = 0;
-        return arrowCStruct;
     }
 
     public boolean write(InternalRow currentRow) {
@@ -80,6 +80,7 @@ public class ArrowFormatWriter implements AutoCloseable {
                 fieldWriters[i].write(rowId, currentRow, i);
             } catch (OversizedAllocationException | IndexOutOfBoundsException e) {
                 // maybe out of memory
+                LOG.warn("Arrow field writer failed while writing", e);
                 return false;
             }
         }
@@ -92,17 +93,24 @@ public class ArrowFormatWriter implements AutoCloseable {
         return rowId == 0;
     }
 
+    public void reset() {
+        for (ArrowFieldWriter fieldWriter : fieldWriters) {
+            fieldWriter.reset();
+        }
+        rowId = 0;
+    }
+
     @Override
     public void close() {
-        array.release();
-        schema.release();
-        array.close();
-        schema.close();
         vectorSchemaRoot.close();
         allocator.close();
     }
 
     public VectorSchemaRoot getVectorSchemaRoot() {
         return vectorSchemaRoot;
+    }
+
+    public BufferAllocator getAllocator() {
+        return allocator;
     }
 }

@@ -18,6 +18,7 @@
 
 package org.apache.paimon.operation;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.compact.CompactDeletionFile;
@@ -34,6 +35,7 @@ import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.operation.metrics.CompactionMetrics;
 import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageImpl;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 import org.apache.paimon.utils.RecordWriter;
@@ -52,8 +54,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 
+import static org.apache.paimon.CoreOptions.PARTITION_DEFAULT_NAME;
 import static org.apache.paimon.io.DataFileMeta.getMaxSequenceNumber;
+import static org.apache.paimon.utils.FileStorePathFactory.getPartitionComputer;
 
 /**
  * Base {@link FileStoreWrite} implementation.
@@ -64,12 +69,13 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreWrite.class);
 
-    private final String commitUser;
     protected final SnapshotManager snapshotManager;
     private final FileStoreScan scan;
     private final int writerNumberMax;
     @Nullable private final IndexMaintainer.Factory<T> indexFactory;
-    @Nullable private final DeletionVectorsMaintainer.Factory deletionVectorsMaintainerFactory;
+    @Nullable private final DeletionVectorsMaintainer.Factory dvMaintainerFactory;
+    private final int numBuckets;
+    private final RowType partitionType;
 
     @Nullable protected IOManager ioManager;
 
@@ -78,28 +84,38 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     private ExecutorService lazyCompactExecutor;
     private boolean closeCompactExecutorWhenLeaving = true;
     private boolean ignorePreviousFiles = false;
+    private boolean ignoreNumBucketCheck = false;
     protected boolean isStreamingMode = false;
 
     protected CompactionMetrics compactionMetrics = null;
     protected final String tableName;
     private boolean isInsertOnly;
+    private final boolean legacyPartitionName;
 
     protected AbstractFileStoreWrite(
-            String commitUser,
             SnapshotManager snapshotManager,
             FileStoreScan scan,
             @Nullable IndexMaintainer.Factory<T> indexFactory,
-            @Nullable DeletionVectorsMaintainer.Factory deletionVectorsMaintainerFactory,
+            @Nullable DeletionVectorsMaintainer.Factory dvMaintainerFactory,
             String tableName,
-            int writerNumberMax) {
-        this.commitUser = commitUser;
+            CoreOptions options,
+            RowType partitionType) {
         this.snapshotManager = snapshotManager;
         this.scan = scan;
+        // Statistic is useless in writer
+        if (options.manifestDeleteFileDropStats()) {
+            if (this.scan != null) {
+                this.scan.dropStats();
+            }
+        }
         this.indexFactory = indexFactory;
-        this.deletionVectorsMaintainerFactory = deletionVectorsMaintainerFactory;
+        this.dvMaintainerFactory = dvMaintainerFactory;
+        this.numBuckets = options.bucket();
+        this.partitionType = partitionType;
         this.writers = new HashMap<>();
         this.tableName = tableName;
-        this.writerNumberMax = writerNumberMax;
+        this.writerNumberMax = options.writeMaxWritersToSpill();
+        this.legacyPartitionName = options.legacyPartitionName();
     }
 
     @Override
@@ -116,6 +132,11 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public void withIgnorePreviousFiles(boolean ignorePreviousFiles) {
         this.ignorePreviousFiles = ignorePreviousFiles;
+    }
+
+    @Override
+    public void withIgnoreNumBucketCheck(boolean ignoreNumBucketCheck) {
+        this.ignoreNumBucketCheck = ignoreNumBucketCheck;
     }
 
     @Override
@@ -169,7 +190,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public List<CommitMessage> prepareCommit(boolean waitCompaction, long commitIdentifier)
             throws Exception {
-        long latestCommittedIdentifier;
+        Function<WriterContainer<T>, Boolean> writerCleanChecker;
         if (writers.values().stream()
                         .map(Map::values)
                         .flatMap(Collection::stream)
@@ -177,20 +198,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         .max()
                         .orElse(Long.MIN_VALUE)
                 == Long.MIN_VALUE) {
-            // Optimization for the first commit.
-            //
-            // If this is the first commit, no writer has previous modified commit, so the value of
-            // `latestCommittedIdentifier` does not matter.
-            //
-            // Without this optimization, we may need to scan through all snapshots only to find
-            // that there is no previous snapshot by this user, which is very inefficient.
-            latestCommittedIdentifier = Long.MIN_VALUE;
+            // If this is the first commit, no writer should be cleaned.
+            writerCleanChecker = writerContainer -> false;
         } else {
-            latestCommittedIdentifier =
-                    snapshotManager
-                            .latestSnapshotOfUser(commitUser)
-                            .map(Snapshot::commitIdentifier)
-                            .orElse(Long.MIN_VALUE);
+            writerCleanChecker = createWriterCleanChecker();
         }
 
         List<CommitMessage> result = new ArrayList<>();
@@ -208,7 +219,6 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 WriterContainer<T> writerContainer = entry.getValue();
 
                 CommitIncrement increment = writerContainer.writer.prepareCommit(waitCompaction);
-                List<IndexFileMeta> deletedIndexFiles = new ArrayList<>();
                 List<IndexFileMeta> newIndexFiles = new ArrayList<>();
                 if (writerContainer.indexMaintainer != null) {
                     newIndexFiles.addAll(writerContainer.indexMaintainer.prepareCommit());
@@ -217,28 +227,18 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 if (compactDeletionFile != null) {
                     compactDeletionFile.getOrCompute().ifPresent(newIndexFiles::add);
                 }
-                if (increment.indexIncrement() != null) {
-                    newIndexFiles.addAll(increment.indexIncrement().newIndexFiles());
-                    deletedIndexFiles.addAll(increment.indexIncrement().deletedIndexFiles());
-                }
                 CommitMessageImpl committable =
                         new CommitMessageImpl(
                                 partition,
                                 bucket,
+                                writerContainer.totalBuckets,
                                 increment.newFilesIncrement(),
                                 increment.compactIncrement(),
-                                new IndexIncrement(newIndexFiles, deletedIndexFiles));
+                                new IndexIncrement(newIndexFiles));
                 result.add(committable);
 
                 if (committable.isEmpty()) {
-                    // Condition 1: There is no more record waiting to be committed. Note that the
-                    // condition is < (instead of <=), because each commit identifier may have
-                    // multiple snapshots. We must make sure all snapshots of this identifier are
-                    // committed.
-                    // Condition 2: No compaction is in progress. That is, no more changelog will be
-                    // produced.
-                    if (writerContainer.lastModifiedCommitIdentifier < latestCommittedIdentifier
-                            && !writerContainer.writer.isCompacting()) {
+                    if (writerCleanChecker.apply(writerContainer)) {
                         // Clear writer if no update, and if its latest modification has committed.
                         //
                         // We need a mechanism to clear writers, otherwise there will be more and
@@ -247,12 +247,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             LOG.debug(
                                     "Closing writer for partition {}, bucket {}. "
                                             + "Writer's last modified identifier is {}, "
-                                            + "while latest committed identifier is {}, "
-                                            + "current commit identifier is {}.",
+                                            + "while current commit identifier is {}.",
                                     partition,
                                     bucket,
                                     writerContainer.lastModifiedCommitIdentifier,
-                                    latestCommittedIdentifier,
                                     commitIdentifier);
                         }
                         writerContainer.writer.close();
@@ -269,6 +267,43 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         }
 
         return result;
+    }
+
+    // This abstract function returns a whole function (instead of just a boolean value),
+    // because we do not want to introduce `commitUser` into this base class.
+    //
+    // For writers with no conflicts, `commitUser` might be some random value.
+    protected abstract Function<WriterContainer<T>, Boolean> createWriterCleanChecker();
+
+    protected static <T>
+            Function<WriterContainer<T>, Boolean> createConflictAwareWriterCleanChecker(
+                    String commitUser, SnapshotManager snapshotManager) {
+        long latestCommittedIdentifier =
+                snapshotManager
+                        .latestSnapshotOfUser(commitUser)
+                        .map(Snapshot::commitIdentifier)
+                        .orElse(Long.MIN_VALUE);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Latest committed identifier is {}", latestCommittedIdentifier);
+        }
+
+        // Condition 1: There is no more record waiting to be committed. Note that the
+        // condition is < (instead of <=), because each commit identifier may have
+        // multiple snapshots. We must make sure all snapshots of this identifier are
+        // committed.
+        //
+        // Condition 2: No compaction is in progress. That is, no more changelog will be
+        // produced.
+        //
+        // Condition 3: The writer has no postponed compaction like gentle lookup compaction.
+        return writerContainer ->
+                writerContainer.lastModifiedCommitIdentifier < latestCommittedIdentifier
+                        && !writerContainer.writer.compactNotCompleted();
+    }
+
+    protected static <T>
+            Function<WriterContainer<T>, Boolean> createNoConflictAwareWriterCleanChecker() {
+        return writerContainer -> true;
     }
 
     @Override
@@ -317,6 +352,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         new State<>(
                                 partition,
                                 bucket,
+                                writerContainer.totalBuckets,
                                 writerContainer.baseSnapshotId,
                                 writerContainer.lastModifiedCommitIdentifier,
                                 dataFiles,
@@ -338,7 +374,6 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         for (State<T> state : states) {
             RecordWriter<T> writer =
                     createWriter(
-                            state.baseSnapshotId,
                             state.partition,
                             state.bucket,
                             state.dataFiles,
@@ -350,6 +385,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
             WriterContainer<T> writerContainer =
                     new WriterContainer<>(
                             writer,
+                            state.totalBuckets,
                             state.indexMaintainer,
                             state.deletionVectorsMaintainer,
                             state.baseSnapshotId);
@@ -368,7 +404,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         return result;
     }
 
-    private WriterContainer<T> getWriterWrapper(BinaryRow partition, int bucket) {
+    protected WriterContainer<T> getWriterWrapper(BinaryRow partition, int bucket) {
         Map<Integer, WriterContainer<T>> buckets = writers.get(partition);
         if (buckets == null) {
             buckets = new HashMap<>();
@@ -379,7 +415,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     private long writerNumber() {
-        return writers.values().stream().mapToLong(e -> e.values().size()).sum();
+        return writers.values().stream().mapToLong(Map::size).sum();
     }
 
     @VisibleForTesting
@@ -397,24 +433,27 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
             }
         }
 
-        Long latestSnapshotId = snapshotManager.latestSnapshotId();
+        Snapshot latestSnapshot = snapshotManager.latestSnapshot();
         List<DataFileMeta> restoreFiles = new ArrayList<>();
-        if (!ignorePreviousFiles && latestSnapshotId != null) {
-            restoreFiles = scanExistingFileMetas(latestSnapshotId, partition, bucket);
+        int totalBuckets;
+        if (!ignorePreviousFiles && latestSnapshot != null) {
+            totalBuckets = scanExistingFileMetas(latestSnapshot, partition, bucket, restoreFiles);
+        } else {
+            totalBuckets = getDefaultBucketNum(partition);
         }
+
         IndexMaintainer<T> indexMaintainer =
                 indexFactory == null
                         ? null
                         : indexFactory.createOrRestore(
-                                ignorePreviousFiles ? null : latestSnapshotId, partition, bucket);
+                                ignorePreviousFiles ? null : latestSnapshot, partition, bucket);
         DeletionVectorsMaintainer deletionVectorsMaintainer =
-                deletionVectorsMaintainerFactory == null
+                dvMaintainerFactory == null
                         ? null
-                        : deletionVectorsMaintainerFactory.createOrRestore(
-                                ignorePreviousFiles ? null : latestSnapshotId, partition, bucket);
+                        : dvMaintainerFactory.createOrRestore(
+                                ignorePreviousFiles ? null : latestSnapshot, partition, bucket);
         RecordWriter<T> writer =
                 createWriter(
-                        latestSnapshotId,
                         partition.copy(),
                         bucket,
                         restoreFiles,
@@ -425,7 +464,11 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         writer.withInsertOnly(isInsertOnly);
         notifyNewWriter(writer);
         return new WriterContainer<>(
-                writer, indexMaintainer, deletionVectorsMaintainer, latestSnapshotId);
+                writer,
+                totalBuckets,
+                indexMaintainer,
+                deletionVectorsMaintainer,
+                latestSnapshot == null ? null : latestSnapshot.id());
     }
 
     @Override
@@ -439,14 +482,41 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         return this;
     }
 
-    private List<DataFileMeta> scanExistingFileMetas(
-            long snapshotId, BinaryRow partition, int bucket) {
-        List<DataFileMeta> existingFileMetas = new ArrayList<>();
-        // Concat all the DataFileMeta of existing files into existingFileMetas.
-        scan.withSnapshot(snapshotId).withPartitionBucket(partition, bucket).plan().files().stream()
-                .map(ManifestEntry::file)
-                .forEach(existingFileMetas::add);
-        return existingFileMetas;
+    private int scanExistingFileMetas(
+            Snapshot snapshot,
+            BinaryRow partition,
+            int bucket,
+            List<DataFileMeta> existingFileMetas) {
+        List<ManifestEntry> files =
+                scan.withSnapshot(snapshot).withPartitionBucket(partition, bucket).plan().files();
+        int totalBuckets = getDefaultBucketNum(partition);
+        for (ManifestEntry entry : files) {
+            if (!ignoreNumBucketCheck && entry.totalBuckets() != numBuckets) {
+                String partInfo =
+                        partitionType.getFieldCount() > 0
+                                ? "partition "
+                                        + getPartitionComputer(
+                                                        partitionType,
+                                                        PARTITION_DEFAULT_NAME.defaultValue(),
+                                                        legacyPartitionName)
+                                                .generatePartValues(partition)
+                                : "table";
+                throw new RuntimeException(
+                        String.format(
+                                "Try to write %s with a new bucket num %d, but the previous bucket num is %d. "
+                                        + "Please switch to batch mode, and perform INSERT OVERWRITE to rescale current data layout first.",
+                                partInfo, numBuckets, entry.totalBuckets()));
+            }
+            totalBuckets = entry.totalBuckets();
+            existingFileMetas.add(entry.file());
+        }
+        return totalBuckets;
+    }
+
+    // TODO see comments on FileStoreWrite#withIgnoreNumBucketCheck for what is needed to support
+    //  writing partitions with different buckets
+    public int getDefaultBucketNum(BinaryRow partition) {
+        return numBuckets;
     }
 
     private ExecutorService compactExecutor() {
@@ -467,7 +537,6 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     protected void notifyNewWriter(RecordWriter<T> writer) {}
 
     protected abstract RecordWriter<T> createWriter(
-            @Nullable Long snapshotId,
             BinaryRow partition,
             int bucket,
             List<DataFileMeta> restoreFiles,
@@ -486,6 +555,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @VisibleForTesting
     public static class WriterContainer<T> {
         public final RecordWriter<T> writer;
+        public final int totalBuckets;
         @Nullable public final IndexMaintainer<T> indexMaintainer;
         @Nullable public final DeletionVectorsMaintainer deletionVectorsMaintainer;
         protected final long baseSnapshotId;
@@ -493,10 +563,12 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
         protected WriterContainer(
                 RecordWriter<T> writer,
+                int totalBuckets,
                 @Nullable IndexMaintainer<T> indexMaintainer,
                 @Nullable DeletionVectorsMaintainer deletionVectorsMaintainer,
                 Long baseSnapshotId) {
             this.writer = writer;
+            this.totalBuckets = totalBuckets;
             this.indexMaintainer = indexMaintainer;
             this.deletionVectorsMaintainer = deletionVectorsMaintainer;
             this.baseSnapshotId =
@@ -508,5 +580,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @VisibleForTesting
     Map<BinaryRow, Map<Integer, WriterContainer<T>>> writers() {
         return writers;
+    }
+
+    @VisibleForTesting
+    public CompactionMetrics compactionMetrics() {
+        return compactionMetrics;
     }
 }

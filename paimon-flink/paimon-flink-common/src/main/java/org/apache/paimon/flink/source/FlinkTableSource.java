@@ -22,26 +22,27 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.LogicalTypeConversion;
 import org.apache.paimon.flink.PredicateConverter;
+import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.predicate.PartitionPredicateVisitor;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.predicate.PredicateVisitor;
+import org.apache.paimon.table.DataTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.source.Split;
+import org.apache.paimon.table.source.TableScan;
+import org.apache.paimon.utils.ParameterUtils;
 
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.table.connector.ChangelogMode;
-import org.apache.flink.table.connector.source.LookupTableSource.LookupContext;
-import org.apache.flink.table.connector.source.LookupTableSource.LookupRuntimeProvider;
 import org.apache.flink.table.connector.source.ScanTableSource;
-import org.apache.flink.table.connector.source.ScanTableSource.ScanContext;
-import org.apache.flink.table.connector.source.ScanTableSource.ScanRuntimeProvider;
-import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
+import org.apache.flink.table.connector.source.abilities.SupportsLimitPushDown;
+import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.expressions.ResolvedExpression;
-import org.apache.flink.table.plan.stats.TableStats;
+import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,7 +56,11 @@ import java.util.Optional;
 import static org.apache.paimon.options.OptionsUtils.PAIMON_PREFIX;
 
 /** A Flink {@link ScanTableSource} for paimon. */
-public abstract class FlinkTableSource {
+public abstract class FlinkTableSource
+        implements ScanTableSource,
+                SupportsFilterPushDown,
+                SupportsProjectionPushDown,
+                SupportsLimitPushDown {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlinkTableSource.class);
 
@@ -64,6 +69,7 @@ public abstract class FlinkTableSource {
                     "%s%s", PAIMON_PREFIX, FlinkConnectorOptions.INFER_SCAN_PARALLELISM.key());
 
     protected final Table table;
+    protected final Options options;
 
     @Nullable protected Predicate predicate;
     @Nullable protected int[][] projectFields;
@@ -80,13 +86,15 @@ public abstract class FlinkTableSource {
             @Nullable int[][] projectFields,
             @Nullable Long limit) {
         this.table = table;
+        this.options = Options.fromMap(table.options());
+
         this.predicate = predicate;
         this.projectFields = projectFields;
         this.limit = limit;
     }
 
-    /** @return The unconsumed filters. */
-    public List<ResolvedExpression> pushFilters(List<ResolvedExpression> filters) {
+    @Override
+    public Result applyFilters(List<ResolvedExpression> filters) {
         List<String> partitionKeys = table.partitionKeys();
         RowType rowType = LogicalTypeConversion.toLogicalType(table.rowType());
 
@@ -95,7 +103,8 @@ public abstract class FlinkTableSource {
         List<ResolvedExpression> unConsumedFilters = new ArrayList<>();
         List<ResolvedExpression> consumedFilters = new ArrayList<>();
         List<Predicate> converted = new ArrayList<>();
-        PredicateVisitor<Boolean> visitor = new PartitionPredicateVisitor(partitionKeys);
+        PredicateVisitor<Boolean> onlyPartFieldsVisitor =
+                new PartitionPredicateVisitor(partitionKeys);
 
         for (ResolvedExpression filter : filters) {
             Optional<Predicate> predicateOptional = PredicateConverter.convert(rowType, filter);
@@ -104,7 +113,7 @@ public abstract class FlinkTableSource {
                 unConsumedFilters.add(filter);
             } else {
                 Predicate p = predicateOptional.get();
-                if (isStreaming() || !p.visit(visitor)) {
+                if (isUnbounded() || !p.visit(onlyPartFieldsVisitor)) {
                     unConsumedFilters.add(filter);
                 } else {
                     consumedFilters.add(filter);
@@ -115,40 +124,61 @@ public abstract class FlinkTableSource {
         predicate = converted.isEmpty() ? null : PredicateBuilder.and(converted);
         LOG.info("Consumed filters: {} of {}", consumedFilters, filters);
 
-        return unConsumedFilters;
+        return Result.of(filters, unConsumedFilters);
     }
 
-    public void pushProjection(int[][] projectedFields) {
+    /**
+     * This method is only used for normal source (not lookup source). Specified partitions in
+     * lookup sources are handled in {@link org.apache.paimon.flink.lookup.PartitionLoader}.
+     */
+    protected Predicate getPredicateWithScanPartitions() {
+        if (options.contains(FlinkConnectorOptions.SCAN_PARTITIONS)) {
+            Predicate partitionPredicate;
+            try {
+                partitionPredicate =
+                        PartitionPredicate.createPartitionPredicate(
+                                ParameterUtils.getPartitions(
+                                        options.get(FlinkConnectorOptions.SCAN_PARTITIONS)
+                                                .split(";")),
+                                table.rowType(),
+                                options.get(CoreOptions.PARTITION_DEFAULT_NAME));
+            } catch (IllegalArgumentException e) {
+                // In older versions of Flink, however, lookup sources will first be treated as
+                // normal sources. So this method will also be visited by lookup tables, whose
+                // option value might be max_pt() or max_two_pt(). In this case we ignore the
+                // filters.
+                return predicate;
+            }
+
+            if (predicate == null) {
+                return partitionPredicate;
+            } else {
+                return PredicateBuilder.and(predicate, partitionPredicate);
+            }
+        } else {
+            return predicate;
+        }
+    }
+
+    @Override
+    public boolean supportsNestedProjection() {
+        return true;
+    }
+
+    @Override
+    public void applyProjection(int[][] projectedFields, DataType producedDataType) {
         this.projectFields = projectedFields;
     }
 
-    public void pushLimit(long limit) {
+    @Override
+    public void applyLimit(long limit) {
         this.limit = limit;
     }
 
-    public abstract ChangelogMode getChangelogMode();
-
-    public abstract ScanRuntimeProvider getScanRuntimeProvider(ScanContext scanContext);
-
-    public abstract void pushWatermark(WatermarkStrategy<RowData> watermarkStrategy);
-
-    public abstract LookupRuntimeProvider getLookupRuntimeProvider(LookupContext context);
-
-    public abstract TableStats reportStatistics();
-
-    public abstract FlinkTableSource copy();
-
-    public abstract String asSummaryString();
-
-    public abstract List<String> listAcceptedFilterFields();
-
-    public abstract void applyDynamicFiltering(List<String> candidateFilterFields);
-
-    public abstract boolean isStreaming();
+    public abstract boolean isUnbounded();
 
     @Nullable
     protected Integer inferSourceParallelism(StreamExecutionEnvironment env) {
-        Options options = Options.fromMap(this.table.options());
         Configuration envConfig = (Configuration) env.getConfiguration();
         if (envConfig.containsKey(FLINK_INFER_SCAN_PARALLELISM)) {
             options.set(
@@ -156,9 +186,18 @@ public abstract class FlinkTableSource {
                     Boolean.parseBoolean(envConfig.toMap().get(FLINK_INFER_SCAN_PARALLELISM)));
         }
         Integer parallelism = options.get(FlinkConnectorOptions.SCAN_PARALLELISM);
-        if (parallelism == null && options.get(FlinkConnectorOptions.INFER_SCAN_PARALLELISM)) {
-            if (isStreaming()) {
-                parallelism = Math.max(1, options.get(CoreOptions.BUCKET));
+        if (parallelism == null
+                // Infer parallelism when parallelism is not set and infer scan parallelism is
+                // enabled.
+                && env.getParallelism() == -1
+                && options.get(FlinkConnectorOptions.INFER_SCAN_PARALLELISM)) {
+            if (isUnbounded()) {
+                // In unaware bucket or dynamic bucket mode, we can't infer parallelism.
+                if (options.get(CoreOptions.BUCKET) == -1) {
+                    return null;
+                } else {
+                    parallelism = Math.max(1, options.get(CoreOptions.BUCKET));
+                }
             } else {
                 scanSplitsForInference();
                 parallelism = splitStatistics.splitNumber();
@@ -180,10 +219,31 @@ public abstract class FlinkTableSource {
 
     protected void scanSplitsForInference() {
         if (splitStatistics == null) {
-            List<Split> splits =
-                    table.newReadBuilder().withFilter(predicate).newScan().plan().splits();
-            splitStatistics = new SplitStatistics(splits);
+            if (table instanceof DataTable) {
+                List<PartitionEntry> partitionEntries = newTableScan().listPartitionEntries();
+                long totalSize = 0;
+                long rowCount = 0;
+                for (PartitionEntry entry : partitionEntries) {
+                    totalSize += entry.fileSizeInBytes();
+                    rowCount += entry.recordCount();
+                }
+                long splitTargetSize = ((DataTable) table).coreOptions().splitTargetSize();
+                splitStatistics =
+                        new SplitStatistics((int) (totalSize / splitTargetSize + 1), rowCount);
+            } else {
+                List<Split> splits = newTableScan().plan().splits();
+                splitStatistics =
+                        new SplitStatistics(
+                                splits.size(), splits.stream().mapToLong(Split::rowCount).sum());
+            }
         }
+    }
+
+    private TableScan newTableScan() {
+        return table.newReadBuilder()
+                .dropStats()
+                .withFilter(getPredicateWithScanPartitions())
+                .newScan();
     }
 
     /** Split statistics for inferring row count and parallelism size. */
@@ -192,9 +252,9 @@ public abstract class FlinkTableSource {
         private final int splitNumber;
         private final long totalRowCount;
 
-        protected SplitStatistics(List<Split> splits) {
-            this.splitNumber = splits.size();
-            this.totalRowCount = splits.stream().mapToLong(Split::rowCount).sum();
+        protected SplitStatistics(int splitNumber, long totalRowCount) {
+            this.splitNumber = splitNumber;
+            this.totalRowCount = totalRowCount;
         }
 
         public int splitNumber() {

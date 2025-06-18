@@ -19,8 +19,6 @@
 package org.apache.paimon.hive.procedure;
 
 import org.apache.paimon.flink.action.ActionITCaseBase;
-import org.apache.paimon.flink.action.MigrateFileAction;
-import org.apache.paimon.flink.procedure.MigrateFileProcedure;
 import org.apache.paimon.hive.TestHiveMetastore;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
@@ -32,14 +30,15 @@ import org.apache.hadoop.hive.conf.HiveConf;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
+import java.util.stream.Stream;
 
-/** Tests for {@link MigrateFileProcedure}. */
+/** Tests for {@code MigrateFileProcedure}. */
 public class MigrateFileProcedureITCase extends ActionITCaseBase {
 
     private static final TestHiveMetastore TEST_HIVE_METASTORE = new TestHiveMetastore();
@@ -56,22 +55,15 @@ public class MigrateFileProcedureITCase extends ActionITCaseBase {
         TEST_HIVE_METASTORE.stop();
     }
 
-    @Test
-    public void testOrc() throws Exception {
-        test("orc");
-        testMigrateFileAction("orc");
+    private static Stream<Arguments> testArguments() {
+        return Stream.of(Arguments.of("orc"), Arguments.of("avro"), Arguments.of("parquet"));
     }
 
-    @Test
-    public void testAvro() throws Exception {
-        test("avro");
-        testMigrateFileAction("avro");
-    }
-
-    @Test
-    public void testParquet() throws Exception {
-        test("parquet");
-        testMigrateFileAction("parquet");
+    @ParameterizedTest
+    @MethodSource("testArguments")
+    public void testMigrateFile(String format) throws Exception {
+        test(format);
+        testMigrateFileAction(format);
     }
 
     public void test(String format) throws Exception {
@@ -99,8 +91,10 @@ public class MigrateFileProcedureITCase extends ActionITCaseBase {
         tEnv.useCatalog("PAIMON");
         tEnv.executeSql(
                 "CREATE TABLE paimontable (id STRING, id2 INT, id3 INT) PARTITIONED BY (id2, id3) with ('bucket' = '-1');");
-        tEnv.executeSql("CALL sys.migrate_file('hive', 'default.hivetable', 'default.paimontable')")
+        tEnv.executeSql(
+                        "CALL sys.migrate_table(connector => 'hive', source_table => 'default.hivetable', target_table => 'default.paimontable')")
                 .await();
+
         List<Row> r2 = ImmutableList.copyOf(tEnv.executeSql("SELECT * FROM paimontable").collect());
 
         Assertions.assertThatList(r1).containsExactlyInAnyOrderElementsOf(r2);
@@ -135,32 +129,14 @@ public class MigrateFileProcedureITCase extends ActionITCaseBase {
         tEnv.useCatalog("PAIMON");
         tEnv.executeSql(
                 "CREATE TABLE paimontable01 (id STRING, id2 INT, id3 INT) PARTITIONED BY (id2, id3) with ('bucket' = '-1');");
-        tEnv.executeSql(
-                "CREATE TABLE paimontable02 (id STRING, id2 INT, id3 INT) PARTITIONED BY (id2, id3) with ('bucket' = '-1');");
-        tEnv.executeSql(
-                        "CALL sys.migrate_file('hive', 'default.hivetable01', 'default.paimontable01', false)")
-                .await();
 
-        tEnv.useCatalog("PAIMON_GE");
-        Map<String, String> catalogConf = new HashMap<>();
-        catalogConf.put("metastore", "hive");
-        catalogConf.put("uri", "thrift://localhost:" + PORT);
-        MigrateFileAction migrateFileAction =
-                new MigrateFileAction(
-                        "hive",
-                        System.getProperty(HiveConf.ConfVars.METASTOREWAREHOUSE.varname),
-                        "default.hivetable02",
-                        "default.paimontable02",
-                        false,
-                        catalogConf,
-                        "");
-        migrateFileAction.run();
+        tEnv.executeSql(
+                        "CALL sys.migrate_table(connector => 'hive', source_table => 'default.hivetable01', target_table => 'default.paimontable01', delete_origin => false)")
+                .await();
 
         tEnv.useCatalog("HIVE");
         List<Row> r1 = ImmutableList.copyOf(tEnv.executeSql("SELECT * FROM hivetable01").collect());
-        List<Row> r2 = ImmutableList.copyOf(tEnv.executeSql("SELECT * FROM hivetable02").collect());
         Assertions.assertThat(r1.size() == 0);
-        Assertions.assertThat(r2.size() == 0);
     }
 
     private String data(int i) {

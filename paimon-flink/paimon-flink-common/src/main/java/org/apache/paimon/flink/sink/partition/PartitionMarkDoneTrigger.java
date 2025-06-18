@@ -44,8 +44,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_IDLE_TIME_TO_DONE;
-import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_TIME_INTERVAL;
 import static org.apache.paimon.utils.PartitionPathUtils.extractPartitionSpecFromPath;
 
@@ -111,11 +111,16 @@ public class PartitionMarkDoneTrigger {
     }
 
     public List<String> donePartitions(boolean endInput) {
-        return donePartitions(endInput, System.currentTimeMillis());
+        return donePartitions(endInput, System.currentTimeMillis(), false);
+    }
+
+    List<String> donePartitions(boolean endInput, long currentTimeMillis) {
+        return donePartitions(endInput, currentTimeMillis, false);
     }
 
     @VisibleForTesting
-    List<String> donePartitions(boolean endInput, long currentTimeMillis) {
+    List<String> donePartitions(
+            boolean endInput, long currentTimeMillis, boolean watermarkEnabled) {
         if (endInput && markDoneWhenEndInput) {
             return new ArrayList<>(pendingPartitions.keySet());
         }
@@ -131,11 +136,21 @@ public class PartitionMarkDoneTrigger {
             String partition = entry.getKey();
 
             long lastUpdateTime = entry.getValue();
-            long partitionStartTime =
-                    extractDateTime(partition)
-                            .atZone(ZoneId.systemDefault())
-                            .toInstant()
-                            .toEpochMilli();
+            long partitionStartTime;
+            if (watermarkEnabled) {
+                // watermark should be compared as UTC time
+                partitionStartTime =
+                        extractDateTime(partition)
+                                .atZone(ZoneId.of("UTC"))
+                                .toInstant()
+                                .toEpochMilli();
+            } else {
+                partitionStartTime =
+                        extractDateTime(partition)
+                                .atZone(ZoneId.systemDefault())
+                                .toInstant()
+                                .toEpochMilli();
+            }
             long partitionEndTime = partitionStartTime + timeInterval;
             lastUpdateTime = Math.max(lastUpdateTime, partitionEndTime);
 
@@ -183,7 +198,10 @@ public class PartitionMarkDoneTrigger {
         public List<String> restore() throws Exception {
             List<String> pendingPartitions = new ArrayList<>();
             if (isRestored) {
-                pendingPartitions.addAll(pendingPartitionsState.get().iterator().next());
+                Iterator<List<String>> state = pendingPartitionsState.get().iterator();
+                if (state.hasNext()) {
+                    pendingPartitions.addAll(state.next());
+                }
             }
             return pendingPartitions;
         }

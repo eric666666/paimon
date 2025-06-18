@@ -39,7 +39,8 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 import javax.annotation.Nullable;
 
@@ -63,9 +64,9 @@ public class GlobalDynamicBucketSink extends FlinkWriteSink<Tuple2<InternalRow, 
     }
 
     @Override
-    protected OneInputStreamOperator<Tuple2<InternalRow, Integer>, Committable> createWriteOperator(
-            StoreSinkWrite.Provider writeProvider, String commitUser) {
-        return new DynamicBucketRowWriteOperator(table, writeProvider, commitUser);
+    protected OneInputStreamOperatorFactory<Tuple2<InternalRow, Integer>, Committable>
+            createWriteOperatorFactory(StoreSinkWrite.Provider writeProvider, String commitUser) {
+        return new DynamicBucketRowWriteOperator.Factory(table, writeProvider, commitUser);
     }
 
     public DataStreamSink<?> build(DataStream<InternalRow> input, @Nullable Integer parallelism) {
@@ -83,13 +84,14 @@ public class GlobalDynamicBucketSink extends FlinkWriteSink<Tuple2<InternalRow, 
         // input -- bootstrap -- shuffle by key hash --> bucket-assigner -- shuffle by bucket -->
         // writer --> committer
 
-        DataStream<Tuple2<KeyPartOrRow, InternalRow>> bootstraped =
+        SingleOutputStreamOperator<Tuple2<KeyPartOrRow, InternalRow>> bootstraped =
                 input.transform(
                                 "INDEX_BOOTSTRAP",
                                 new InternalTypeInfo<>(
                                         new KeyWithRowSerializer<>(
                                                 bootstrapSerializer, rowSerializer)),
-                                new IndexBootstrapOperator<>(new IndexBootstrap(table), r -> r))
+                                new IndexBootstrapOperator.Factory<>(
+                                        new IndexBootstrap(table), r -> r))
                         .setParallelism(input.getParallelism());
 
         // 1. shuffle by key hash
@@ -109,10 +111,10 @@ public class GlobalDynamicBucketSink extends FlinkWriteSink<Tuple2<InternalRow, 
         // 2. bucket-assigner
         TupleTypeInfo<Tuple2<InternalRow, Integer>> rowWithBucketType =
                 new TupleTypeInfo<>(input.getType(), BasicTypeInfo.INT_TYPE_INFO);
-        DataStream<Tuple2<InternalRow, Integer>> bucketAssigned =
+        SingleOutputStreamOperator<Tuple2<InternalRow, Integer>> bucketAssigned =
                 partitionByKeyHash
                         .transform(
-                                "dynamic-bucket-assigner",
+                                "cross-partition-bucket-assigner",
                                 rowWithBucketType,
                                 GlobalIndexAssignerOperator.forRowData(table))
                         .setParallelism(partitionByKeyHash.getParallelism());

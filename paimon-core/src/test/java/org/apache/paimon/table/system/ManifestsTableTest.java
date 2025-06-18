@@ -36,6 +36,7 @@ import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.SnapshotManager;
+import org.apache.paimon.utils.SnapshotNotExistException;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,8 +45,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import static org.apache.paimon.SnapshotTest.newSnapshotManager;
 import static org.apache.paimon.utils.FileStorePathFactoryTest.createNonPartFactory;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Unit tests for {@link ManifestsTable}. */
 public class ManifestsTableTest extends TableTestBase {
@@ -74,7 +77,7 @@ public class ManifestsTableTest extends TableTestBase {
 
         FileIO fileIO = LocalFileIO.create();
         Path tablePath = new Path(String.format("%s/%s.db/%s", warehouse, database, "T"));
-        snapshotManager = new SnapshotManager(fileIO, tablePath);
+        snapshotManager = newSnapshotManager(fileIO, tablePath);
 
         ManifestList.Factory factory =
                 new ManifestList.Factory(
@@ -113,13 +116,50 @@ public class ManifestsTableTest extends TableTestBase {
     }
 
     @Test
-    public void testReadManifestsFromNotExistSnapshot() throws Exception {
+    public void testReadManifestsFromSpecifiedTagName() throws Exception {
+        List<InternalRow> expectedRow = getExpectedResult(1L);
+        table.createTag("tag1", 1L);
+        manifestsTable =
+                (ManifestsTable)
+                        manifestsTable.copy(
+                                Collections.singletonMap(CoreOptions.SCAN_TAG_NAME.key(), "tag1"));
+        List<InternalRow> result = read(manifestsTable);
+        assertThat(result).containsExactlyElementsOf(expectedRow);
+
+        expectedRow = getExpectedResult(2L);
+        table.createTag("tag2", 2L);
+        manifestsTable =
+                (ManifestsTable)
+                        manifestsTable.copy(
+                                Collections.singletonMap(CoreOptions.SCAN_TAG_NAME.key(), "tag2"));
+        result = read(manifestsTable);
+        assertThat(result).containsExactlyElementsOf(expectedRow);
+    }
+
+    @Test
+    public void testReadManifestsFromSpecifiedTimestampMillis() throws Exception {
+        write(table, GenericRow.of(3, 1, 1), GenericRow.of(3, 2, 1));
+        List<InternalRow> expectedRow = getExpectedResult(3L);
+        manifestsTable =
+                (ManifestsTable)
+                        manifestsTable.copy(
+                                Collections.singletonMap(
+                                        CoreOptions.SCAN_TIMESTAMP_MILLIS.key(),
+                                        String.valueOf(System.currentTimeMillis())));
+        List<InternalRow> result = read(manifestsTable);
+        assertThat(result).containsExactlyElementsOf(expectedRow);
+    }
+
+    @Test
+    public void testReadManifestsFromNotExistSnapshot() {
         manifestsTable =
                 (ManifestsTable)
                         manifestsTable.copy(
                                 Collections.singletonMap(CoreOptions.SCAN_SNAPSHOT_ID.key(), "3"));
-        List<InternalRow> result = read(manifestsTable);
-        assertThat(result).isEmpty();
+        assertThrows(
+                SnapshotNotExistException.class,
+                () -> read(manifestsTable),
+                "Specified parameter scan.snapshot-id = 3 is not exist, you can set it in range from 1 to 2");
     }
 
     private List<InternalRow> getExpectedResult(long snapshotId) {
@@ -138,7 +178,21 @@ public class ManifestsTableTest extends TableTestBase {
                             manifestFileMeta.fileSize(),
                             manifestFileMeta.numAddedFiles(),
                             manifestFileMeta.numDeletedFiles(),
-                            manifestFileMeta.schemaId()));
+                            manifestFileMeta.schemaId(),
+                            BinaryString.fromString(
+                                    String.format(
+                                            "{%d}",
+                                            manifestFileMeta
+                                                    .partitionStats()
+                                                    .minValues()
+                                                    .getInt(0))),
+                            BinaryString.fromString(
+                                    String.format(
+                                            "{%d}",
+                                            manifestFileMeta
+                                                    .partitionStats()
+                                                    .maxValues()
+                                                    .getInt(0)))));
         }
         return expectedRow;
     }

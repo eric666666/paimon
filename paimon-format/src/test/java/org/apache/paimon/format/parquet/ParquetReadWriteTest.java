@@ -26,6 +26,7 @@ import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.format.FormatReaderContext;
 import org.apache.paimon.format.FormatWriter;
 import org.apache.paimon.format.parquet.writer.RowDataParquetBuilder;
@@ -34,12 +35,13 @@ import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.reader.RecordReader;
-import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
+import org.apache.paimon.types.BinaryType;
 import org.apache.paimon.types.BooleanType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
+import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.DecimalType;
 import org.apache.paimon.types.DoubleType;
 import org.apache.paimon.types.FloatType;
@@ -50,6 +52,7 @@ import org.apache.paimon.types.RowType;
 import org.apache.paimon.types.SmallIntType;
 import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.types.TinyIntType;
+import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
 
 import org.apache.hadoop.conf.Configuration;
@@ -61,7 +64,14 @@ import org.apache.parquet.hadoop.ParquetFileWriter;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.ExampleParquetWriter;
 import org.apache.parquet.hadoop.util.HadoopOutputFile;
+import org.apache.parquet.io.api.Binary;
+import org.apache.parquet.schema.ConversionPatterns;
+import org.apache.parquet.schema.GroupType;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.Type;
+import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
@@ -73,6 +83,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -89,6 +100,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.format.parquet.ParquetSchemaConverter.computeMinBytesForDecimalPrecision;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -144,6 +159,16 @@ public class ParquetReadWriteTest {
                                     new TimestampType(6), new VarCharType(VarCharType.MAX_LENGTH)))
                     .build();
 
+    private static final RowType DECIMAL_TYPE =
+            RowType.builder()
+                    .fields(
+                            new DecimalType(3, 2),
+                            new DecimalType(6, 2),
+                            new DecimalType(9, 2),
+                            new DecimalType(12, 2),
+                            new DecimalType(32, 2))
+                    .build();
+
     private static final RowType NESTED_ARRAY_MAP_TYPE =
             RowType.of(
                     new IntType(),
@@ -157,6 +182,7 @@ public class ParquetReadWriteTest {
                                     new VarCharType(VarCharType.MAX_LENGTH))),
                     new ArrayType(true, RowType.builder().field("a", new IntType()).build()),
                     RowType.of(
+                            new IntType(),
                             new ArrayType(
                                     true,
                                     RowType.builder()
@@ -166,8 +192,11 @@ public class ParquetReadWriteTest {
                                                             true,
                                                             new ArrayType(true, new IntType())))
                                             .field("c", new IntType())
-                                            .build()),
-                            new IntType()));
+                                            .build())),
+                    RowType.of(
+                            new ArrayType(RowType.of(new VarCharType(255))),
+                            RowType.of(new IntType()),
+                            new VarCharType(255)));
 
     @TempDir public File folder;
 
@@ -455,7 +484,41 @@ public class ParquetReadWriteTest {
                 format.createReader(
                         new FormatReaderContext(
                                 new LocalFileIO(), path, new LocalFileIO().getFileSize(path)));
-        compareNestedRow(rows, new RecordReaderIterator<>(reader));
+        List<InternalRow> results = new ArrayList<>(1283);
+        InternalRowSerializer internalRowSerializer =
+                new InternalRowSerializer(NESTED_ARRAY_MAP_TYPE);
+        reader.forEachRemaining(row -> results.add(internalRowSerializer.copy(row)));
+        compareNestedRow(rows, results);
+    }
+
+    @Test
+    public void testDecimalWithFixedLengthRead() throws Exception {
+        int number = new Random().nextInt(1000) + 100;
+        Path path = createDecimalFile(number, folder, 10);
+
+        ParquetReaderFactory format =
+                new ParquetReaderFactory(new Options(), DECIMAL_TYPE, 500, FilterCompat.NOOP);
+        RecordReader<InternalRow> reader =
+                format.createReader(
+                        new FormatReaderContext(
+                                new LocalFileIO(), path, new LocalFileIO().getFileSize(path)));
+        List<InternalRow> results = new ArrayList<>(number);
+        InternalRowSerializer internalRowSerializer = new InternalRowSerializer(DECIMAL_TYPE);
+        reader.forEachRemaining(row -> results.add(internalRowSerializer.copy(row)));
+
+        BigDecimal decimalValue0 = new BigDecimal("123.67");
+        BigDecimal decimalValue1 = new BigDecimal("12345.67");
+        BigDecimal decimalValue2 = new BigDecimal("1234567.67");
+        BigDecimal decimalValue3 = new BigDecimal("123456789123.67");
+        BigDecimal decimalValue4 = new BigDecimal("123456789123456789123456789123.67");
+
+        for (InternalRow internalRow : results) {
+            assertThat(internalRow.getDecimal(0, 3, 2).toBigDecimal()).isEqualTo(decimalValue0);
+            assertThat(internalRow.getDecimal(1, 6, 2).toBigDecimal()).isEqualTo(decimalValue1);
+            assertThat(internalRow.getDecimal(2, 9, 2).toBigDecimal()).isEqualTo(decimalValue2);
+            assertThat(internalRow.getDecimal(3, 12, 2).toBigDecimal()).isEqualTo(decimalValue3);
+            assertThat(internalRow.getDecimal(4, 32, 2).toBigDecimal()).isEqualTo(decimalValue4);
+        }
     }
 
     @Test
@@ -468,6 +531,143 @@ public class ParquetReadWriteTest {
                         "Parquet does not support null keys in a map. "
                                 + "See https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#maps for more details.")
                 .isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    public void testConvertToParquetTypeWithId() {
+        List<DataField> nestedFields =
+                Arrays.asList(
+                        new DataField(3, "v1", DataTypes.INT()),
+                        new DataField(4, "v2", DataTypes.STRING()));
+        List<DataField> fields =
+                Arrays.asList(
+                        new DataField(0, "a", DataTypes.INT()),
+                        new DataField(1, "b", DataTypes.ARRAY(DataTypes.STRING())),
+                        new DataField(
+                                2,
+                                "c",
+                                DataTypes.MAP(
+                                        DataTypes.INT(),
+                                        DataTypes.MAP(
+                                                DataTypes.BIGINT(), new RowType(nestedFields)))));
+        RowType rowType = new RowType(fields);
+
+        int baseId = 536870911;
+        int depthLimit = 1 << 10;
+        Type innerMapValueType =
+                new GroupType(
+                                Type.Repetition.OPTIONAL,
+                                "value",
+                                Types.primitive(INT32, Type.Repetition.OPTIONAL)
+                                        .named("v1")
+                                        .withId(3),
+                                Types.primitive(
+                                                PrimitiveType.PrimitiveTypeName.BINARY,
+                                                Type.Repetition.OPTIONAL)
+                                        .as(LogicalTypeAnnotation.stringType())
+                                        .named("v2")
+                                        .withId(4))
+                        .withId(baseId + depthLimit * 2 + 2);
+        Type outerMapValueType =
+                ConversionPatterns.mapType(
+                                Type.Repetition.OPTIONAL,
+                                "value",
+                                "key_value",
+                                Types.primitive(INT64, Type.Repetition.REQUIRED)
+                                        .named("key")
+                                        .withId(baseId - depthLimit * 2 - 2),
+                                innerMapValueType)
+                        .withId(baseId + depthLimit * 2 + 1);
+        Type expected =
+                new MessageType(
+                        ParquetSchemaConverter.PAIMON_SCHEMA,
+                        Types.primitive(INT32, Type.Repetition.OPTIONAL).named("a").withId(0),
+                        ConversionPatterns.listOfElements(
+                                        Type.Repetition.OPTIONAL,
+                                        "b",
+                                        Types.primitive(
+                                                        PrimitiveType.PrimitiveTypeName.BINARY,
+                                                        Type.Repetition.OPTIONAL)
+                                                .as(LogicalTypeAnnotation.stringType())
+                                                .named("element")
+                                                .withId(baseId + depthLimit + 1))
+                                .withId(1),
+                        ConversionPatterns.mapType(
+                                        Type.Repetition.OPTIONAL,
+                                        "c",
+                                        "key_value",
+                                        Types.primitive(INT32, Type.Repetition.REQUIRED)
+                                                .named("key")
+                                                .withId(baseId - depthLimit * 2 - 1),
+                                        outerMapValueType)
+                                .withId(2));
+        Type actual = ParquetSchemaConverter.convertToParquetMessageType(rowType);
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    public void testReadBinaryWrittenByParquet() throws Exception {
+        Path path = new Path(folder.getPath(), UUID.randomUUID().toString());
+        Configuration conf = new Configuration();
+        MessageType schema =
+                new MessageType(
+                        "origin-parquet",
+                        Types.primitive(
+                                        PrimitiveType.PrimitiveTypeName.BINARY,
+                                        Type.Repetition.REQUIRED)
+                                .named("f0")
+                                .withId(0),
+                        Types.primitive(
+                                        PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY,
+                                        Type.Repetition.REQUIRED)
+                                .length(10)
+                                .named("f1")
+                                .withId(1));
+
+        List<InternalRow> targetRows = new ArrayList<>();
+        try (ParquetWriter<Group> writer =
+                ExampleParquetWriter.builder(
+                                HadoopOutputFile.fromPath(
+                                        new org.apache.hadoop.fs.Path(path.toString()), conf))
+                        .withWriteMode(ParquetFileWriter.Mode.OVERWRITE)
+                        .withConf(new Configuration())
+                        .withType(schema)
+                        .build()) {
+            SimpleGroupFactory simpleGroupFactory = new SimpleGroupFactory(schema);
+            for (int i = 0; i < 100; i++) {
+                Group row = simpleGroupFactory.newGroup();
+                byte[] randomLengthBytes = new byte[ThreadLocalRandom.current().nextInt(1, 100)];
+                byte[] fixedLengthBytes = new byte[10];
+                ThreadLocalRandom.current().nextBytes(randomLengthBytes);
+                ThreadLocalRandom.current().nextBytes(fixedLengthBytes);
+
+                targetRows.add(GenericRow.of(randomLengthBytes, fixedLengthBytes));
+
+                row.append("f0", Binary.fromConstantByteArray(randomLengthBytes));
+                row.append("f1", Binary.fromConstantByteArray(fixedLengthBytes));
+                writer.write(row);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Create data by parquet origin writer failed.");
+        }
+
+        RowType paimonRowType =
+                RowType.builder()
+                        .fields(new VarBinaryType(VarCharType.MAX_LENGTH), new BinaryType(10))
+                        .build();
+
+        ParquetReaderFactory format =
+                new ParquetReaderFactory(new Options(), paimonRowType, 500, FilterCompat.NOOP);
+
+        RecordReader<InternalRow> reader =
+                format.createReader(
+                        new FormatReaderContext(
+                                new LocalFileIO(), path, new LocalFileIO().getFileSize(path)));
+        reader.forEachRemaining(
+                row -> {
+                    Assertions.assertArrayEquals(row.getBinary(0), row.getBinary(0));
+                    Assertions.assertArrayEquals(row.getBinary(1), row.getBinary(1));
+                });
     }
 
     private void innerTestTypes(File folder, List<Integer> records, int rowGroupSize)
@@ -498,8 +698,7 @@ public class ParquetReadWriteTest {
             writer.addElement(row);
         }
 
-        writer.flush();
-        writer.finish();
+        writer.close();
         return path;
     }
 
@@ -723,6 +922,7 @@ public class ParquetReadWriteTest {
                             new GenericArray(
                                     new GenericRow[] {GenericRow.of(i), GenericRow.of(i + 1)}),
                             GenericRow.of(
+                                    i,
                                     new GenericArray(
                                             new GenericRow[] {
                                                 GenericRow.of(
@@ -741,8 +941,8 @@ public class ParquetReadWriteTest {
                                                                     null
                                                                 }),
                                                         i)
-                                            }),
-                                    i)));
+                                            })),
+                            null));
         }
         return rows;
     }
@@ -752,8 +952,7 @@ public class ParquetReadWriteTest {
         Configuration conf = new Configuration();
         conf.setInt("parquet.block.size", rowGroupSize);
         MessageType schema =
-                ParquetSchemaConverter.convertToParquetMessageType(
-                        "paimon-parquet", NESTED_ARRAY_MAP_TYPE);
+                ParquetSchemaConverter.convertToParquetMessageType(NESTED_ARRAY_MAP_TYPE);
         try (ParquetWriter<Group> writer =
                 ExampleParquetWriter.builder(
                                 HadoopOutputFile.fromPath(
@@ -793,19 +992,105 @@ public class ParquetReadWriteTest {
                 row1.add(0, i);
                 Group row2 = rowList.addGroup(0);
                 row2.add(0, i + 1);
+                f4.addGroup(0);
 
-                // add ROW<`f0` ARRAY<ROW<`b` ARRAY<ARRAY<INT>>, `c` INT>>, `f1` INT>>
+                // add ROW<`f0` INT , `f1` INTARRAY<ROW<`b` ARRAY<ARRAY<INT>>, `c` INT>>>>
                 Group f5 = row.addGroup("f5");
-                Group arrayRow = f5.addGroup(0);
+                f5.add(0, i);
+                Group arrayRow = f5.addGroup(1);
                 Group insideRow = arrayRow.addGroup(0).addGroup(0);
                 Group insideArray = insideRow.addGroup(0);
                 createParquetDoubleNestedArray(insideArray, i);
                 insideRow.add(1, i);
-                f5.add(1, i);
+                arrayRow.addGroup(0);
                 writer.write(row);
             }
         } catch (Exception e) {
             throw new RuntimeException("Create nested data by parquet origin writer failed.");
+        }
+        return path;
+    }
+
+    private Path createDecimalFile(int rowNum, File tmpDir, int rowGroupSize) {
+        Path path = new Path(tmpDir.getPath(), UUID.randomUUID().toString());
+        Configuration conf = new Configuration();
+        conf.setInt("parquet.block.size", rowGroupSize);
+        List<Type> types = new ArrayList<>();
+
+        for (DataField dataField : DECIMAL_TYPE.getFields()) {
+            String name = dataField.name();
+            int fieldId = dataField.id();
+            int precision = ((DecimalType) dataField.type()).getPrecision();
+            int scale = ((DecimalType) dataField.type()).getScale();
+            Type.Repetition repetition =
+                    dataField.type().isNullable()
+                            ? Type.Repetition.OPTIONAL
+                            : Type.Repetition.REQUIRED;
+
+            types.add(
+                    Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
+                            .as(LogicalTypeAnnotation.decimalType(scale, precision))
+                            .length(computeMinBytesForDecimalPrecision(precision))
+                            .named(name)
+                            .withId(fieldId));
+        }
+
+        MessageType schema = new MessageType("paimon_schema", types);
+
+        List<Binary> decimalBytesList = new ArrayList<>();
+
+        BigDecimal decimalValue = new BigDecimal("123.67");
+        int scale = 2;
+        byte[] decimalBytes =
+                decimalValue.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray();
+        Binary binaryValue = Binary.fromByteArray(decimalBytes);
+        decimalBytesList.add(binaryValue);
+
+        decimalValue = new BigDecimal("12345.67");
+        decimalBytes =
+                decimalValue.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray();
+        binaryValue = Binary.fromByteArray(decimalBytes);
+        decimalBytesList.add(binaryValue);
+
+        decimalValue = new BigDecimal("1234567.67");
+        decimalBytes =
+                decimalValue.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray();
+        binaryValue = Binary.fromByteArray(decimalBytes);
+        decimalBytesList.add(binaryValue);
+
+        decimalValue = new BigDecimal("123456789123.67");
+        decimalBytes =
+                decimalValue.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray();
+        binaryValue = Binary.fromByteArray(decimalBytes);
+        decimalBytesList.add(binaryValue);
+
+        decimalValue = new BigDecimal("123456789123456789123456789123.67");
+        decimalBytes =
+                decimalValue.setScale(scale, RoundingMode.HALF_UP).unscaledValue().toByteArray();
+        binaryValue = Binary.fromByteArray(decimalBytes);
+        decimalBytesList.add(binaryValue);
+
+        try (ParquetWriter<Group> writer =
+                ExampleParquetWriter.builder(
+                                HadoopOutputFile.fromPath(
+                                        new org.apache.hadoop.fs.Path(path.toString()), conf))
+                        .withWriteMode(ParquetFileWriter.Mode.OVERWRITE)
+                        .withConf(new Configuration())
+                        .withType(schema)
+                        .build()) {
+            SimpleGroupFactory simpleGroupFactory = new SimpleGroupFactory(schema);
+            for (int i = 0; i < rowNum; i++) {
+
+                Group row = simpleGroupFactory.newGroup();
+
+                for (int j = 0; j < DECIMAL_TYPE.getFields().size(); j++) {
+                    row.append("f" + j, decimalBytesList.get(j));
+                }
+
+                writer.write(row);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Create data by parquet origin writer failed.", e);
         }
         return path;
     }
@@ -838,12 +1123,12 @@ public class ParquetReadWriteTest {
         }
     }
 
-    private void compareNestedRow(
-            List<InternalRow> rows, RecordReaderIterator<InternalRow> iterator) throws Exception {
-        for (InternalRow origin : rows) {
-            assertThat(iterator.hasNext()).isTrue();
-            InternalRow result = iterator.next();
+    private void compareNestedRow(List<InternalRow> rows, List<InternalRow> results) {
+        Assertions.assertEquals(rows.size(), results.size());
 
+        for (InternalRow result : results) {
+            int index = result.getInt(0);
+            InternalRow origin = rows.get(index);
             Assertions.assertEquals(origin.getInt(0), result.getInt(0));
 
             // int[]
@@ -894,46 +1179,45 @@ public class ParquetReadWriteTest {
                     origin.getArray(4).getRow(1, 1).getInt(0),
                     result.getArray(4).getRow(1, 1).getInt(0));
 
+            Assertions.assertEquals(origin.getRow(5, 2).getInt(0), result.getRow(5, 2).getInt(0));
             Assertions.assertEquals(
-                    origin.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(0).getInt(0),
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(0).getInt(0));
+                    origin.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(0).getInt(0),
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(0).getInt(0));
             Assertions.assertEquals(
-                    origin.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(0).getInt(1),
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(0).getInt(1));
+                    origin.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(0).getInt(1),
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(0).getInt(1));
             Assertions.assertTrue(
                     result.getRow(5, 2)
-                            .getArray(0)
+                            .getArray(1)
                             .getRow(0, 2)
                             .getArray(0)
                             .getArray(0)
                             .isNullAt(2));
 
             Assertions.assertEquals(
-                    origin.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(1).getInt(0),
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(1).getInt(0));
+                    origin.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(1).getInt(0),
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(1).getInt(0));
             Assertions.assertEquals(
-                    origin.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(1).getInt(1),
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(1).getInt(1));
+                    origin.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(1).getInt(1),
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(1).getInt(1));
             Assertions.assertTrue(
                     result.getRow(5, 2)
-                            .getArray(0)
+                            .getArray(1)
                             .getRow(0, 2)
                             .getArray(0)
                             .getArray(1)
                             .isNullAt(2));
 
             Assertions.assertEquals(
-                    0, result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).getArray(2).size());
+                    0, result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).getArray(2).size());
             Assertions.assertTrue(
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getArray(0).isNullAt(3));
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getArray(0).isNullAt(3));
 
             Assertions.assertEquals(
-                    origin.getRow(5, 2).getArray(0).getRow(0, 2).getInt(1),
-                    result.getRow(5, 2).getArray(0).getRow(0, 2).getInt(1));
-            Assertions.assertEquals(origin.getRow(5, 2).getInt(1), result.getRow(5, 2).getInt(1));
+                    origin.getRow(5, 2).getArray(1).getRow(0, 2).getInt(1),
+                    result.getRow(5, 2).getArray(1).getRow(0, 2).getInt(1));
+            Assertions.assertTrue(result.isNullAt(6));
         }
-        assertThat(iterator.hasNext()).isFalse();
-        iterator.close();
     }
 
     private void fillWithMap(Map<String, String> map, InternalMap internalMap, int index) {

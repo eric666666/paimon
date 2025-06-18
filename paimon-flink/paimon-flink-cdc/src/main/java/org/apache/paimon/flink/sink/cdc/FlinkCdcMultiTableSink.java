@@ -18,10 +18,10 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
-import org.apache.paimon.flink.sink.CommitterOperator;
+import org.apache.paimon.flink.sink.CommitterOperatorFactory;
 import org.apache.paimon.flink.sink.FlinkSink;
 import org.apache.paimon.flink.sink.FlinkStreamPartitioner;
 import org.apache.paimon.flink.sink.MultiTableCommittable;
@@ -31,6 +31,7 @@ import org.apache.paimon.flink.sink.RestoreAndFailCommittableStateManager;
 import org.apache.paimon.flink.sink.StoreMultiCommitter;
 import org.apache.paimon.flink.sink.StoreSinkWrite;
 import org.apache.paimon.flink.sink.StoreSinkWriteImpl;
+import org.apache.paimon.flink.sink.TableFilter;
 import org.apache.paimon.flink.sink.WrappedManifestCommittableSerializer;
 import org.apache.paimon.manifest.WrappedManifestCommittable;
 import org.apache.paimon.options.MemorySize;
@@ -41,15 +42,17 @@ import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Collections;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
+import static org.apache.paimon.flink.utils.ParallelismUtils.forwardParallelism;
 
 /**
  * A {@link FlinkSink} which accepts {@link CdcRecord} and waits for a schema change if necessary.
@@ -61,24 +64,26 @@ public class FlinkCdcMultiTableSink implements Serializable {
     private static final String GLOBAL_COMMITTER_NAME = "Multiplex Global Committer";
 
     private final boolean isOverwrite = false;
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private final double commitCpuCores;
-    @Nullable
-    private final MemorySize commitHeapMemory;
-    private final boolean commitChaining;
+    @Nullable private final MemorySize commitHeapMemory;
     private final String commitUser;
+    private boolean eagerInit = false;
+    private TableFilter tableFilter;
 
     public FlinkCdcMultiTableSink(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
-            boolean commitChaining,
-            String commitUser) {
+            String commitUser,
+            boolean eagerInit,
+            TableFilter tableFilter) {
         this.catalogLoader = catalogLoader;
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
-        this.commitChaining = commitChaining;
         this.commitUser = commitUser;
+        this.eagerInit = eagerInit;
+        this.tableFilter = tableFilter;
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -110,20 +115,12 @@ public class FlinkCdcMultiTableSink implements Serializable {
             String commitUser,
             StoreSinkWrite.WithWriteBufferProvider sinkProvider) {
         StreamExecutionEnvironment env = input.getExecutionEnvironment();
-        CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-        boolean streamingCheckpointEnabled =
-                FlinkSink.isStreaming(input) && checkpointConfig.isCheckpointingEnabled();
-        if (streamingCheckpointEnabled) {
-            assertStreamingConfiguration(env);
-        }
-
+        assertStreamingConfiguration(env);
         MultiTableCommittableTypeInfo typeInfo = new MultiTableCommittableTypeInfo();
         SingleOutputStreamOperator<MultiTableCommittable> written =
                 input.transform(
-                                WRITER_NAME,
-                                typeInfo,
-                                createWriteOperator(sinkProvider, commitUser))
-                        .setParallelism(input.getParallelism());
+                        WRITER_NAME, typeInfo, createWriteOperator(sinkProvider, commitUser));
+        forwardParallelism(written, input);
 
         // shuffle committables by table
         DataStream<MultiTableCommittable> partitioned =
@@ -133,36 +130,43 @@ public class FlinkCdcMultiTableSink implements Serializable {
                         input.getParallelism());
 
         SingleOutputStreamOperator<?> committed =
-                partitioned
-                        .transform(
-                                GLOBAL_COMMITTER_NAME,
-                                typeInfo,
-                                new CommitterOperator<>(
-                                        true,
-                                        false,
-                                        commitChaining,
-                                        commitUser,
-                                        createCommitterFactory(),
-                                        createCommittableStateManager()))
-                        .setParallelism(input.getParallelism());
+                partitioned.transform(
+                        GLOBAL_COMMITTER_NAME,
+                        typeInfo,
+                        new CommitterOperatorFactory<>(
+                                true,
+                                false,
+                                commitUser,
+                                createCommitterFactory(tableFilter),
+                                createCommittableStateManager()));
+        forwardParallelism(committed, input);
         configureGlobalCommitter(committed, commitCpuCores, commitHeapMemory);
-        return committed.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
+        return committed.sinkTo(new DiscardingSink<>()).name("end").setParallelism(1);
     }
 
-    protected OneInputStreamOperator<CdcMultiplexRecord, MultiTableCommittable> createWriteOperator(
-            StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
-        return new CdcRecordStoreMultiWriteOperator(
+    protected OneInputStreamOperatorFactory<CdcMultiplexRecord, MultiTableCommittable>
+            createWriteOperator(
+                    StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
+        return new CdcRecordStoreMultiWriteOperator.Factory(
                 catalogLoader, writeProvider, commitUser, new Options());
     }
 
     // Table committers are dynamically created at runtime
     protected Committer.Factory<MultiTableCommittable, WrappedManifestCommittable>
-            createCommitterFactory() {
+            createCommitterFactory(TableFilter tableFilter) {
+
         // If checkpoint is enabled for streaming job, we have to
         // commit new files list even if they're empty.
         // Otherwise we can't tell if the commit is successful after
         // a restart.
-        return context -> new StoreMultiCommitter(catalogLoader, context);
+        return context ->
+                new StoreMultiCommitter(
+                        catalogLoader,
+                        context,
+                        false,
+                        Collections.emptyMap(),
+                        eagerInit,
+                        tableFilter);
     }
 
     protected CommittableStateManager<WrappedManifestCommittable> createCommittableStateManager() {

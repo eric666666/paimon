@@ -18,24 +18,25 @@
 
 package org.apache.paimon.catalog;
 
+import org.apache.paimon.PagedList;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.Public;
-import org.apache.paimon.fs.FileIO;
-import org.apache.paimon.fs.Path;
-import org.apache.paimon.metastore.MetastoreClient;
+import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.TableSnapshot;
+import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
 
-import java.io.Serializable;
-import java.util.Arrays;
+import javax.annotation.Nullable;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
-
-import static org.apache.paimon.options.OptionsUtils.convertToPropertiesPrefixKey;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /**
  * This interface is responsible for reading and writing metadata such as database/table from a
@@ -47,39 +48,7 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 @Public
 public interface Catalog extends AutoCloseable {
 
-    String DEFAULT_DATABASE = "default";
-
-    String SYSTEM_TABLE_SPLITTER = "$";
-    String SYSTEM_DATABASE_NAME = "sys";
-    String SYSTEM_BRANCH_PREFIX = "branch_";
-    String COMMENT_PROP = "comment";
-    String TABLE_DEFAULT_OPTION_PREFIX = "table-default.";
-    String DB_LOCATION_PROP = "location";
-    String DB_SUFFIX = ".db";
-
-    /** Warehouse root path containing all database directories in this catalog. */
-    String warehouse();
-
-    /** Catalog options. */
-    Map<String, String> options();
-
-    FileIO fileIO();
-
-    /**
-     * Get lock factory from catalog. Lock is used to support multiple concurrent writes on the
-     * object store.
-     */
-    Optional<CatalogLockFactory> lockFactory();
-
-    /** Get lock context for lock factory to create a lock. */
-    default Optional<CatalogLockContext> lockContext() {
-        return Optional.empty();
-    }
-
-    /** Get metastore client factory for the table specified by {@code identifier}. */
-    default Optional<MetastoreClient.Factory> metastoreClientFactory(Identifier identifier) {
-        return Optional.empty();
-    }
+    // ======================= database methods ===============================
 
     /**
      * Get the names of all databases in this catalog.
@@ -89,19 +58,18 @@ public interface Catalog extends AutoCloseable {
     List<String> listDatabases();
 
     /**
-     * Check if a database exists in this catalog.
+     * Get paged list names of all databases in this catalog.
      *
-     * @param databaseName Name of the database
-     * @return true if the given database exists in the catalog false otherwise
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the names of databases with provided page size in this catalog and next
+     *     page token, or a list of the names of all databases if the catalog does not {@link
+     *     #supportsListObjectsPaged()}.
      */
-    default boolean databaseExists(String databaseName) {
-        try {
-            loadDatabaseProperties(databaseName);
-            return true;
-        } catch (DatabaseNotExistException e) {
-            return false;
-        }
-    }
+    PagedList<String> listDatabasesPaged(@Nullable Integer maxResults, @Nullable String pageToken);
 
     /**
      * Create a database, see {@link Catalog#createDatabase(String name, boolean ignoreIfExists, Map
@@ -127,13 +95,13 @@ public interface Catalog extends AutoCloseable {
             throws DatabaseAlreadyExistException;
 
     /**
-     * Load database properties.
+     * Return a {@link Database} identified by the given name.
      *
      * @param name Database name
-     * @return The requested database's properties
+     * @return The requested {@link Database}
      * @throws DatabaseNotExistException if the requested database does not exist
      */
-    Map<String, String> loadDatabaseProperties(String name) throws DatabaseNotExistException;
+    Database getDatabase(String name) throws DatabaseNotExistException;
 
     /**
      * Drop a database.
@@ -150,6 +118,21 @@ public interface Catalog extends AutoCloseable {
             throws DatabaseNotExistException, DatabaseNotEmptyException;
 
     /**
+     * Alter a database.
+     *
+     * @param name Name of the database to alter.
+     * @param changes the property changes
+     * @param ignoreIfNotExists Flag to specify behavior when the database does not exist: if set to
+     *     false, throw an exception, if set to true, do nothing.
+     * @throws DatabaseNotExistException if the given database is not exist and ignoreIfNotExists is
+     *     false
+     */
+    void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+            throws DatabaseNotExistException;
+
+    // ======================= table methods ===============================
+
+    /**
      * Return a {@link Table} identified by the given {@link Identifier}.
      *
      * <p>System tables can be got by '$' splitter.
@@ -159,14 +142,6 @@ public interface Catalog extends AutoCloseable {
      * @throws TableNotExistException if the target does not exist
      */
     Table getTable(Identifier identifier) throws TableNotExistException;
-
-    /**
-     * Get the table location in this catalog. If the table exists, return the location of the
-     * table; If the table does not exist, construct the location for table.
-     *
-     * @return the table location
-     */
-    Path getTableLocation(Identifier identifier);
 
     /**
      * Get names of all tables under this database. An empty list is returned if none exists.
@@ -179,18 +154,45 @@ public interface Catalog extends AutoCloseable {
     List<String> listTables(String databaseName) throws DatabaseNotExistException;
 
     /**
-     * Check if a table exists in this catalog.
+     * Get paged list names of tables under this database. An empty list is returned if none exists.
      *
-     * @param identifier Path of the table
-     * @return true if the given table exists in the catalog false otherwise
+     * <p>NOTE: System tables will not be listed.
+     *
+     * @param databaseName Name of the database to list tables.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the names of tables with provided page size in this database and next page
+     *     token, or a list of the names of all tables in this database if the catalog does not
+     *     {@link #supportsListObjectsPaged()}.
+     * @throws DatabaseNotExistException if the database does not exist
      */
-    default boolean tableExists(Identifier identifier) {
-        try {
-            return getTable(identifier) != null;
-        } catch (TableNotExistException e) {
-            return false;
-        }
-    }
+    PagedList<String> listTablesPaged(
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws DatabaseNotExistException;
+
+    /**
+     * Get paged list of table details under this database. An empty list is returned if none
+     * exists.
+     *
+     * <p>NOTE: System tables will not be listed.
+     *
+     * @param databaseName Name of the database to list table details.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the table details with provided page size in this database and next page
+     *     token, or a list of the details of all tables in this database if the catalog does not
+     *     {@link #supportsListObjectsPaged()}.
+     * @throws DatabaseNotExistException if the database does not exist
+     */
+    PagedList<Table> listTableDetailsPaged(
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws DatabaseNotExistException;
 
     /**
      * Drop a table.
@@ -263,17 +265,6 @@ public interface Catalog extends AutoCloseable {
     default void invalidateTable(Identifier identifier) {}
 
     /**
-     * Drop the partition of the specify table.
-     *
-     * @param identifier path of the table to drop partition
-     * @param partitions the partition to be deleted
-     * @throws TableNotExistException if the table does not exist
-     * @throws PartitionNotExistException if the partition does not exist
-     */
-    void dropPartition(Identifier identifier, Map<String, String> partitions)
-            throws TableNotExistException, PartitionNotExistException;
-
-    /**
      * Modify an existing table from a {@link SchemaChange}.
      *
      * <p>NOTE: System tables can not be altered.
@@ -289,43 +280,380 @@ public interface Catalog extends AutoCloseable {
         alterTable(identifier, Collections.singletonList(change), ignoreIfNotExists);
     }
 
-    /** Return a boolean that indicates whether this catalog allow upper case. */
-    boolean allowUpperCase();
+    // ======================= partition methods ===============================
 
+    /**
+     * Mark partitions done of the specify table. For non-existent partitions, partitions will be
+     * created directly.
+     *
+     * @param identifier path of the table to mark done partitions
+     * @param partitions partitions to be marked done
+     * @throws TableNotExistException if the table does not exist
+     */
+    void markDonePartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException;
+
+    /**
+     * Get Partition of all partitions of the table.
+     *
+     * @param identifier path of the table to list partitions
+     * @throws TableNotExistException if the table does not exist
+     */
+    List<Partition> listPartitions(Identifier identifier) throws TableNotExistException;
+
+    /**
+     * Get paged partitioned list of the table.
+     *
+     * @param identifier path of the table to list partitions
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the partitions with provided page size(@param maxResults) in this table and
+     *     next page token, or a list of all partitions of the table if the catalog does not {@link
+     *     #supportsListObjectsPaged()}.
+     * @throws TableNotExistException if the table does not exist
+     */
+    PagedList<Partition> listPartitionsPaged(
+            Identifier identifier, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws TableNotExistException;
+
+    // ======================= view methods ===============================
+
+    /**
+     * Return a {@link View} identified by the given {@link Identifier}.
+     *
+     * @param identifier Path of the view
+     * @return The requested view
+     * @throws ViewNotExistException if the target does not exist
+     */
+    default View getView(Identifier identifier) throws ViewNotExistException {
+        throw new ViewNotExistException(identifier);
+    }
+
+    /**
+     * Drop a view.
+     *
+     * @param identifier Path of the view to be dropped
+     * @param ignoreIfNotExists Flag to specify behavior when the view does not exist: if set to
+     *     false, throw an exception, if set to true, do nothing.
+     * @throws ViewNotExistException if the view does not exist
+     */
+    default void dropView(Identifier identifier, boolean ignoreIfNotExists)
+            throws ViewNotExistException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Create a new view.
+     *
+     * @param identifier path of the view to be created
+     * @param view the view definition
+     * @param ignoreIfExists flag to specify behavior when a view already exists at the given path:
+     *     if set to false, it throws a ViewAlreadyExistException, if set to true, do nothing.
+     * @throws ViewAlreadyExistException if view already exists and ignoreIfExists is false
+     * @throws DatabaseNotExistException if the database in identifier doesn't exist
+     */
+    default void createView(Identifier identifier, View view, boolean ignoreIfExists)
+            throws ViewAlreadyExistException, DatabaseNotExistException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Get names of all views under this database. An empty list is returned if none exists.
+     *
+     * @return a list of the names of all views in this database
+     * @throws DatabaseNotExistException if the database does not exist
+     */
+    default List<String> listViews(String databaseName) throws DatabaseNotExistException {
+        return Collections.emptyList();
+    }
+
+    /**
+     * Get paged list names of views under this database. An empty list is returned if none view
+     * exists.
+     *
+     * @param databaseName Name of the database to list views.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the names of views with provided page size in this database and next page
+     *     token, or a list of the names of all views in this database if the catalog does not
+     *     {@link #supportsListObjectsPaged()}.
+     * @throws DatabaseNotExistException if the database does not exist
+     */
+    default PagedList<String> listViewsPaged(
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws DatabaseNotExistException {
+        return new PagedList<>(listViews(databaseName), null);
+    }
+
+    /**
+     * Get paged list view details under this database. An empty list is returned if none view
+     * exists.
+     *
+     * @param databaseName Name of the database to list views.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @return a list of the view details with provided page size (@param maxResults) in this
+     *     database and next page token, or a list of the details of all views in this database if
+     *     the catalog does not {@link #supportsListObjectsPaged()}.
+     * @throws DatabaseNotExistException if the database does not exist
+     */
+    default PagedList<View> listViewDetailsPaged(
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
+            throws DatabaseNotExistException {
+        return new PagedList<>(Collections.emptyList(), null);
+    }
+
+    /**
+     * Rename a view.
+     *
+     * @param fromView identifier of the view to rename
+     * @param toView new view identifier
+     * @throws ViewNotExistException if the fromView does not exist
+     * @throws ViewAlreadyExistException if the toView already exists
+     */
+    default void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
+            throws ViewNotExistException, ViewAlreadyExistException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Alter a view.
+     *
+     * @param view identifier of the view to alter
+     * @param viewChanges - changes of view
+     * @param ignoreIfNotExists
+     * @throws ViewNotExistException if the view does not exist
+     * @throws DialectAlreadyExistException if the dialect already exists
+     * @throws DialectNotExistException if the dialect not exists
+     */
+    default void alterView(Identifier view, List<ViewChange> viewChanges, boolean ignoreIfNotExists)
+            throws ViewNotExistException, DialectAlreadyExistException, DialectNotExistException {
+        throw new UnsupportedOperationException();
+    }
+
+    // ======================= repair methods ===============================
+
+    /**
+     * Repair the entire Catalog, repair the metadata in the metastore consistent with the metadata
+     * in the filesystem, register missing tables in the metastore.
+     */
     default void repairCatalog() {
         throw new UnsupportedOperationException();
     }
 
+    /**
+     * Repair the entire database, repair the metadata in the metastore consistent with the metadata
+     * in the filesystem, register missing tables in the metastore.
+     */
     default void repairDatabase(String databaseName) {
         throw new UnsupportedOperationException();
     }
 
+    /**
+     * Repair the table, repair the metadata in the metastore consistent with the metadata in the
+     * filesystem.
+     */
     default void repairTable(Identifier identifier) throws TableNotExistException {
         throw new UnsupportedOperationException();
     }
 
-    static Map<String, String> tableDefaultOptions(Map<String, String> options) {
-        return convertToPropertiesPrefixKey(options, TABLE_DEFAULT_OPTION_PREFIX);
-    }
+    /**
+     * Whether this catalog supports version management for tables. If not, corresponding methods
+     * will fall back to listing all objects. For example, {@link #listTablesPaged(String, Integer,
+     * String)} would fall back to {@link #listTables(String)}.
+     *
+     * <ul>
+     *   <li>{@link #listDatabasesPaged(Integer, String)}.
+     *   <li>{@link #listTablesPaged(String, Integer, String)}.
+     *   <li>{@link #listTableDetailsPaged(String, Integer, String)}.
+     *   <li>{@link #listViewsPaged(String, Integer, String)}.
+     *   <li>{@link #listViewDetailsPaged(String, Integer, String)}.
+     *   <li>{@link #listPartitionsPaged(Identifier, Integer, String)}.
+     * </ul>
+     */
+    boolean supportsListObjectsPaged();
 
-    /** Validate database, table and field names must be lowercase when not case-sensitive. */
-    static void validateCaseInsensitive(boolean caseSensitive, String type, String... names) {
-        validateCaseInsensitive(caseSensitive, type, Arrays.asList(names));
-    }
+    // ==================== Version management methods ==========================
 
-    /** Validate database, table and field names must be lowercase when not case-sensitive. */
-    static void validateCaseInsensitive(boolean caseSensitive, String type, List<String> names) {
-        if (caseSensitive) {
-            return;
-        }
-        List<String> illegalNames =
-                names.stream().filter(f -> !f.equals(f.toLowerCase())).collect(Collectors.toList());
-        checkArgument(
-                illegalNames.isEmpty(),
-                String.format(
-                        "%s name %s cannot contain upper case in the catalog.",
-                        type, illegalNames));
-    }
+    /**
+     * Whether this catalog supports version management for tables. If not, corresponding methods
+     * will throw an {@link UnsupportedOperationException}, affect the following methods:
+     *
+     * <ul>
+     *   <li>{@link #commitSnapshot(Identifier, Snapshot, List)}.
+     *   <li>{@link #loadSnapshot(Identifier)}.
+     *   <li>{@link #rollbackTo(Identifier, Instant)}.
+     *   <li>{@link #createBranch(Identifier, String, String)}.
+     *   <li>{@link #dropBranch(Identifier, String)}.
+     *   <li>{@link #listBranches(Identifier)}.
+     * </ul>
+     */
+    boolean supportsVersionManagement();
+
+    /**
+     * Commit the {@link Snapshot} for table identified by the given {@link Identifier}.
+     *
+     * @param identifier Path of the table
+     * @param snapshot Snapshot to be committed
+     * @param statistics statistics information of this change
+     * @return Success or not
+     * @throws Catalog.TableNotExistException if the target does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    boolean commitSnapshot(
+            Identifier identifier, Snapshot snapshot, List<PartitionStatistics> statistics)
+            throws Catalog.TableNotExistException;
+
+    /**
+     * Return the snapshot of table identified by the given {@link Identifier}.
+     *
+     * @param identifier Path of the table
+     * @return The requested snapshot of the table
+     * @throws Catalog.TableNotExistException if the target does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    Optional<TableSnapshot> loadSnapshot(Identifier identifier)
+            throws Catalog.TableNotExistException;
+
+    /**
+     * rollback table by the given {@link Identifier} and instant.
+     *
+     * @param identifier path of the table
+     * @param instant like snapshotId or tagName
+     * @throws Catalog.TableNotExistException if the table does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void rollbackTo(Identifier identifier, Instant instant) throws Catalog.TableNotExistException;
+
+    /**
+     * Create a new branch for this table. By default, an empty branch will be created using the
+     * latest schema. If you provide {@code #fromTag}, a branch will be created from the tag and the
+     * data files will be inherited from it.
+     *
+     * @param identifier path of the table, cannot be system or branch name.
+     * @param branch the branch name
+     * @param fromTag from the tag
+     * @throws TableNotExistException if the table in identifier doesn't exist
+     * @throws BranchAlreadyExistException if the branch already exists
+     * @throws TagNotExistException if the tag doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
+            throws TableNotExistException, BranchAlreadyExistException, TagNotExistException;
+
+    /**
+     * Drop the branch for this table.
+     *
+     * @param identifier path of the table, cannot be system or branch name.
+     * @param branch the branch name
+     * @throws BranchNotExistException if the branch doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void dropBranch(Identifier identifier, String branch) throws BranchNotExistException;
+
+    /**
+     * Fast-forward a branch to main branch.
+     *
+     * @param identifier path of the table, cannot be system or branch name.
+     * @param branch the branch name
+     * @throws BranchNotExistException if the branch doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void fastForward(Identifier identifier, String branch) throws BranchNotExistException;
+
+    /**
+     * List all branches of the table.
+     *
+     * @param identifier path of the table, cannot be system or branch name.
+     * @throws TableNotExistException if the table in identifier doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    List<String> listBranches(Identifier identifier) throws TableNotExistException;
+
+    // ==================== Partition Modifications ==========================
+
+    /**
+     * Create partitions of the specify table. Ignore existing partitions.
+     *
+     * @param identifier path of the table to create partitions
+     * @param partitions partitions to be created
+     * @throws TableNotExistException if the table does not exist
+     */
+    void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException;
+
+    /**
+     * Drop partitions of the specify table. Ignore non-existent partitions.
+     *
+     * @param identifier path of the table to drop partitions
+     * @param partitions partitions to be deleted
+     * @throws TableNotExistException if the table does not exist
+     */
+    void dropPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException;
+
+    /**
+     * Alter partitions of the specify table. For non-existent partitions, partitions will be
+     * created directly.
+     *
+     * @param identifier path of the table to alter partitions
+     * @param partitions partitions to be altered
+     * @throws TableNotExistException if the table does not exist
+     */
+    void alterPartitions(Identifier identifier, List<PartitionStatistics> partitions)
+            throws TableNotExistException;
+
+    // ==================== Catalog Information ==========================
+
+    /** Catalog options for re-creating this catalog. */
+    Map<String, String> options();
+
+    /** Serializable loader to create catalog. */
+    CatalogLoader catalogLoader();
+
+    /** Return a boolean that indicates whether this catalog is case-sensitive. */
+    boolean caseSensitive();
+
+    // ======================= Constants ===============================
+
+    // constants for system table and database
+    String SYSTEM_TABLE_SPLITTER = "$";
+    String SYSTEM_DATABASE_NAME = "sys";
+    String SYSTEM_BRANCH_PREFIX = "branch_";
+
+    // constants for table and database
+    String COMMENT_PROP = "comment";
+    String OWNER_PROP = "owner";
+
+    // constants for database
+    String DEFAULT_DATABASE = "default";
+    String DB_SUFFIX = ".db";
+    String DB_LOCATION_PROP = "location";
+
+    // constants for table
+    String TABLE_DEFAULT_OPTION_PREFIX = "table-default.";
+    String NUM_ROWS_PROP = "numRows";
+    String NUM_FILES_PROP = "numFiles";
+    String TOTAL_SIZE_PROP = "totalSize";
+    String LAST_UPDATE_TIME_PROP = "lastUpdateTime";
+
+    // ======================= Exceptions ===============================
 
     /** Exception for trying to drop on a database that is not empty. */
     class DatabaseNotEmptyException extends Exception {
@@ -396,6 +724,26 @@ public interface Catalog extends AutoCloseable {
         }
     }
 
+    /** Exception for trying to operate on the database that doesn't have permission. */
+    class DatabaseNoPermissionException extends RuntimeException {
+        private static final String MSG = "Database %s has no permission.";
+
+        private final String database;
+
+        public DatabaseNoPermissionException(String database, Throwable cause) {
+            super(String.format(MSG, database), cause);
+            this.database = database;
+        }
+
+        public DatabaseNoPermissionException(String database) {
+            this(database, null);
+        }
+
+        public String database() {
+            return database;
+        }
+    }
+
     /** Exception for trying to create a table that already exists. */
     class TableAlreadyExistException extends Exception {
 
@@ -438,33 +786,24 @@ public interface Catalog extends AutoCloseable {
         }
     }
 
-    /** Exception for trying to operate on a partition that doesn't exist. */
-    class PartitionNotExistException extends Exception {
+    /** Exception for trying to operate on the table that doesn't have permission. */
+    class TableNoPermissionException extends RuntimeException {
 
-        private static final String MSG = "Partition %s do not exist in the table %s.";
+        private static final String MSG = "Table %s has no permission.";
 
         private final Identifier identifier;
 
-        private final Map<String, String> partitionSpec;
-
-        public PartitionNotExistException(
-                Identifier identifier, Map<String, String> partitionSpec) {
-            this(identifier, partitionSpec, null);
+        public TableNoPermissionException(Identifier identifier, Throwable cause) {
+            super(String.format(MSG, identifier.getFullName()), cause);
+            this.identifier = identifier;
         }
 
-        public PartitionNotExistException(
-                Identifier identifier, Map<String, String> partitionSpec, Throwable cause) {
-            super(String.format(MSG, partitionSpec, identifier.getFullName()), cause);
-            this.identifier = identifier;
-            this.partitionSpec = partitionSpec;
+        public TableNoPermissionException(Identifier identifier) {
+            this(identifier, null);
         }
 
         public Identifier identifier() {
             return identifier;
-        }
-
-        public Map<String, String> partitionSpec() {
-            return partitionSpec;
         }
     }
 
@@ -522,9 +861,181 @@ public interface Catalog extends AutoCloseable {
         }
     }
 
-    /** Loader of {@link Catalog}. */
-    @FunctionalInterface
-    interface Loader extends Serializable {
-        Catalog load();
+    /** Exception for trying to create a view that already exists. */
+    class ViewAlreadyExistException extends Exception {
+
+        private static final String MSG = "View %s already exists.";
+
+        private final Identifier identifier;
+
+        public ViewAlreadyExistException(Identifier identifier) {
+            this(identifier, null);
+        }
+
+        public ViewAlreadyExistException(Identifier identifier, Throwable cause) {
+            super(String.format(MSG, identifier.getFullName()), cause);
+            this.identifier = identifier;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+    }
+
+    /** Exception for trying to operate on a view that doesn't exist. */
+    class ViewNotExistException extends Exception {
+
+        private static final String MSG = "View %s does not exist.";
+
+        private final Identifier identifier;
+
+        public ViewNotExistException(Identifier identifier) {
+            this(identifier, null);
+        }
+
+        public ViewNotExistException(Identifier identifier, Throwable cause) {
+            super(String.format(MSG, identifier.getFullName()), cause);
+            this.identifier = identifier;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+    }
+
+    /** Exception for trying to add a dialect that already exists. */
+    class DialectAlreadyExistException extends Exception {
+
+        private static final String MSG = "Dialect %s in view %s already exists.";
+
+        private final Identifier identifier;
+        private final String dialect;
+
+        public DialectAlreadyExistException(Identifier identifier, String dialect) {
+            this(identifier, dialect, null);
+        }
+
+        public DialectAlreadyExistException(
+                Identifier identifier, String dialect, Throwable cause) {
+            super(String.format(MSG, dialect, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.dialect = dialect;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String dialect() {
+            return dialect;
+        }
+    }
+
+    /** Exception for trying to create a branch that already exists. */
+    class BranchAlreadyExistException extends Exception {
+
+        private static final String MSG = "Branch %s in table %s already exists.";
+
+        private final Identifier identifier;
+        private final String branch;
+
+        public BranchAlreadyExistException(Identifier identifier, String branch) {
+            this(identifier, branch, null);
+        }
+
+        public BranchAlreadyExistException(Identifier identifier, String branch, Throwable cause) {
+            super(String.format(MSG, branch, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.branch = branch;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String branch() {
+            return branch;
+        }
+    }
+
+    /** Exception for trying to operate on a branch that doesn't exist. */
+    class BranchNotExistException extends Exception {
+
+        private static final String MSG = "Branch %s in table %s doesn't exist.";
+
+        private final Identifier identifier;
+        private final String branch;
+
+        public BranchNotExistException(Identifier identifier, String branch) {
+            this(identifier, branch, null);
+        }
+
+        public BranchNotExistException(Identifier identifier, String branch, Throwable cause) {
+            super(String.format(MSG, branch, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.branch = branch;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String branch() {
+            return branch;
+        }
+    }
+
+    /** Exception for trying to operate on a tag that doesn't exist. */
+    class TagNotExistException extends Exception {
+
+        private static final String MSG = "Tag %s in table %s doesn't exist.";
+
+        private final Identifier identifier;
+        private final String tag;
+
+        public TagNotExistException(Identifier identifier, String tag) {
+            this(identifier, tag, null);
+        }
+
+        public TagNotExistException(Identifier identifier, String tag, Throwable cause) {
+            super(String.format(MSG, tag, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.tag = tag;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String tag() {
+            return tag;
+        }
+    }
+
+    /** Exception for trying to update dialect that doesn't exist. */
+    class DialectNotExistException extends Exception {
+
+        private static final String MSG = "Dialect %s in view %s doesn't exist.";
+
+        private final Identifier identifier;
+        private final String dialect;
+
+        public DialectNotExistException(Identifier identifier, String dialect) {
+            this(identifier, dialect, null);
+        }
+
+        public DialectNotExistException(Identifier identifier, String dialect, Throwable cause) {
+            super(String.format(MSG, dialect, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.dialect = dialect;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String dialect() {
+            return dialect;
+        }
     }
 }

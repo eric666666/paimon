@@ -20,11 +20,16 @@ package org.apache.paimon.flink.procedure;
 
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.utils.TableMigrationUtils;
-import org.apache.paimon.utils.ParameterUtils;
+import org.apache.paimon.migrate.Migrator;
 
+import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.ProcedureHint;
 import org.apache.flink.table.procedure.ProcedureContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.paimon.utils.ParameterUtils.parseCommaSeparatedKeyValues;
 
 /** Migrate procedure to migrate hive table to paimon table. */
 public class MigrateTableProcedure extends ProcedureBase {
@@ -38,35 +43,59 @@ public class MigrateTableProcedure extends ProcedureBase {
         return "migrate_table";
     }
 
-    public String[] call(
-            ProcedureContext procedureContext, String connector, String sourceTablePath)
-            throws Exception {
-        return call(procedureContext, connector, sourceTablePath, "");
-    }
-
+    @ProcedureHint(
+            argument = {
+                @ArgumentHint(name = "connector", type = @DataTypeHint("STRING")),
+                @ArgumentHint(name = "source_table", type = @DataTypeHint("STRING")),
+                @ArgumentHint(
+                        name = "target_table",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(name = "options", type = @DataTypeHint("STRING"), isOptional = true),
+                @ArgumentHint(
+                        name = "parallelism",
+                        type = @DataTypeHint("Integer"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "delete_origin",
+                        type = @DataTypeHint("BOOLEAN"),
+                        isOptional = true)
+            })
     public String[] call(
             ProcedureContext procedureContext,
             String connector,
-            String sourceTablePath,
-            String properties)
+            String sourceTable,
+            String targetTable,
+            String properties,
+            Integer parallelism,
+            Boolean deleteOrigin)
             throws Exception {
-        String targetPaimonTablePath = sourceTablePath + PAIMON_SUFFIX;
+        Identifier sourceTableId = Identifier.fromString(sourceTable);
+        Identifier targetTableId =
+                Identifier.fromString(
+                        targetTable == null ? sourceTable + PAIMON_SUFFIX : targetTable);
 
-        Identifier sourceTableId = Identifier.fromString(sourceTablePath);
-        Identifier targetTableId = Identifier.fromString(targetPaimonTablePath);
+        Integer p = parallelism == null ? Runtime.getRuntime().availableProcessors() : parallelism;
 
-        TableMigrationUtils.getImporter(
+        Migrator migrator =
+                TableMigrationUtils.getImporter(
                         connector,
                         catalog,
                         sourceTableId.getDatabaseName(),
                         sourceTableId.getObjectName(),
                         targetTableId.getDatabaseName(),
                         targetTableId.getObjectName(),
-                        ParameterUtils.parseCommaSeparatedKeyValues(properties))
-                .executeMigrate();
+                        p,
+                        parseCommaSeparatedKeyValues(notnull(properties)));
+        LOG.info("create migrator success.");
+        if (deleteOrigin != null) {
+            migrator.deleteOriginTable(deleteOrigin);
+        }
+        migrator.executeMigrate();
 
-        LOG.info("Last step: rename " + targetTableId + " to " + sourceTableId);
-        catalog.renameTable(targetTableId, sourceTableId, false);
+        if (targetTable == null) {
+            migrator.renameTable(false);
+        }
         return new String[] {"Success"};
     }
 }

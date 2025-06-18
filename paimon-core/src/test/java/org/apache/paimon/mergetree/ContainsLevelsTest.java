@@ -20,6 +20,7 @@ package org.apache.paimon.mergetree;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.KeyValue;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
@@ -40,6 +41,7 @@ import org.apache.paimon.schema.KeyValueFieldsExtractor;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.SchemaEvolutionTableTestBase;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowKind;
@@ -61,6 +63,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 
 import static org.apache.paimon.io.DataFileTestUtils.row;
 import static org.apache.paimon.options.MemorySize.VALUE_128_MB;
@@ -76,7 +79,12 @@ public class ContainsLevelsTest {
 
     private final Comparator<InternalRow> comparator = Comparator.comparingInt(o -> o.getInt(0));
 
-    private final RowType keyType = DataTypes.ROW(DataTypes.FIELD(0, "_key", DataTypes.INT()));
+    private final RowType keyType =
+            DataTypes.ROW(
+                    DataTypes.FIELD(
+                            SpecialFields.KEY_FIELD_ID_START,
+                            SpecialFields.KEY_FIELD_PREFIX + "key",
+                            DataTypes.INT()));
     private final RowType rowType =
             DataTypes.ROW(
                     DataTypes.FIELD(0, "key", DataTypes.INT()),
@@ -188,13 +196,13 @@ public class ContainsLevelsTest {
                 comparator,
                 keyType,
                 new LookupLevels.ContainsValueProcessor(),
-                file ->
-                        createReaderFactory()
-                                .createRecordReader(
-                                        0, file.fileName(), file.fileSize(), file.level()),
+                file -> createReaderFactory().createRecordReader(file),
                 file -> new File(tempDir.toFile(), LOOKUP_FILE_PREFIX + UUID.randomUUID()),
                 new HashLookupStoreFactory(
-                        new CacheManager(MemorySize.ofMebiBytes(1)), 2048, 0.75, "none"),
+                        new CacheManager(MemorySize.ofMebiBytes(1)),
+                        2048,
+                        0.75,
+                        new CompressOptions("none", 1)),
                 rowCount -> BloomFilter.builder(rowCount, 0.01),
                 LookupFile.createCache(Duration.ofHours(1), maxDiskSize));
     }
@@ -216,15 +224,13 @@ public class ContainsLevelsTest {
 
     private KeyValueFileWriterFactory createWriterFactory() {
         Path path = new Path(tempDir.toUri().toString());
-        String identifier = "avro";
-        Map<String, FileStorePathFactory> pathFactoryMap = new HashMap<>();
-        pathFactoryMap.put(identifier, createNonPartFactory(path));
+        Function<String, FileStorePathFactory> pathFactoryMap = k -> createNonPartFactory(path);
         return KeyValueFileWriterFactory.builder(
                         FileIOFinder.find(path),
                         0,
                         keyType,
                         rowType,
-                        new FlushingFileFormat(identifier),
+                        new FlushingFileFormat("avro"),
                         pathFactoryMap,
                         VALUE_128_MB.getBytes())
                 .build(BinaryRow.EMPTY_ROW, 0, new CoreOptions(new Options()));

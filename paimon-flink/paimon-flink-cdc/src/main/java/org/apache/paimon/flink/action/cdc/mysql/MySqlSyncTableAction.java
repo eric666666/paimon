@@ -25,6 +25,7 @@ import org.apache.paimon.flink.action.cdc.SyncJobHandler;
 import org.apache.paimon.flink.action.cdc.SyncTableActionBase;
 import org.apache.paimon.flink.action.cdc.schema.JdbcSchemasInfo;
 import org.apache.paimon.flink.action.cdc.schema.JdbcTableInfo;
+import org.apache.paimon.flink.action.cdc.watermark.CdcTimestampExtractor;
 import org.apache.paimon.schema.Schema;
 
 import org.apache.flink.cdc.connectors.mysql.source.MySqlSource;
@@ -75,18 +76,11 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
     private JdbcSchemasInfo mySqlSchemasInfo;
 
     public MySqlSyncTableAction(
-            String warehouse,
             String database,
             String table,
             Map<String, String> catalogConfig,
             Map<String, String> mySqlConfig) {
-        super(
-                warehouse,
-                database,
-                table,
-                catalogConfig,
-                mySqlConfig,
-                SyncJobHandler.SourceType.MYSQL);
+        super(database, table, catalogConfig, mySqlConfig, SyncJobHandler.SourceType.MYSQL);
     }
 
     @Override
@@ -101,12 +95,18 @@ public class MySqlSyncTableAction extends SyncTableActionBase {
 
     @Override
     protected MySqlSource<CdcSourceRecord> buildSource() {
+        validateRuntimeExecutionMode();
         String tableList =
                 String.format(
                         "(%s)\\.(%s)",
                         cdcSourceConfig.get(MySqlSourceOptions.DATABASE_NAME),
                         cdcSourceConfig.get(MySqlSourceOptions.TABLE_NAME));
         return MySqlActionUtils.buildMySqlSource(cdcSourceConfig, tableList, typeMapping);
+    }
+
+    @Override
+    protected CdcTimestampExtractor createCdcTimestampExtractor() {
+        return MySqlActionUtils.createCdcTimestampExtractor();
     }
 
     private void validateMySqlTableInfos(JdbcSchemasInfo mySqlSchemasInfo) {

@@ -20,12 +20,18 @@ package org.apache.paimon.manifest;
 
 import org.apache.paimon.annotation.Public;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.io.DataFileMeta;
+import org.apache.paimon.partition.Partition;
+import org.apache.paimon.partition.PartitionStatistics;
+import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
 
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
+import static org.apache.paimon.manifest.FileKind.ADD;
 import static org.apache.paimon.manifest.FileKind.DELETE;
 
 /** Entry representing a partition. */
@@ -80,21 +86,41 @@ public class PartitionEntry {
                 Math.max(lastFileCreationTime, entry.lastFileCreationTime));
     }
 
+    public Partition toPartition(InternalRowPartitionComputer computer) {
+        return new Partition(
+                computer.generatePartValues(partition),
+                recordCount,
+                fileSizeInBytes,
+                fileCount,
+                lastFileCreationTime,
+                false);
+    }
+
+    public PartitionStatistics toPartitionStatistics(InternalRowPartitionComputer computer) {
+        return new PartitionStatistics(
+                computer.generatePartValues(partition),
+                recordCount,
+                fileSizeInBytes,
+                fileCount,
+                lastFileCreationTime);
+    }
+
     public static PartitionEntry fromManifestEntry(ManifestEntry entry) {
-        long recordCount = entry.file().rowCount();
-        long fileSizeInBytes = entry.file().fileSize();
+        return fromDataFile(entry.partition(), entry.kind(), entry.file());
+    }
+
+    public static PartitionEntry fromDataFile(
+            BinaryRow partition, FileKind kind, DataFileMeta file) {
+        long recordCount = file.rowCount();
+        long fileSizeInBytes = file.fileSize();
         long fileCount = 1;
-        if (entry.kind() == DELETE) {
+        if (kind == DELETE) {
             recordCount = -recordCount;
             fileSizeInBytes = -fileSizeInBytes;
             fileCount = -fileCount;
         }
         return new PartitionEntry(
-                entry.partition(),
-                recordCount,
-                fileSizeInBytes,
-                fileCount,
-                entry.file().creationTimeEpochMillis());
+                partition, recordCount, fileSizeInBytes, fileCount, file.creationTimeEpochMillis());
     }
 
     public static Collection<PartitionEntry> merge(Collection<ManifestEntry> fileEntries) {
@@ -104,6 +130,23 @@ public class PartitionEntry {
             partitions.compute(
                     entry.partition(),
                     (part, old) -> old == null ? partitionEntry : old.merge(partitionEntry));
+        }
+        return partitions.values();
+    }
+
+    public static Collection<PartitionEntry> mergeSplits(Collection<DataSplit> splits) {
+        Map<BinaryRow, PartitionEntry> partitions = new HashMap<>();
+        for (DataSplit split : splits) {
+            BinaryRow partition = split.partition();
+            for (DataFileMeta file : split.dataFiles()) {
+                PartitionEntry partitionEntry = fromDataFile(partition, ADD, file);
+                partitions.compute(
+                        partition,
+                        (part, old) -> old == null ? partitionEntry : old.merge(partitionEntry));
+            }
+
+            // Ignore before files, because we don't know how to merge them
+            // Ignore deletion files, because it is costly to read from it
         }
         return partitions.values();
     }

@@ -19,23 +19,24 @@
 package org.apache.paimon.table.source;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.CoreOptions.StreamScanMode;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.consumer.Consumer;
 import org.apache.paimon.lookup.LookupStrategy;
+import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.operation.DefaultValueAssigner;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.table.source.snapshot.AllDeltaFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.BoundedChecker;
-import org.apache.paimon.table.source.snapshot.CompactionChangelogFollowUpScanner;
-import org.apache.paimon.table.source.snapshot.ContinuousAppendAndCompactFollowUpScanner;
+import org.apache.paimon.table.source.snapshot.ChangelogFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.DeltaFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.FollowUpScanner;
-import org.apache.paimon.table.source.snapshot.InputChangelogFollowUpScanner;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.table.source.snapshot.StartingContext;
 import org.apache.paimon.table.source.snapshot.StartingScanner;
 import org.apache.paimon.table.source.snapshot.StartingScanner.ScannedResult;
 import org.apache.paimon.table.source.snapshot.StaticFromSnapshotStartingScanner;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.NextSnapshotFetcher;
 import org.apache.paimon.utils.SnapshotManager;
@@ -45,7 +46,10 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.List;
+
 import static org.apache.paimon.CoreOptions.ChangelogProducer.FULL_COMPACTION;
+import static org.apache.paimon.CoreOptions.StreamScanMode.FILE_MONITOR;
 
 /** {@link StreamTableScan} implementation for streaming planning. */
 public class DataTableStreamScan extends AbstractDataTableScan implements StreamDataTableScan {
@@ -53,6 +57,7 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
     private static final Logger LOG = LoggerFactory.getLogger(DataTableStreamScan.class);
 
     private final CoreOptions options;
+    private final StreamScanMode scanMode;
     private final SnapshotManager snapshotManager;
     private final boolean supportStreamingReadOverwrite;
     private final DefaultValueAssigner defaultValueAssigner;
@@ -67,19 +72,24 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
     @Nullable private Long currentWatermark;
     @Nullable private Long nextSnapshotId;
 
+    @Nullable private Long scanDelayMillis;
+
     public DataTableStreamScan(
             CoreOptions options,
             SnapshotReader snapshotReader,
             SnapshotManager snapshotManager,
+            ChangelogManager changelogManager,
             boolean supportStreamingReadOverwrite,
             DefaultValueAssigner defaultValueAssigner) {
         super(options, snapshotReader);
         this.options = options;
+        this.scanMode = options.toConfiguration().get(CoreOptions.STREAM_SCAN_MODE);
         this.snapshotManager = snapshotManager;
         this.supportStreamingReadOverwrite = supportStreamingReadOverwrite;
         this.defaultValueAssigner = defaultValueAssigner;
         this.nextSnapshotProvider =
-                new NextSnapshotFetcher(snapshotManager, options.changelogLifecycleDecoupled());
+                new NextSnapshotFetcher(
+                        snapshotManager, changelogManager, options.changelogLifecycleDecoupled());
     }
 
     @Override
@@ -109,6 +119,12 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
         }
     }
 
+    @Override
+    public List<PartitionEntry> listPartitionEntries() {
+        throw new UnsupportedOperationException(
+                "List Partition Entries is not supported in Stream Scan.");
+    }
+
     private void initScanner() {
         if (startingScanner == null) {
             startingScanner = createStartingScanner(true);
@@ -119,12 +135,17 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
         if (boundedChecker == null) {
             boundedChecker = createBoundedChecker();
         }
+        if (scanDelayMillis == null) {
+            scanDelayMillis = getScanDelayMillis();
+        }
         initialized = true;
     }
 
     private Plan tryFirstPlan() {
         StartingScanner.Result result;
-        if (options.needLookup()) {
+        if (scanMode == FILE_MONITOR) {
+            result = startingScanner.scan(snapshotReader);
+        } else if (options.needLookup()) {
             result = startingScanner.scan(snapshotReader.withLevelFilter(level -> level > 0));
             snapshotReader.withLevelFilter(Filter.alwaysTrue());
         } else if (options.changelogProducer().equals(FULL_COMPACTION)) {
@@ -142,7 +163,9 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
             currentWatermark = scannedResult.currentWatermark();
             long currentSnapshotId = scannedResult.currentSnapshotId();
             LookupStrategy lookupStrategy = options.lookupStrategy();
-            if (!lookupStrategy.produceChangelog && lookupStrategy.deletionVector) {
+            if (scanMode == FILE_MONITOR) {
+                nextSnapshotId = currentSnapshotId + 1;
+            } else if (!lookupStrategy.produceChangelog && lookupStrategy.deletionVector) {
                 // For DELETION_VECTOR_ONLY mode, we need to return the remaining data from level 0
                 // in the subsequent plan.
                 nextSnapshotId = currentSnapshotId;
@@ -151,6 +174,10 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
             }
             isFullPhaseEnd =
                     boundedChecker.shouldEndInput(snapshotManager.snapshot(currentSnapshotId));
+            LOG.debug(
+                    "Starting snapshot is {}, next snapshot will be {}.",
+                    scannedResult.plan().snapshotId(),
+                    nextSnapshotId);
             return scannedResult.plan();
         } else if (result instanceof StartingScanner.NextSnapshot) {
             nextSnapshotId = ((StartingScanner.NextSnapshot) result).nextSnapshotId();
@@ -158,6 +185,9 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
                     snapshotManager.snapshotExists(nextSnapshotId - 1)
                             && boundedChecker.shouldEndInput(
                                     snapshotManager.snapshot(nextSnapshotId - 1));
+            LOG.debug("There is no starting snapshot. Next snapshot will be {}.", nextSnapshotId);
+        } else if (result instanceof StartingScanner.NoSnapshot) {
+            LOG.debug("There is no starting snapshot and currently there is no next snapshot.");
         }
         return SnapshotNotExistPlan.INSTANCE;
     }
@@ -177,16 +207,20 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
                 throw new EndOfScanException();
             }
 
-            // first check changes of overwrite
-            if (snapshot.commitKind() == Snapshot.CommitKind.OVERWRITE
-                    && supportStreamingReadOverwrite) {
-                LOG.debug("Find overwrite snapshot id {}.", nextSnapshotId);
-                SnapshotReader.Plan overwritePlan =
-                        followUpScanner.getOverwriteChangesPlan(snapshot, snapshotReader);
-                currentWatermark = overwritePlan.watermark();
-                nextSnapshotId++;
-                return overwritePlan;
-            } else if (followUpScanner.shouldScanSnapshot(snapshot)) {
+            if (shouldDelaySnapshot(nextSnapshotId)) {
+                return SnapshotNotExistPlan.INSTANCE;
+            }
+
+            // first try to get overwrite changes
+            if (snapshot.commitKind() == Snapshot.CommitKind.OVERWRITE) {
+                SnapshotReader.Plan overwritePlan = handleOverwriteSnapshot(snapshot);
+                if (overwritePlan != null) {
+                    nextSnapshotId++;
+                    return overwritePlan;
+                }
+            }
+
+            if (followUpScanner.shouldScanSnapshot(snapshot)) {
                 LOG.debug("Find snapshot id {}.", nextSnapshotId);
                 SnapshotReader.Plan plan = followUpScanner.scan(snapshot, snapshotReader);
                 currentWatermark = plan.watermark();
@@ -198,14 +232,35 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
         }
     }
 
-    private FollowUpScanner createFollowUpScanner() {
-        CoreOptions.StreamScanMode type =
-                options.toConfiguration().get(CoreOptions.STREAM_SCAN_MODE);
-        switch (type) {
+    private boolean shouldDelaySnapshot(long snapshotId) {
+        if (scanDelayMillis == null) {
+            return false;
+        }
+
+        long snapshotMills = System.currentTimeMillis() - scanDelayMillis;
+        if (snapshotManager.snapshotExists(snapshotId)
+                && snapshotManager.snapshot(snapshotId).timeMillis() > snapshotMills) {
+            return true;
+        }
+        return false;
+    }
+
+    @Nullable
+    protected SnapshotReader.Plan handleOverwriteSnapshot(Snapshot snapshot) {
+        if (supportStreamingReadOverwrite) {
+            LOG.debug("Find overwrite snapshot id {}.", nextSnapshotId);
+            SnapshotReader.Plan overwritePlan =
+                    followUpScanner.getOverwriteChangesPlan(snapshot, snapshotReader);
+            currentWatermark = overwritePlan.watermark();
+            return overwritePlan;
+        }
+        return null;
+    }
+
+    protected FollowUpScanner createFollowUpScanner() {
+        switch (scanMode) {
             case COMPACT_BUCKET_TABLE:
                 return new DeltaFollowUpScanner();
-            case COMPACT_APPEND_NO_BUCKET:
-                return new ContinuousAppendAndCompactFollowUpScanner();
             case FILE_MONITOR:
                 return new AllDeltaFollowUpScanner();
         }
@@ -217,11 +272,9 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
                 followUpScanner = new DeltaFollowUpScanner();
                 break;
             case INPUT:
-                followUpScanner = new InputChangelogFollowUpScanner();
-                break;
             case FULL_COMPACTION:
             case LOOKUP:
-                followUpScanner = new CompactionChangelogFollowUpScanner();
+                followUpScanner = new ChangelogFollowUpScanner();
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -230,11 +283,17 @@ public class DataTableStreamScan extends AbstractDataTableScan implements Stream
         return followUpScanner;
     }
 
-    private BoundedChecker createBoundedChecker() {
+    protected BoundedChecker createBoundedChecker() {
         Long boundedWatermark = options.scanBoundedWatermark();
         return boundedWatermark != null
                 ? BoundedChecker.watermark(boundedWatermark)
                 : BoundedChecker.neverEnd();
+    }
+
+    private Long getScanDelayMillis() {
+        return options.streamingReadDelay() == null
+                ? null
+                : options.streamingReadDelay().toMillis();
     }
 
     @Nullable

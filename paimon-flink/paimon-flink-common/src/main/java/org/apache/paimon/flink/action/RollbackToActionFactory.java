@@ -18,9 +18,6 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
-import java.util.Map;
 import java.util.Optional;
 
 /** Factory to create {@link RollbackToAction}. */
@@ -37,16 +34,12 @@ public class RollbackToActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-
-        checkRequiredArgument(params, VERSION);
-        String version = params.get(VERSION);
-
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
-
         RollbackToAction action =
                 new RollbackToAction(
-                        tablePath.f0, tablePath.f1, tablePath.f2, version, catalogConfig);
+                        params.getRequired(DATABASE),
+                        params.getRequired(TABLE),
+                        params.getRequired(VERSION),
+                        catalogConfigMap(params));
 
         return Optional.of(action);
     }
@@ -59,8 +52,11 @@ public class RollbackToActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  rollback_to --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> --version <version_string>");
+                "  rollback_to \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <table_name> \\\n"
+                        + "--version <version_string>");
         System.out.println(
                 "  <version_string> can be a long value representing a snapshot ID or a tag name.");
         System.out.println();

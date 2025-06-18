@@ -32,7 +32,7 @@ import javax.annotation.Nullable;
  * {@link StartingScanner} for the {@link CoreOptions.StartupMode#FROM_TIMESTAMP} startup mode of a
  * batch read.
  */
-public class StaticFromTimestampStartingScanner extends AbstractStartingScanner {
+public class StaticFromTimestampStartingScanner extends ReadPlanStartingScanner {
 
     private static final Logger LOG =
             LoggerFactory.getLogger(StaticFromTimestampStartingScanner.class);
@@ -43,21 +43,22 @@ public class StaticFromTimestampStartingScanner extends AbstractStartingScanner 
         super(snapshotManager);
         this.startupMillis = startupMillis;
         Snapshot snapshot = timeTravelToTimestamp(snapshotManager, startupMillis);
-        if (snapshot != null) {
-            this.startingSnapshotId = snapshot.id();
+        if (snapshot == null) {
+            Snapshot earliestSnapshot = snapshotManager.earliestSnapshot();
+            throw new IllegalArgumentException(
+                    String.format(
+                            "There is currently no snapshot earlier than or equal to timestamp [%s], the earliest snapshot's timestamp is [%s]",
+                            startupMillis,
+                            earliestSnapshot == null
+                                    ? "null"
+                                    : String.valueOf(earliestSnapshot.timeMillis())));
         }
+        this.startingSnapshotId = snapshot.id();
     }
 
     @Override
-    public Result scan(SnapshotReader snapshotReader) {
-        if (startingSnapshotId == null) {
-            LOG.debug(
-                    "There is currently no snapshot earlier than or equal to timestamp[{}]",
-                    startupMillis);
-            return new NoSnapshot();
-        }
-        return StartingScanner.fromPlan(
-                snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshotId).read());
+    public SnapshotReader configure(SnapshotReader snapshotReader) {
+        return snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshotId);
     }
 
     @Nullable

@@ -1,6 +1,6 @@
 ---
 title: "Flink API"
-weight: 2
+weight: 1
 type: docs
 aliases:
 - /api/flink-api.html
@@ -26,12 +26,8 @@ under the License.
 
 # Flink API
 
-{{< hint warning >}}
-We do not recommend using programming API. Paimon is designed for SQL first, unless you are a professional Flink developer, even if you do, it can be very difficult.
-
-We strongly recommend that you use Flink SQL or Spark SQL, or simply use SQL APIs in programs.
-
-The following documents are not detailed and are for reference only.
+{{< hint info >}}
+If possible, recommend using Flink SQL or Spark SQL, or simply use SQL APIs in programs.
 {{< /hint >}}
 
 ## Dependency
@@ -41,21 +37,21 @@ Maven dependency:
 ```xml
 <dependency>
   <groupId>org.apache.paimon</groupId>
-  <artifactId>paimon-flink-1.17</artifactId>
+  <artifactId>paimon-flink-{{< param FlinkVersion >}}</artifactId>
   <version>{{< version >}}</version>
 </dependency>
 
 <dependency>
   <groupId>org.apache.flink</groupId>
   <artifactId>flink-table-api-java-bridge</artifactId>
-  <version>1.17.0</version>
+  <version>{{< param FlinkVersion >}}.0</version>
   <scope>provided</scope>
 </dependency>
 ```
 
 Or download the jar file:
-{{< stable >}}[Paimon Flink](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.17/{{< version >}}/paimon-flink-1.17-{{< version >}}.jar).{{< /stable >}}
-{{< unstable >}}[Paimon Flink](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.17/{{< version >}}/).{{< /unstable >}}
+{{< stable >}}[Paimon Flink](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-{{< param FlinkVersion >}}/{{< version >}}/paimon-flink-{{< param FlinkVersion >}}-{{< version >}}.jar).{{< /stable >}}
+{{< unstable >}}[Paimon Flink](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-{{< param FlinkVersion >}}/{{< version >}}/).{{< /unstable >}}
 
 Please choose your Flink version.
 
@@ -184,16 +180,12 @@ Paimon supports ingest data into Paimon tables with schema evolution.
 Here is an example to use `RichCdcSinkBuilder` API:
 
 ```java
-import org.apache.paimon.catalog.Catalog;
-import org.apache.paimon.catalog.CatalogContext;
-import org.apache.paimon.catalog.CatalogFactory;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.flink.FlinkCatalogFactory;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.sink.cdc.RichCdcRecord;
 import org.apache.paimon.flink.sink.cdc.RichCdcSinkBuilder;
-import org.apache.paimon.fs.Path;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.types.DataTypes;
 
@@ -225,7 +217,7 @@ public class WriteCdcToTable {
         Identifier identifier = Identifier.create("my_db", "T");
         Options catalogOptions = new Options();
         catalogOptions.set("warehouse", "/path/to/warehouse");
-        Catalog.Loader catalogLoader = 
+        CatalogLoader catalogLoader = 
                 () -> FlinkCatalogFactory.createPaimonCatalog(catalogOptions);
         Table table = catalogLoader.load().getTable(identifier);
 

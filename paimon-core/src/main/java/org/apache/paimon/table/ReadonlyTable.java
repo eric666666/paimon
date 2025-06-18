@@ -19,6 +19,7 @@
 package org.apache.paimon.table;
 
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.stats.Statistics;
@@ -35,7 +36,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 /** Readonly table which only provide implementation for scan and read. */
 public interface ReadonlyTable extends InnerTable {
@@ -109,11 +109,8 @@ public interface ReadonlyTable extends InnerTable {
     }
 
     @Override
-    default OptionalLong latestSnapshotId() {
-        throw new UnsupportedOperationException(
-                String.format(
-                        "Readonly Table %s does not support currentSnapshot.",
-                        this.getClass().getSimpleName()));
+    default Optional<Snapshot> latestSnapshot() {
+        return Optional.empty();
     }
 
     @Override
@@ -137,6 +134,14 @@ public interface ReadonlyTable extends InnerTable {
         throw new UnsupportedOperationException(
                 String.format(
                         "Readonly Table %s does not support manifestFileReader.",
+                        this.getClass().getSimpleName()));
+    }
+
+    @Override
+    default SimpleFileReader<IndexManifestEntry> indexManifestFileReader() {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "Readonly Table %s does not support indexManifestFileReader.",
                         this.getClass().getSimpleName()));
     }
 
@@ -177,6 +182,22 @@ public interface ReadonlyTable extends InnerTable {
         throw new UnsupportedOperationException(
                 String.format(
                         "Readonly Table %s does not support createTag.",
+                        this.getClass().getSimpleName()));
+    }
+
+    @Override
+    default void renameTag(String tagName, String targetTagName) {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "Readonly Table %s does not support renameTag.",
+                        this.getClass().getSimpleName()));
+    }
+
+    @Override
+    default void replaceTag(String tagName, Long fromSnapshotId, Duration timeRetained) {
+        throw new UnsupportedOperationException(
+                String.format(
+                        "Readonly Table %s does not support replaceTag.",
                         this.getClass().getSimpleName()));
     }
 

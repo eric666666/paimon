@@ -20,11 +20,9 @@ package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.types.DataField;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Objects;
 
 /** A {@link EventParser} for {@link RichCdcRecord}. */
 public class RichEventParser implements EventParser<RichCdcRecord> {
@@ -33,39 +31,36 @@ public class RichEventParser implements EventParser<RichCdcRecord> {
 
     private final LinkedHashMap<String, DataField> previousDataFields = new LinkedHashMap<>();
 
+    private String previousComment;
+
     @Override
     public void setRawEvent(RichCdcRecord rawEvent) {
         this.record = rawEvent;
     }
 
     @Override
-    public List<DataField> parseSchemaChange() {
-        List<DataField> change = new ArrayList<>();
-        record.fields()
+    public CdcSchema parseSchemaChange() {
+        CdcSchema.Builder change = CdcSchema.newBuilder();
+        CdcSchema recordedSchema = record.cdcSchema();
+        recordedSchema
+                .fields()
                 .forEach(
                         dataField -> {
                             DataField previous = previousDataFields.get(dataField.name());
                             // When the order of the same field is different, its ID may also be
                             // different,
                             // so the comparison should not include the ID.
-                            if (!dataFieldEqualsIgnoreId(previous, dataField)) {
+                            if (!DataField.dataFieldEqualsIgnoreId(previous, dataField)) {
                                 previousDataFields.put(dataField.name(), dataField);
-                                change.add(dataField);
+                                change.column(dataField);
                             }
                         });
-        return change;
-    }
 
-    private boolean dataFieldEqualsIgnoreId(DataField dataField1, DataField dataField2) {
-        if (dataField1 == dataField2) {
-            return true;
-        } else if (dataField1 != null && dataField2 != null) {
-            return Objects.equals(dataField1.name(), dataField2.name())
-                    && Objects.equals(dataField1.type(), dataField2.type())
-                    && Objects.equals(dataField1.description(), dataField2.description());
-        } else {
-            return false;
+        if (recordedSchema.comment() != null && !recordedSchema.comment().equals(previousComment)) {
+            previousComment = recordedSchema.comment();
+            change.comment(recordedSchema.comment());
         }
+        return change.build();
     }
 
     @Override

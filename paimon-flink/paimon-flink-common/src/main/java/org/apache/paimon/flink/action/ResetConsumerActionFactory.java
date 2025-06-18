@@ -18,9 +18,6 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
-import java.util.Map;
 import java.util.Optional;
 
 /** Factory to create {@link ResetConsumerAction}. */
@@ -38,15 +35,12 @@ public class ResetConsumerActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        checkRequiredArgument(params, CONSUMER_ID);
-
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
-        String consumerId = params.get(CONSUMER_ID);
-
         ResetConsumerAction action =
                 new ResetConsumerAction(
-                        tablePath.f0, tablePath.f1, tablePath.f2, catalogConfig, consumerId);
+                        params.getRequired(DATABASE),
+                        params.getRequired(TABLE),
+                        catalogConfigMap(params),
+                        params.getRequired(CONSUMER_ID));
 
         if (params.has(NEXT_SNAPSHOT)) {
             action.withNextSnapshotIds(Long.parseLong(params.get(NEXT_SNAPSHOT)));
@@ -63,8 +57,12 @@ public class ResetConsumerActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  reset_consumer --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> --consumer_id <consumer_id> [--next_snapshot <next_snapshot_id>]");
+                "  reset_consumer \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <table_name> \\\n"
+                        + "--consumer_id <consumer_id> \\\n"
+                        + "[--next_snapshot <next_snapshot_id>]");
 
         System.out.println();
         System.out.println("Note:");

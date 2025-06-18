@@ -54,8 +54,11 @@ import org.apache.flink.types.Row;
 import org.apache.flink.util.CollectionUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
@@ -67,6 +70,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.flink.table.planner.factories.TestValuesTableFactory.changelogRow;
 import static org.apache.paimon.CoreOptions.BUCKET;
@@ -76,7 +80,6 @@ import static org.apache.paimon.CoreOptions.MERGE_ENGINE;
 import static org.apache.paimon.CoreOptions.MergeEngine.FIRST_ROW;
 import static org.apache.paimon.CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST;
 import static org.apache.paimon.CoreOptions.SOURCE_SPLIT_TARGET_SIZE;
-import static org.apache.paimon.flink.AbstractFlinkTableFactory.buildPaimonTable;
 import static org.apache.paimon.flink.FlinkConnectorOptions.INFER_SCAN_MAX_PARALLELISM;
 import static org.apache.paimon.flink.FlinkConnectorOptions.INFER_SCAN_PARALLELISM;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SCAN_PARALLELISM;
@@ -88,6 +91,7 @@ import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.bExeEnv;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.buildQuery;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.buildQueryWithTableOptions;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.buildSimpleQuery;
+import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.checkExternalFileStorePath;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.checkFileStorePath;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.createTable;
 import static org.apache.paimon.flink.util.ReadWriteTableTestUtil.createTemporaryTable;
@@ -114,6 +118,8 @@ public class ReadWriteTableITCase extends AbstractTestBase {
 
     private final Map<String, String> staticPartitionOverwrite =
             Collections.singletonMap(CoreOptions.DYNAMIC_PARTITION_OVERWRITE.key(), "false");
+
+    @TempDir public static java.nio.file.Path externalPath1;
 
     @BeforeEach
     public void setUp() {
@@ -150,6 +156,120 @@ public class ReadWriteTableITCase extends AbstractTestBase {
                 "('Euro', 119, '2022-01-02')");
 
         checkFileStorePath(table, Arrays.asList("dt=2022-01-01", "dt=2022-01-02"));
+
+        testBatchRead(buildSimpleQuery(table), initialRecords);
+
+        insertOverwritePartition(
+                table, "PARTITION (dt = '2022-01-02')", "('Euro', 100)", "('Yen', 1)");
+
+        // batch read to check partition refresh
+        testBatchRead(
+                buildQuery(table, "*", "WHERE dt IN ('2022-01-02')"),
+                Arrays.asList(
+                        // part = 2022-01-02
+                        changelogRow("+I", "Euro", 100L, "2022-01-02"),
+                        changelogRow("+I", "Yen", 1L, "2022-01-02")));
+
+        // test partition filter
+        List<Row> expectedPartitionRecords =
+                Arrays.asList(
+                        changelogRow("+I", "Yen", 1L, "2022-01-01"),
+                        changelogRow("+I", "Euro", 114L, "2022-01-01"),
+                        changelogRow("+I", "US Dollar", 114L, "2022-01-01"));
+
+        testBatchRead(buildQuery(table, "*", "WHERE dt <> '2022-01-02'"), expectedPartitionRecords);
+
+        testBatchRead(
+                buildQuery(table, "*", "WHERE dt IN ('2022-01-01')"), expectedPartitionRecords);
+
+        // test field filter
+        testBatchRead(
+                buildQuery(table, "*", "WHERE rate >= 100"),
+                Arrays.asList(
+                        changelogRow("+I", "US Dollar", 114L, "2022-01-01"),
+                        changelogRow("+I", "Euro", 114L, "2022-01-01"),
+                        changelogRow("+I", "Euro", 100L, "2022-01-02")));
+
+        // test partition and field filter
+        testBatchRead(
+                buildQuery(table, "*", "WHERE dt = '2022-01-02' AND rate >= 100"),
+                Collections.singletonList(changelogRow("+I", "Euro", 100L, "2022-01-02")));
+
+        // test projection
+        testBatchRead(
+                buildQuery(table, "dt", ""),
+                Arrays.asList(
+                        changelogRow("+I", "2022-01-01"),
+                        changelogRow("+I", "2022-01-01"),
+                        changelogRow("+I", "2022-01-01"),
+                        changelogRow("+I", "2022-01-02"),
+                        changelogRow("+I", "2022-01-02")));
+
+        testBatchRead(
+                buildQuery(table, "dt, currency, rate", ""),
+                Arrays.asList(
+                        changelogRow("+I", "2022-01-01", "US Dollar", 114L),
+                        changelogRow("+I", "2022-01-01", "Yen", 1L),
+                        changelogRow("+I", "2022-01-01", "Euro", 114L),
+                        changelogRow("+I", "2022-01-02", "Euro", 100L),
+                        changelogRow("+I", "2022-01-02", "Yen", 1L)));
+
+        // test projection and filter
+        testBatchRead(
+                buildQuery(table, "currency, dt", "WHERE rate = 114"),
+                Arrays.asList(
+                        changelogRow("+I", "US Dollar", "2022-01-01"),
+                        changelogRow("+I", "Euro", "2022-01-01")));
+    }
+
+    @Test
+    public void testBatchReadWriteWithPartitionedRecordsWithPkWithExternalPathRoundRobinStrategy()
+            throws Exception {
+        Map<String, String> options = new HashMap<>();
+        options.put(
+                CoreOptions.DATA_FILE_EXTERNAL_PATHS.key(), "file://" + externalPath1.toString());
+        options.put(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY.key(), "ROUND-ROBIN");
+        checkExternalPathTestResult(options, externalPath1.toString());
+    }
+
+    @Test
+    public void testBatchReadWriteWithPartitionedRecordsWithPkWithExternalPathSpecificFStrategy()
+            throws Exception {
+        Map<String, String> options = new HashMap<>();
+        options.put(
+                CoreOptions.DATA_FILE_EXTERNAL_PATHS.key(), "file://" + externalPath1.toString());
+        options.put(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY.key(), "specific-fs");
+        options.put(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS.key(), "file");
+        checkExternalPathTestResult(options, externalPath1.toString());
+    }
+
+    public void checkExternalPathTestResult(Map<String, String> options, String externalPath)
+            throws Exception {
+        List<Row> initialRecords =
+                Arrays.asList(
+                        // part = 2022-01-01
+                        changelogRow("+I", "US Dollar", 114L, "2022-01-01"),
+                        changelogRow("+I", "Yen", 1L, "2022-01-01"),
+                        changelogRow("+I", "Euro", 114L, "2022-01-01"),
+                        // part = 2022-01-02
+                        changelogRow("+I", "Euro", 119L, "2022-01-02"));
+
+        String table =
+                createTable(
+                        Arrays.asList("currency STRING", "rate BIGINT", "dt String"),
+                        Arrays.asList("currency", "dt"),
+                        Collections.emptyList(),
+                        Collections.singletonList("dt"),
+                        options);
+
+        insertInto(
+                table,
+                "('US Dollar', 114, '2022-01-01')",
+                "('Yen', 1, '2022-01-01')",
+                "('Euro', 114, '2022-01-01')",
+                "('Euro', 119, '2022-01-02')");
+
+        checkExternalFileStorePath(Arrays.asList("dt=2022-01-01", "dt=2022-01-02"), externalPath);
 
         testBatchRead(buildSimpleQuery(table), initialRecords);
 
@@ -803,6 +923,43 @@ public class ReadWriteTableITCase extends AbstractTestBase {
     }
 
     @Test
+    public void testStreamingReadOverwriteWithDeleteRecords() throws Exception {
+        String table =
+                createTable(
+                        Arrays.asList("currency STRING", "rate BIGINT", "dt STRING"),
+                        Collections.singletonList("currency"),
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        streamingReadOverwrite);
+
+        insertInto(
+                table,
+                "('US Dollar', 102, '2022-01-01')",
+                "('Yen', 1, '2022-01-02')",
+                "('Euro', 119, '2022-01-02')");
+
+        bEnv.executeSql(String.format("DELETE FROM %s WHERE currency = 'Euro'", table)).await();
+
+        checkFileStorePath(table, Collections.emptyList());
+
+        // test projection and filter
+        BlockingIterator<Row, Row> streamingItr =
+                testStreamingRead(
+                        buildQuery(table, "currency, rate", "WHERE dt = '2022-01-02'"),
+                        Collections.singletonList(changelogRow("+I", "Yen", 1L)));
+
+        insertOverwrite(table, "('US Dollar', 100, '2022-01-02')", "('Yen', 10, '2022-01-01')");
+
+        validateStreamingReadResult(
+                streamingItr,
+                Arrays.asList(
+                        changelogRow("-D", "Yen", 1L), changelogRow("+I", "US Dollar", 100L)));
+        assertNoMoreRecords(streamingItr);
+
+        streamingItr.close();
+    }
+
+    @Test
     public void testUnsupportStreamingReadOverwriteWithoutPk() {
         assertThatThrownBy(
                         () ->
@@ -1206,10 +1363,12 @@ public class ReadWriteTableITCase extends AbstractTestBase {
                 .isEqualTo(2);
     }
 
-    @Test
-    public void testSinkParallelism() throws Exception {
-        testSinkParallelism(null, bExeEnv.getParallelism());
-        testSinkParallelism(23, 23);
+    @ParameterizedTest
+    @MethodSource("testSinkParallelismParameters")
+    public void testSinkParallelism(
+            boolean isFixedBucket, boolean hasPrimaryKey, boolean isSinkParallelismSet)
+            throws Exception {
+        testSinkParallelism(isFixedBucket, hasPrimaryKey, isSinkParallelismSet ? 23 : null);
     }
 
     @Test
@@ -1792,7 +1951,8 @@ public class ReadWriteTableITCase extends AbstractTestBase {
         return stream.getParallelism();
     }
 
-    private void testSinkParallelism(Integer configParallelism, int expectedParallelism)
+    private void testSinkParallelism(
+            boolean isFixedBucket, boolean hasPrimaryKey, Integer configParallelism)
             throws Exception {
         // 1. create a mock table sink
         Map<String, String> options = new HashMap<>();
@@ -1800,8 +1960,10 @@ public class ReadWriteTableITCase extends AbstractTestBase {
             options.put(SINK_PARALLELISM.key(), configParallelism.toString());
         }
         options.put("path", getTempFilePath(UUID.randomUUID().toString()));
-        options.put("bucket", "1");
-        options.put("bucket-key", "a");
+        if (isFixedBucket) {
+            options.put("bucket", "1");
+            options.put("bucket-key", "a");
+        }
 
         DynamicTableFactory.Context context =
                 new FactoryUtil.DefaultDynamicTableContext(
@@ -1812,7 +1974,9 @@ public class ReadWriteTableITCase extends AbstractTestBase {
                                         new LogicalType[] {new VarCharType(Integer.MAX_VALUE)},
                                         new String[] {"a"}),
                                 Collections.emptyList(),
-                                Collections.emptyList()),
+                                hasPrimaryKey
+                                        ? Collections.singletonList("a")
+                                        : Collections.emptyList()),
                         Collections.emptyMap(),
                         new Configuration(),
                         Thread.currentThread().getContextClassLoader(),
@@ -1827,7 +1991,10 @@ public class ReadWriteTableITCase extends AbstractTestBase {
 
         DynamicTableSink tableSink =
                 new FlinkTableSink(
-                        context.getObjectIdentifier(), buildPaimonTable(context), context, null);
+                        context.getObjectIdentifier(),
+                        new FlinkTableFactory().buildPaimonTable(context),
+                        context,
+                        null);
         assertThat(tableSink).isInstanceOf(FlinkTableSink.class);
 
         // 2. get sink provider
@@ -1839,13 +2006,52 @@ public class ReadWriteTableITCase extends AbstractTestBase {
         // 3. assert parallelism from transformation
         DataStream<RowData> mockSource =
                 bExeEnv.fromCollection(Collections.singletonList(GenericRowData.of()));
+        mockSource.getTransformation().setParallelism(mockSource.getParallelism(), false);
         DataStreamSink<?> sink = sinkProvider.consumeDataStream(null, mockSource);
+
+        boolean hasPartitionTransformation = isFixedBucket || hasPrimaryKey;
+        boolean expectedIsParallelismConfigured =
+                (configParallelism != null) || hasPartitionTransformation;
+
         Transformation<?> transformation = sink.getTransformation();
+        boolean isPartitionTransformationFound = true;
+        boolean isWriterFound = false;
         // until a PartitionTransformation, see FlinkSinkBuilder.build()
         while (!(transformation instanceof PartitionTransformation)) {
-            assertThat(transformation.getParallelism()).isIn(1, expectedParallelism);
-            transformation = transformation.getInputs().get(0);
+            if (transformation.getName().contains("Writer")) {
+                isWriterFound = true;
+                assertThat(transformation.isParallelismConfigured())
+                        .isEqualTo(expectedIsParallelismConfigured);
+            }
+            assertThat(transformation.getParallelism())
+                    .isIn(
+                            1,
+                            configParallelism == null
+                                    ? bExeEnv.getParallelism()
+                                    : configParallelism);
+            List<Transformation<?>> inputTransformations = transformation.getInputs();
+            if (inputTransformations.isEmpty()) {
+                isPartitionTransformationFound = false;
+                break;
+            }
+            transformation = inputTransformations.get(0);
         }
+        assertThat(isPartitionTransformationFound).isEqualTo(hasPartitionTransformation);
+        assertThat(isWriterFound).isTrue();
+    }
+
+    private static Stream<Arguments> testSinkParallelismParameters() {
+        List<Boolean> allBooleans = Arrays.asList(false, true);
+        List<Arguments> parameters = new ArrayList<>();
+        for (boolean isFixedBucket : allBooleans) {
+            for (boolean hasPrimaryKey : allBooleans) {
+                for (boolean isSinkParallelismSet : allBooleans) {
+                    parameters.add(
+                            Arguments.of(isFixedBucket, hasPrimaryKey, isSinkParallelismSet));
+                }
+            }
+        }
+        return parameters.stream();
     }
 
     private void assertChangeBucketWithoutRescale(String table, int bucketNum) throws Exception {

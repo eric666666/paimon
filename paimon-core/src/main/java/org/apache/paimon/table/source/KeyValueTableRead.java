@@ -19,6 +19,7 @@
 package org.apache.paimon.table.source;
 
 import org.apache.paimon.KeyValue;
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.operation.MergeFileSplitRead;
@@ -32,6 +33,7 @@ import org.apache.paimon.table.source.splitread.IncrementalDiffReadProvider;
 import org.apache.paimon.table.source.splitread.MergeFileSplitReadProvider;
 import org.apache.paimon.table.source.splitread.RawFileSplitReadProvider;
 import org.apache.paimon.table.source.splitread.SplitReadProvider;
+import org.apache.paimon.types.RowType;
 
 import javax.annotation.Nullable;
 
@@ -48,7 +50,7 @@ public final class KeyValueTableRead extends AbstractDataTableRead<KeyValue> {
 
     private final List<SplitReadProvider> readProviders;
 
-    private int[][] projection = null;
+    @Nullable private RowType readType = null;
     private boolean forceKeepDelete = false;
     private Predicate predicate = null;
     private IOManager ioManager = null;
@@ -80,13 +82,16 @@ public final class KeyValueTableRead extends AbstractDataTableRead<KeyValue> {
         if (forceKeepDelete) {
             read = read.forceKeepDelete();
         }
-        read.withProjection(projection).withFilter(predicate).withIOManager(ioManager);
+        if (readType != null) {
+            read = read.withReadType(readType);
+        }
+        read.withFilter(predicate).withIOManager(ioManager);
     }
 
     @Override
-    public void projection(int[][] projection) {
-        initialized().forEach(r -> r.withProjection(projection));
-        this.projection = projection;
+    public void applyReadType(RowType readType) {
+        initialized().forEach(r -> r.withReadType(readType));
+        this.readType = readType;
     }
 
     @Override
@@ -137,5 +142,10 @@ public final class KeyValueTableRead extends AbstractDataTableRead<KeyValue> {
                 reader.close();
             }
         };
+    }
+
+    @VisibleForTesting
+    public IOManager ioManager() {
+        return ioManager;
     }
 }

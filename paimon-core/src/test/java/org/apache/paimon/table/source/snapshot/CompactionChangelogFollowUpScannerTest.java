@@ -35,7 +35,10 @@ import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Tests for {@link CompactionChangelogFollowUpScanner}. */
+/**
+ * Tests for {@link ChangelogFollowUpScanner} when changelog producer is {@link
+ * CoreOptions.ChangelogProducer#FULL_COMPACTION}.
+ */
 public class CompactionChangelogFollowUpScannerTest extends ScannerTestBase {
 
     @Test
@@ -64,9 +67,9 @@ public class CompactionChangelogFollowUpScannerTest extends ScannerTestBase {
 
         assertThat(snapshotManager.latestSnapshotId()).isEqualTo(5);
 
-        snapshotReader.withLevelFilter(level -> level == table.coreOptions().numLevels() - 1);
+        snapshotReader.withLevel(table.coreOptions().numLevels() - 1);
         TableRead read = table.newRead();
-        CompactionChangelogFollowUpScanner scanner = new CompactionChangelogFollowUpScanner();
+        ChangelogFollowUpScanner scanner = new ChangelogFollowUpScanner();
 
         Snapshot snapshot = snapshotManager.snapshot(1);
         assertThat(snapshot.commitKind()).isEqualTo(Snapshot.CommitKind.APPEND);

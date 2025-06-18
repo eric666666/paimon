@@ -19,7 +19,9 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
@@ -27,10 +29,12 @@ import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeChecks;
 import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.FieldIdentifier;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.StringUtils;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.slf4j.Logger;
@@ -41,15 +45,18 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /** Base class for update data fields process function. */
 public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends ProcessFunction<I, O> {
     private static final Logger LOG =
             LoggerFactory.getLogger(UpdatedDataFieldsProcessFunctionBase.class);
 
-    protected final Catalog.Loader catalogLoader;
+    protected final CatalogLoader catalogLoader;
     protected Catalog catalog;
-    private boolean allowUpperCase;
+    private boolean caseSensitive;
+    private TypeMapping typeMapping;
 
     private static final List<DataTypeRoot> STRING_TYPES =
             Arrays.asList(DataTypeRoot.CHAR, DataTypeRoot.VARCHAR);
@@ -69,14 +76,25 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
     private static final List<DataTypeRoot> TIMESTAMP_TYPES =
             Arrays.asList(DataTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE);
 
-    protected UpdatedDataFieldsProcessFunctionBase(Catalog.Loader catalogLoader) {
+    protected UpdatedDataFieldsProcessFunctionBase(
+            CatalogLoader catalogLoader, TypeMapping typeMapping) {
         this.catalogLoader = catalogLoader;
+        this.typeMapping = typeMapping;
     }
 
-    @Override
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 1.18-.
+     */
+    public void open(OpenContext openContext) throws Exception {
+        open(new Configuration());
+    }
+
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 2.0+.
+     */
     public void open(Configuration parameters) {
         this.catalog = catalogLoader.load();
-        this.allowUpperCase = this.catalog.allowUpperCase();
+        this.caseSensitive = this.catalog.caseSensitive();
     }
 
     protected void applySchemaChange(
@@ -100,6 +118,9 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
         } else if (schemaChange instanceof SchemaChange.UpdateColumnType) {
             SchemaChange.UpdateColumnType updateColumnType =
                     (SchemaChange.UpdateColumnType) schemaChange;
+            Preconditions.checkState(
+                    updateColumnType.fieldNames().length == 1,
+                    "Paimon CDC currently does not support nested type schema evolution.");
             TableSchema schema =
                     schemaManager
                             .latest()
@@ -107,15 +128,15 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
                                     () ->
                                             new RuntimeException(
                                                     "Table does not exist. This is unexpected."));
-            int idx = schema.fieldNames().indexOf(updateColumnType.fieldName());
+            int idx = schema.fieldNames().indexOf(updateColumnType.fieldNames()[0]);
             Preconditions.checkState(
                     idx >= 0,
                     "Field name "
-                            + updateColumnType.fieldName()
+                            + updateColumnType.fieldNames()[0]
                             + " does not exist in table. This is unexpected.");
             DataType oldType = schema.fields().get(idx).type();
             DataType newType = updateColumnType.newDataType();
-            switch (canConvert(oldType, newType)) {
+            switch (canConvert(oldType, newType, typeMapping)) {
                 case CONVERT:
                     catalog.alterTable(identifier, schemaChange, false);
                     break;
@@ -123,12 +144,14 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
                     throw new UnsupportedOperationException(
                             String.format(
                                     "Cannot convert field %s from type %s to %s of Paimon table %s.",
-                                    updateColumnType.fieldName(),
+                                    updateColumnType.fieldNames()[0],
                                     oldType,
                                     newType,
                                     identifier.getFullName()));
             }
         } else if (schemaChange instanceof SchemaChange.UpdateColumnComment) {
+            catalog.alterTable(identifier, schemaChange, false);
+        } else if (schemaChange instanceof SchemaChange.UpdateComment) {
             catalog.alterTable(identifier, schemaChange, false);
         } else {
             throw new UnsupportedOperationException(
@@ -139,7 +162,8 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
         }
     }
 
-    public static ConvertAction canConvert(DataType oldType, DataType newType) {
+    public static ConvertAction canConvert(
+            DataType oldType, DataType newType, TypeMapping typeMapping) {
         if (oldType.equalsIgnoreNullable(newType)) {
             return ConvertAction.CONVERT;
         }
@@ -150,6 +174,13 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
             return DataTypeChecks.getLength(oldType) <= DataTypeChecks.getLength(newType)
                     ? ConvertAction.CONVERT
                     : ConvertAction.IGNORE;
+        }
+
+        // object can always be converted to string
+        if ((oldIdx < 0 && newIdx >= 0)
+                && typeMapping.containsMode(
+                        TypeMapping.TypeMappingMode.ALLOW_NON_STRING_TO_STRING)) {
+            return ConvertAction.CONVERT;
         }
 
         oldIdx = BINARY_TYPES.indexOf(oldType.getTypeRoot());
@@ -193,22 +224,29 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
     }
 
     protected List<SchemaChange> extractSchemaChanges(
-            SchemaManager schemaManager, List<DataField> updatedDataFields) {
-        RowType oldRowType = schemaManager.latest().get().logicalRowType();
+            SchemaManager schemaManager, CdcSchema updatedSchema) {
+        TableSchema oldTableSchema = schemaManager.latest().get();
+        RowType oldRowType = oldTableSchema.logicalRowType();
         Map<String, DataField> oldFields = new HashMap<>();
         for (DataField oldField : oldRowType.getFields()) {
             oldFields.put(oldField.name(), oldField);
         }
 
+        boolean allowDecimalTypeChange =
+                this.typeMapping == null
+                        || !this.typeMapping.containsMode(
+                                TypeMapping.TypeMappingMode.DECIMAL_NO_CHANGE);
+
         List<SchemaChange> result = new ArrayList<>();
-        for (DataField newField : updatedDataFields) {
-            String newFieldName =
-                    StringUtils.caseSensitiveConversion(newField.name(), allowUpperCase);
+        for (DataField newField : updatedSchema.fields()) {
+            String newFieldName = StringUtils.toLowerCaseIfNeed(newField.name(), caseSensitive);
             if (oldFields.containsKey(newFieldName)) {
                 DataField oldField = oldFields.get(newFieldName);
-                // we compare by ignoring nullable, because partition keys and primary keys might be
-                // nullable in source database, but they can't be null in Paimon
-                if (oldField.type().equalsIgnoreNullable(newField.type())) {
+                // 1. we compare by ignoring nullable, because partition keys and primary keys might
+                // be nullable in source database, but they can't be null in Paimon
+                // 2. we compare by ignoring field id, the field ID is newly created and may be
+                // different, we should ignore it
+                if (oldField.type().copy(true).equalsIgnoreFieldId(newField.type().copy(true))) {
                     // update column comment
                     if (newField.description() != null
                             && !newField.description().equals(oldField.description())) {
@@ -217,6 +255,9 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
                                         new String[] {newFieldName}, newField.description()));
                     }
                 } else {
+                    if (oldField.type().is(DataTypeRoot.DECIMAL) && !allowDecimalTypeChange) {
+                        continue;
+                    }
                     // update column type
                     result.add(SchemaChange.updateColumnType(newFieldName, newField.type()));
                     // update column comment
@@ -233,7 +274,27 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
                                 newFieldName, newField.type(), newField.description(), null));
             }
         }
+
+        if (updatedSchema.comment() != null
+                && !updatedSchema.comment().equals(oldTableSchema.comment())) {
+            // update table comment
+            result.add(SchemaChange.updateComment(updatedSchema.comment()));
+        }
         return result;
+    }
+
+    protected List<DataField> actualUpdatedDataFields(
+            List<DataField> newFields, Set<FieldIdentifier> latestFields) {
+        return newFields.stream()
+                .filter(dataField -> !latestFields.contains(new FieldIdentifier(dataField)))
+                .collect(Collectors.toList());
+    }
+
+    protected Set<FieldIdentifier> updateLatestFields(SchemaManager schemaManager) {
+        RowType oldRowType = schemaManager.latest().get().logicalRowType();
+        return oldRowType.getFields().stream()
+                .map(FieldIdentifier::new)
+                .collect(Collectors.toSet());
     }
 
     @Override
@@ -245,8 +306,8 @@ public abstract class UpdatedDataFieldsProcessFunctionBase<I, O> extends Process
     }
 
     /**
-     * Return type of {@link UpdatedDataFieldsProcessFunction#canConvert(DataType, DataType)}. This
-     * enum indicates the action to perform.
+     * Return type of {@link UpdatedDataFieldsProcessFunction#canConvert}. This enum indicates the
+     * action to perform.
      */
     public enum ConvertAction {
 

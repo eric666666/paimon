@@ -76,7 +76,7 @@ trait ScanHelper extends Logging {
     def closeDataSplit(): Unit = {
       if (currentSplit.nonEmpty && currentDataFiles.nonEmpty) {
         val newSplit =
-          copyDataSplit(currentSplit.get, currentDataFiles, currentDeletionFiles)
+          copyDataSplit(currentSplit.get, currentDataFiles.toSeq, currentDeletionFiles.toSeq)
         currentSplits += newSplit
       }
       currentDataFiles.clear()
@@ -137,6 +137,7 @@ trait ScanHelper extends Logging {
       .withSnapshot(split.snapshotId())
       .withPartition(split.partition())
       .withBucket(split.bucket())
+      .withTotalBuckets(split.totalBuckets())
       .withDataFiles(dataFiles.toList.asJava)
       .rawConvertible(split.rawConvertible)
       .withBucketPath(split.bucketPath)

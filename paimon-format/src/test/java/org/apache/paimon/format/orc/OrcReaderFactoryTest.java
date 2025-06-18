@@ -277,14 +277,9 @@ class OrcReaderFactoryTest {
                 new Configuration(),
                 Projection.of(selectedFields).project(formatType),
                 conjunctPredicates,
-                BATCH_SIZE);
-    }
-
-    private RecordReader<InternalRow> createReader(OrcReaderFactory format, Path split)
-            throws IOException {
-        LocalFileIO fileIO = new LocalFileIO();
-        return format.createReader(
-                new FormatReaderContext(fileIO, split, fileIO.getFileSize(split)));
+                BATCH_SIZE,
+                false,
+                true);
     }
 
     private void forEach(OrcReaderFactory format, Path file, Consumer<InternalRow> action)

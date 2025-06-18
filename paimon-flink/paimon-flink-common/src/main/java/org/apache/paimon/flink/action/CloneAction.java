@@ -20,25 +20,24 @@ package org.apache.paimon.flink.action;
 
 import org.apache.paimon.flink.clone.CloneFileInfo;
 import org.apache.paimon.flink.clone.CloneSourceBuilder;
-import org.apache.paimon.flink.clone.CopyFileOperator;
-import org.apache.paimon.flink.clone.PickFilesForCloneOperator;
+import org.apache.paimon.flink.clone.CopyDataFileOperator;
+import org.apache.paimon.flink.clone.CopyManifestFileOperator;
+import org.apache.paimon.flink.clone.CopyMetaFilesForCloneOperator;
 import org.apache.paimon.flink.clone.SnapshotHintChannelComputer;
 import org.apache.paimon.flink.clone.SnapshotHintOperator;
 import org.apache.paimon.flink.sink.FlinkStreamPartitioner;
-import org.apache.paimon.options.CatalogOptions;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.apache.paimon.utils.Preconditions.checkNotNull;
-import static org.apache.paimon.utils.StringUtils.isBlank;
+import static org.apache.paimon.utils.StringUtils.isNullOrWhitespaceOnly;
 
 /** The Latest Snapshot clone action for Flink. */
 public class CloneAction extends ActionBase {
@@ -54,28 +53,24 @@ public class CloneAction extends ActionBase {
     private final String targetTableName;
 
     public CloneAction(
-            String warehouse,
             String database,
             String tableName,
             Map<String, String> sourceCatalogConfig,
-            String targetWarehouse,
             String targetDatabase,
             String targetTableName,
             Map<String, String> targetCatalogConfig,
             String parallelismStr) {
-        super(warehouse, sourceCatalogConfig);
-
-        checkNotNull(warehouse, "warehouse must not be null.");
-        checkNotNull(targetWarehouse, "targetWarehouse must not be null.");
+        super(sourceCatalogConfig);
 
         this.parallelism =
-                isBlank(parallelismStr) ? env.getParallelism() : Integer.parseInt(parallelismStr);
+                isNullOrWhitespaceOnly(parallelismStr)
+                        ? env.getParallelism()
+                        : Integer.parseInt(parallelismStr);
 
         this.sourceCatalogConfig = new HashMap<>();
         if (!sourceCatalogConfig.isEmpty()) {
             this.sourceCatalogConfig = sourceCatalogConfig;
         }
-        this.sourceCatalogConfig.put(CatalogOptions.WAREHOUSE.key(), warehouse);
         this.database = database;
         this.tableName = tableName;
 
@@ -83,7 +78,6 @@ public class CloneAction extends ActionBase {
         if (!targetCatalogConfig.isEmpty()) {
             this.targetCatalogConfig = targetCatalogConfig;
         }
-        this.targetCatalogConfig.put(CatalogOptions.WAREHOUSE.key(), targetWarehouse);
         this.targetDatabase = targetDatabase;
         this.targetTableName = targetTableName;
     }
@@ -112,34 +106,57 @@ public class CloneAction extends ActionBase {
                                 targetTableName)
                         .build();
 
-        SingleOutputStreamOperator<CloneFileInfo> pickFilesForClone =
+        SingleOutputStreamOperator<Void> copyMetaFiles =
                 cloneSource
-                        .transform(
-                                "Pick Files",
-                                TypeInformation.of(CloneFileInfo.class),
-                                new PickFilesForCloneOperator(
+                        .forward()
+                        .process(
+                                new CopyMetaFilesForCloneOperator(
                                         sourceCatalogConfig, targetCatalogConfig))
-                        .forceNonParallel();
+                        .name("Side Output")
+                        .setParallelism(1);
 
-        SingleOutputStreamOperator<CloneFileInfo> copyFiles =
-                pickFilesForClone
-                        .rebalance()
+        DataStream<CloneFileInfo> indexFilesStream =
+                copyMetaFiles.getSideOutput(CopyMetaFilesForCloneOperator.INDEX_FILES_TAG);
+        DataStream<CloneFileInfo> dataManifestFilesStream =
+                copyMetaFiles.getSideOutput(CopyMetaFilesForCloneOperator.DATA_MANIFEST_FILES_TAG);
+
+        SingleOutputStreamOperator<CloneFileInfo> copyIndexFiles =
+                indexFilesStream
                         .transform(
-                                "Copy Files",
+                                "Copy Index Files",
                                 TypeInformation.of(CloneFileInfo.class),
-                                new CopyFileOperator(sourceCatalogConfig, targetCatalogConfig))
+                                new CopyDataFileOperator(sourceCatalogConfig, targetCatalogConfig))
                         .setParallelism(parallelism);
+
+        SingleOutputStreamOperator<CloneFileInfo> copyDataManifestFiles =
+                dataManifestFilesStream
+                        .transform(
+                                "Copy Data Manifest Files",
+                                TypeInformation.of(CloneFileInfo.class),
+                                new CopyManifestFileOperator(
+                                        sourceCatalogConfig, targetCatalogConfig))
+                        .setParallelism(parallelism);
+
+        SingleOutputStreamOperator<CloneFileInfo> copyDataFile =
+                copyDataManifestFiles
+                        .transform(
+                                "Copy Data Files",
+                                TypeInformation.of(CloneFileInfo.class),
+                                new CopyDataFileOperator(sourceCatalogConfig, targetCatalogConfig))
+                        .setParallelism(parallelism);
+
+        DataStream<CloneFileInfo> combinedStream = copyDataFile.union(copyIndexFiles);
 
         SingleOutputStreamOperator<CloneFileInfo> snapshotHintOperator =
                 FlinkStreamPartitioner.partition(
-                                copyFiles, new SnapshotHintChannelComputer(), parallelism)
+                                combinedStream, new SnapshotHintChannelComputer(), parallelism)
                         .transform(
                                 "Recreate Snapshot Hint",
                                 TypeInformation.of(CloneFileInfo.class),
                                 new SnapshotHintOperator(targetCatalogConfig))
                         .setParallelism(parallelism);
 
-        snapshotHintOperator.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
+        snapshotHintOperator.sinkTo(new DiscardingSink<>()).name("end").setParallelism(1);
     }
 
     @Override

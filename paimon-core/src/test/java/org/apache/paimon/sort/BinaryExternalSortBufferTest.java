@@ -18,6 +18,7 @@
 
 package org.apache.paimon.sort;
 
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryRowWriter;
 import org.apache.paimon.data.BinaryString;
@@ -187,8 +188,15 @@ public class BinaryExternalSortBufferTest {
         innerTestSpilling(createBuffer());
     }
 
+    @Test
+    public void testSpillingAndClearWithMaxFanIn() throws Exception {
+        BinaryExternalSortBuffer buffer = createBuffer(2);
+        innerTestSpilling(buffer);
+        innerTestSpilling(buffer);
+    }
+
     private void innerTestSpilling(BinaryExternalSortBuffer sorter) throws Exception {
-        int size = 1000_000;
+        int size = 2000_000;
 
         MockBinaryRowReader reader = new MockBinaryRowReader(size);
         sorter.write(reader);
@@ -309,7 +317,7 @@ public class BinaryExternalSortBufferTest {
                 inMemorySortBuffer,
                 ioManager,
                 maxNumFileHandles,
-                "lz4",
+                CompressOptions.defaultOptions(),
                 diskSize);
     }
 

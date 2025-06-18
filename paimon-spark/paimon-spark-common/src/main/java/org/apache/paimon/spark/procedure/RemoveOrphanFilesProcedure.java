@@ -18,26 +18,26 @@
 
 package org.apache.paimon.spark.procedure;
 
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.operation.CleanOrphanFilesResult;
+import org.apache.paimon.operation.LocalOrphanFilesClean;
 import org.apache.paimon.operation.OrphanFilesClean;
 import org.apache.paimon.spark.catalog.WithPaimonCatalog;
 import org.apache.paimon.utils.Preconditions;
-import org.apache.paimon.utils.StringUtils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.Locale;
 
-import static org.apache.paimon.operation.OrphanFilesClean.executeOrphanFilesClean;
 import static org.apache.spark.sql.types.DataTypes.BooleanType;
+import static org.apache.spark.sql.types.DataTypes.IntegerType;
+import static org.apache.spark.sql.types.DataTypes.LongType;
 import static org.apache.spark.sql.types.DataTypes.StringType;
 
 /**
@@ -58,13 +58,17 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
             new ProcedureParameter[] {
                 ProcedureParameter.required("table", StringType),
                 ProcedureParameter.optional("older_than", StringType),
-                ProcedureParameter.optional("dry_run", BooleanType)
+                ProcedureParameter.optional("dry_run", BooleanType),
+                ProcedureParameter.optional("parallelism", IntegerType),
+                ProcedureParameter.optional("mode", StringType)
             };
 
     private static final StructType OUTPUT_TYPE =
             new StructType(
                     new StructField[] {
-                        new StructField("result", StringType, true, Metadata.empty())
+                        new StructField("deletedFileCount", LongType, true, Metadata.empty()),
+                        new StructField(
+                                "deletedFileTotalLenInBytes", LongType, true, Metadata.empty())
                     });
 
     private RemoveOrphanFilesProcedure(TableCatalog tableCatalog) {
@@ -85,6 +89,10 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
     public InternalRow[] call(InternalRow args) {
         org.apache.paimon.catalog.Identifier identifier;
         String tableId = args.getString(0);
+        String olderThan = args.isNullAt(1) ? null : args.getString(1);
+        boolean dryRun = !args.isNullAt(2) && args.getBoolean(2);
+        Integer parallelism = args.isNullAt(3) ? null : args.getInt(3);
+
         Preconditions.checkArgument(
                 tableId != null && !tableId.isEmpty(),
                 "Cannot handle an empty tableId for argument %s",
@@ -99,33 +107,47 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
         }
         LOG.info("identifier is {}.", identifier);
 
-        List<OrphanFilesClean> tableCleans;
+        Catalog catalog = ((WithPaimonCatalog) tableCatalog()).paimonCatalog();
+        String mode = args.isNullAt(4) ? "DISTRIBUTED" : args.getString(4);
+
+        CleanOrphanFilesResult cleanOrphanFilesResult;
         try {
-            tableCleans =
-                    OrphanFilesClean.createOrphanFilesCleans(
-                            ((WithPaimonCatalog) tableCatalog()).paimonCatalog(),
-                            identifier.getDatabaseName(),
-                            identifier.getObjectName());
+            switch (mode.toUpperCase(Locale.ROOT)) {
+                case "LOCAL":
+                    cleanOrphanFilesResult =
+                            LocalOrphanFilesClean.executeDatabaseOrphanFiles(
+                                    catalog,
+                                    identifier.getDatabaseName(),
+                                    identifier.getTableName(),
+                                    OrphanFilesClean.olderThanMillis(olderThan),
+                                    parallelism,
+                                    dryRun);
+                    break;
+                case "DISTRIBUTED":
+                    cleanOrphanFilesResult =
+                            SparkOrphanFilesClean.executeDatabaseOrphanFiles(
+                                    catalog,
+                                    identifier.getDatabaseName(),
+                                    identifier.getTableName(),
+                                    OrphanFilesClean.olderThanMillis(olderThan),
+                                    parallelism,
+                                    dryRun);
+                    break;
+                default:
+                    throw new IllegalArgumentException(
+                            "Unknown mode: "
+                                    + mode
+                                    + ". Only 'DISTRIBUTED' and 'LOCAL' are supported.");
+            }
+
+            return new InternalRow[] {
+                newInternalRow(
+                        cleanOrphanFilesResult.getDeletedFileCount(),
+                        cleanOrphanFilesResult.getDeletedFileTotalLenInBytes())
+            };
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-
-        String olderThan = args.isNullAt(1) ? null : args.getString(1);
-        if (!StringUtils.isBlank(olderThan)) {
-            tableCleans.forEach(clean -> clean.olderThan(olderThan));
-        }
-
-        boolean dryRun = !args.isNullAt(2) && args.getBoolean(2);
-        if (dryRun) {
-            tableCleans.forEach(clean -> clean.fileCleaner(path -> {}));
-        }
-
-        String[] result = executeOrphanFilesClean(tableCleans);
-        List<InternalRow> rows = new ArrayList<>();
-        Arrays.stream(result)
-                .forEach(line -> rows.add(newInternalRow(UTF8String.fromString(line))));
-
-        return rows.toArray(new InternalRow[0]);
     }
 
     public static ProcedureBuilder builder() {

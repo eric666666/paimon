@@ -21,93 +21,111 @@ package org.apache.paimon.flink.lookup;
 import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
-import org.apache.paimon.flink.FlinkConnectorOptions;
-import org.apache.paimon.options.Options;
-import org.apache.paimon.table.Table;
-import org.apache.paimon.table.source.TableScan;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
 
-import javax.annotation.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.Serializable;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
-
-import static org.apache.paimon.flink.FlinkConnectorOptions.LOOKUP_DYNAMIC_PARTITION;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
+import java.util.stream.Collectors;
 
 /** Dynamic partition for lookup. */
-public class DynamicPartitionLoader implements Serializable {
+public class DynamicPartitionLoader extends PartitionLoader {
 
-    private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(DynamicPartitionLoader.class);
 
-    private static final String MAX_PT = "max_pt()";
+    private static final long serialVersionUID = 2L;
 
-    private final Table table;
     private final Duration refreshInterval;
+    private final int maxPartitionNum;
 
-    private TableScan scan;
-    private Comparator<InternalRow> comparator;
+    private transient Comparator<InternalRow> comparator;
+    private transient LocalDateTime lastRefresh;
 
-    private LocalDateTime lastRefresh;
-    @Nullable private BinaryRow partition;
-
-    private DynamicPartitionLoader(Table table, Duration refreshInterval) {
-        this.table = table;
+    DynamicPartitionLoader(FileStoreTable table, Duration refreshInterval, int maxPartitionNum) {
+        super(table);
         this.refreshInterval = refreshInterval;
+        this.maxPartitionNum = maxPartitionNum;
     }
 
+    @Override
     public void open() {
-        this.scan = table.newReadBuilder().newScan();
+        super.open();
+
         RowType partitionType = table.rowType().project(table.partitionKeys());
         this.comparator = CodeGenUtils.newRecordComparator(partitionType.getFieldTypes());
+        this.lastRefresh = null;
     }
 
-    public void addPartitionKeysTo(List<String> joinKeys, List<String> projectFields) {
-        List<String> partitionKeys = table.partitionKeys();
-        checkArgument(joinKeys.stream().noneMatch(partitionKeys::contains));
-        joinKeys.addAll(partitionKeys);
-
-        partitionKeys.stream().filter(k -> !projectFields.contains(k)).forEach(projectFields::add);
-    }
-
-    @Nullable
-    public BinaryRow partition() {
-        return partition;
-    }
-
-    /** @return true if partition changed. */
+    @Override
     public boolean checkRefresh() {
         if (lastRefresh != null
                 && !lastRefresh.plus(refreshInterval).isBefore(LocalDateTime.now())) {
             return false;
         }
 
-        BinaryRow previous = this.partition;
-        partition = scan.listPartitions().stream().max(comparator).orElse(null);
+        LOG.info(
+                "DynamicPartitionLoader(maxPartitionNum={},table={}) refreshed after {} second(s), refreshing",
+                maxPartitionNum,
+                table.name(),
+                refreshInterval.toMillis() / 1000);
+
+        List<BinaryRow> newPartitions = getMaxPartitions();
         lastRefresh = LocalDateTime.now();
 
-        return !Objects.equals(previous, partition);
+        if (newPartitions.size() != partitions.size()) {
+            partitions = newPartitions;
+            logNewPartitions();
+            return true;
+        } else {
+            for (int i = 0; i < newPartitions.size(); i++) {
+                if (comparator.compare(newPartitions.get(i), partitions.get(i)) != 0) {
+                    partitions = newPartitions;
+                    logNewPartitions();
+                    return true;
+                }
+            }
+            LOG.info(
+                    "DynamicPartitionLoader(maxPartitionNum={},table={}) didn't find new partitions.",
+                    maxPartitionNum,
+                    table.name());
+            return false;
+        }
     }
 
-    @Nullable
-    public static DynamicPartitionLoader of(Table table) {
-        Options options = Options.fromMap(table.options());
-        String dynamicPartition = options.get(LOOKUP_DYNAMIC_PARTITION);
-        if (dynamicPartition == null) {
-            return null;
-        }
+    private void logNewPartitions() {
+        String partitionsStr =
+                partitions.stream()
+                        .map(
+                                partition ->
+                                        InternalRowPartitionComputer.partToSimpleString(
+                                                table.rowType().project(table.partitionKeys()),
+                                                partition,
+                                                "-",
+                                                200))
+                        .collect(Collectors.joining(","));
+        LOG.info(
+                "DynamicPartitionLoader(maxPartitionNum={},table={}) finds new partitions: {}.",
+                maxPartitionNum,
+                table.name(),
+                partitionsStr);
+    }
 
-        if (!dynamicPartition.equalsIgnoreCase(MAX_PT)) {
-            throw new UnsupportedOperationException(
-                    "Unsupported dynamic partition pattern: " + dynamicPartition);
-        }
+    private List<BinaryRow> getMaxPartitions() {
+        List<BinaryRow> newPartitions =
+                table.newReadBuilder().newScan().listPartitions().stream()
+                        .sorted(comparator.reversed())
+                        .collect(Collectors.toList());
 
-        Duration refresh =
-                options.get(FlinkConnectorOptions.LOOKUP_DYNAMIC_PARTITION_REFRESH_INTERVAL);
-        return new DynamicPartitionLoader(table, refresh);
+        if (newPartitions.size() <= maxPartitionNum) {
+            return newPartitions;
+        } else {
+            return newPartitions.subList(0, maxPartitionNum);
+        }
     }
 }

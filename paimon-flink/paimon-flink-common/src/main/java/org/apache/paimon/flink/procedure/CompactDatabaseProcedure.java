@@ -22,10 +22,15 @@ import org.apache.paimon.flink.action.CompactDatabaseAction;
 import org.apache.paimon.utils.StringUtils;
 import org.apache.paimon.utils.TimeUtils;
 
+import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.ProcedureHint;
 import org.apache.flink.table.procedure.ProcedureContext;
 
 import java.util.Map;
 
+import static org.apache.paimon.flink.action.ActionFactory.FULL;
+import static org.apache.paimon.flink.action.CompactActionFactory.checkCompactStrategy;
 import static org.apache.paimon.utils.ParameterUtils.parseCommaSeparatedKeyValues;
 
 /**
@@ -57,58 +62,34 @@ public class CompactDatabaseProcedure extends ProcedureBase {
 
     public static final String IDENTIFIER = "compact_database";
 
-    public String[] call(ProcedureContext procedureContext) throws Exception {
-        return call(procedureContext, "");
-    }
-
-    public String[] call(ProcedureContext procedureContext, String includingDatabases)
-            throws Exception {
-        return call(procedureContext, includingDatabases, "");
-    }
-
-    public String[] call(ProcedureContext procedureContext, String includingDatabases, String mode)
-            throws Exception {
-        return call(procedureContext, includingDatabases, mode, "");
-    }
-
-    public String[] call(
-            ProcedureContext procedureContext,
-            String includingDatabases,
-            String mode,
-            String includingTables)
-            throws Exception {
-        return call(procedureContext, includingDatabases, mode, includingTables, "");
-    }
-
-    public String[] call(
-            ProcedureContext procedureContext,
-            String includingDatabases,
-            String mode,
-            String includingTables,
-            String excludingTables)
-            throws Exception {
-        return call(
-                procedureContext, includingDatabases, mode, includingTables, excludingTables, "");
-    }
-
-    public String[] call(
-            ProcedureContext procedureContext,
-            String includingDatabases,
-            String mode,
-            String includingTables,
-            String excludingTables,
-            String tableOptions)
-            throws Exception {
-        return call(
-                procedureContext,
-                includingDatabases,
-                mode,
-                includingTables,
-                excludingTables,
-                tableOptions,
-                "");
-    }
-
+    @ProcedureHint(
+            argument = {
+                @ArgumentHint(
+                        name = "including_databases",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(name = "mode", type = @DataTypeHint("STRING"), isOptional = true),
+                @ArgumentHint(
+                        name = "including_tables",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "excluding_tables",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "table_options",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "partition_idle_time",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "compact_strategy",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true)
+            })
     public String[] call(
             ProcedureContext procedureContext,
             String includingDatabases,
@@ -116,21 +97,26 @@ public class CompactDatabaseProcedure extends ProcedureBase {
             String includingTables,
             String excludingTables,
             String tableOptions,
-            String partitionIdleTime)
+            String partitionIdleTime,
+            String compactStrategy)
             throws Exception {
-        String warehouse = catalog.warehouse();
+        partitionIdleTime = notnull(partitionIdleTime);
         Map<String, String> catalogOptions = catalog.options();
         CompactDatabaseAction action =
-                new CompactDatabaseAction(warehouse, catalogOptions)
+                new CompactDatabaseAction(catalogOptions)
                         .includingDatabases(nullable(includingDatabases))
                         .includingTables(nullable(includingTables))
                         .excludingTables(nullable(excludingTables))
                         .withDatabaseCompactMode(nullable(mode));
-        if (!StringUtils.isBlank(tableOptions)) {
+        if (!StringUtils.isNullOrWhitespaceOnly(tableOptions)) {
             action.withTableOptions(parseCommaSeparatedKeyValues(tableOptions));
         }
-        if (!StringUtils.isBlank(partitionIdleTime)) {
+        if (!StringUtils.isNullOrWhitespaceOnly(partitionIdleTime)) {
             action.withPartitionIdleTime(TimeUtils.parseDuration(partitionIdleTime));
+        }
+
+        if (checkCompactStrategy(compactStrategy)) {
+            action.withFullCompaction(compactStrategy.trim().equalsIgnoreCase(FULL));
         }
 
         return execute(procedureContext, action, "Compact database job");

@@ -25,11 +25,10 @@ import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.action.cdc.format.debezium.DebeziumSchemaUtils;
 import org.apache.paimon.flink.action.cdc.mysql.format.DebeziumEvent;
 import org.apache.paimon.flink.sink.cdc.CdcRecord;
+import org.apache.paimon.flink.sink.cdc.CdcSchema;
 import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
-import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
-import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.JsonSerdeUtil;
 import org.apache.paimon.utils.Preconditions;
 
@@ -45,6 +44,8 @@ import io.debezium.relational.history.TableChanges;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.cdc.connectors.mysql.source.config.MySqlSourceOptions;
 import org.apache.flink.cdc.debezium.table.DebeziumOptions;
+import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
@@ -99,11 +100,14 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         String stringifyServerTimeZone = mySqlConfig.get(MySqlSourceOptions.SERVER_TIME_ZONE);
 
-        this.isDebeziumSchemaCommentsEnabled =
-                mySqlConfig.getBoolean(
-                        DebeziumOptions.DEBEZIUM_OPTIONS_PREFIX
-                                + RelationalDatabaseConnectorConfig.INCLUDE_SCHEMA_COMMENTS.name(),
-                        false);
+        ConfigOption<Boolean> includeSchemaCommentsConfig =
+                ConfigOptions.key(
+                                DebeziumOptions.DEBEZIUM_OPTIONS_PREFIX
+                                        + RelationalDatabaseConnectorConfig.INCLUDE_SCHEMA_COMMENTS
+                                                .name())
+                        .booleanType()
+                        .defaultValue(false);
+        this.isDebeziumSchemaCommentsEnabled = mySqlConfig.get(includeSchemaCommentsConfig);
         this.serverTimeZone =
                 stringifyServerTimeZone == null
                         ? ZoneId.systemDefault()
@@ -160,17 +164,15 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
 
         Table table = tableChange.getTable();
 
-        List<DataField> fields = extractFields(table);
-        List<String> primaryKeys = table.primaryKeyColumnNames();
+        CdcSchema schema = extractSchema(table);
 
-        // TODO : add table comment and column comment when we upgrade flink cdc to 2.4
         return Collections.singletonList(
                 new RichCdcMultiplexRecord(
-                        databaseName, currentTable, fields, primaryKeys, CdcRecord.emptyRecord()));
+                        databaseName, currentTable, schema, CdcRecord.emptyRecord()));
     }
 
-    private List<DataField> extractFields(Table table) {
-        RowType.Builder rowType = RowType.builder();
+    private CdcSchema extractSchema(Table table) {
+        CdcSchema.Builder schemaBuilder = CdcSchema.newBuilder();
         List<Column> columns = table.columns();
 
         for (Column column : columns) {
@@ -184,12 +186,20 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
 
             // add column comment when we upgrade flink cdc to 2.4
             if (isDebeziumSchemaCommentsEnabled) {
-                rowType.field(column.name(), dataType, column.comment());
+                schemaBuilder.column(column.name(), dataType, column.comment());
             } else {
-                rowType.field(column.name(), dataType);
+                schemaBuilder.column(column.name(), dataType);
             }
         }
-        return rowType.build().getFields();
+
+        schemaBuilder.primaryKey(table.primaryKeyColumnNames());
+
+        // add table comment when we upgrade flink cdc to 2.4
+        if (isDebeziumSchemaCommentsEnabled) {
+            schemaBuilder.comment(table.comment());
+        }
+
+        return schemaBuilder.build();
     }
 
     private List<RichCdcMultiplexRecord> extractRecords() {
@@ -265,10 +275,6 @@ public class MySqlRecordParser implements FlatMapFunction<CdcSourceRecord, RichC
 
     protected RichCdcMultiplexRecord createRecord(RowKind rowKind, Map<String, String> data) {
         return new RichCdcMultiplexRecord(
-                databaseName,
-                currentTable,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                new CdcRecord(rowKind, data));
+                databaseName, currentTable, null, new CdcRecord(rowKind, data));
     }
 }

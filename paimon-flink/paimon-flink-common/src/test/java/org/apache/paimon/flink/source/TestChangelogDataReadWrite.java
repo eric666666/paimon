@@ -41,7 +41,6 @@ import org.apache.paimon.schema.KeyValueFieldsExtractor;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.source.KeyValueTableRead;
-import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.IntType;
@@ -58,10 +57,10 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static java.util.Collections.singletonList;
+import static org.apache.paimon.SnapshotTest.newSnapshotManager;
 
 /** Util class to read and write data for source tests. */
 public class TestChangelogDataReadWrite {
@@ -69,7 +68,7 @@ public class TestChangelogDataReadWrite {
     private static final RowType KEY_TYPE =
             new RowType(singletonList(new DataField(0, "k", new BigIntType())));
     private static final RowType VALUE_TYPE =
-            new RowType(singletonList(new DataField(0, "v", new BigIntType())));
+            new RowType(singletonList(new DataField(1, "v", new BigIntType())));
     private static final RowType PARTITION_TYPE =
             new RowType(singletonList(new DataField(0, "p", new IntType())));
     private static final Comparator<InternalRow> COMPARATOR =
@@ -87,7 +86,7 @@ public class TestChangelogDataReadWrite {
                 @Override
                 public List<DataField> valueFields(TableSchema schema) {
                     return Collections.singletonList(
-                            new DataField(0, "v", new org.apache.paimon.types.BigIntType(false)));
+                            new DataField(1, "v", new org.apache.paimon.types.BigIntType(false)));
                 }
             };
 
@@ -105,12 +104,19 @@ public class TestChangelogDataReadWrite {
                         tablePath,
                         RowType.of(new IntType()),
                         "default",
-                        CoreOptions.FILE_FORMAT.defaultValue().toString());
-        this.snapshotManager = new SnapshotManager(LocalFileIO.create(), new Path(root));
+                        CoreOptions.FILE_FORMAT.defaultValue().toString(),
+                        CoreOptions.DATA_FILE_PREFIX.defaultValue(),
+                        CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
+                        CoreOptions.PARTITION_GENERATE_LEGCY_NAME.defaultValue(),
+                        CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
+                        CoreOptions.FILE_COMPRESSION.defaultValue(),
+                        null,
+                        null);
+        this.snapshotManager = newSnapshotManager(LocalFileIO.create(), new Path(root));
         this.commitUser = UUID.randomUUID().toString();
     }
 
-    public TableRead createReadWithKey() {
+    public KeyValueTableRead createReadWithKey() {
         SchemaManager schemaManager = new SchemaManager(LocalFileIO.create(), tablePath);
         CoreOptions options = new CoreOptions(new HashMap<>());
         TableSchema schema = schemaManager.schema(0);
@@ -164,8 +170,6 @@ public class TestChangelogDataReadWrite {
         CoreOptions options =
                 new CoreOptions(Collections.singletonMap(CoreOptions.FILE_FORMAT.key(), "avro"));
 
-        Map<String, FileStorePathFactory> pathFactoryMap = new HashMap<>();
-        pathFactoryMap.put("avro", pathFactory);
         SchemaManager schemaManager = new SchemaManager(LocalFileIO.create(), tablePath);
         RecordWriter<KeyValue> writer =
                 new KeyValueFileStoreWrite(
@@ -181,7 +185,7 @@ public class TestChangelogDataReadWrite {
                                 () -> EQUALISER,
                                 DeduplicateMergeFunction.factory(),
                                 pathFactory,
-                                pathFactoryMap,
+                                (coreOptions, format) -> pathFactory,
                                 snapshotManager,
                                 null, // not used, we only create an empty writer
                                 null,

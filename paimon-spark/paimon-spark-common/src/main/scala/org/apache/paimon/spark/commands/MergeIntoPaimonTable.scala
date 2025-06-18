@@ -28,11 +28,11 @@ import org.apache.paimon.table.FileStoreTable
 import org.apache.paimon.table.sink.CommitMessage
 import org.apache.paimon.types.RowKind
 
-import org.apache.spark.sql.{Column, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.PaimonUtils._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, BasePredicate, EqualTo, Expression, Literal, Or, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, BasePredicate, Expression, Literal, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
 import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -62,8 +62,6 @@ case class MergeIntoPaimonTable(
 
   lazy val tableSchema: StructType = v2Table.schema
 
-  private lazy val writer = PaimonSparkWriter(table)
-
   private lazy val (targetOnlyCondition, filteredTargetPlan): (Option[Expression], LogicalPlan) = {
     val filtersOnlyTarget = getExpressionOnlyRelated(mergeCondition, targetTable)
     (
@@ -81,12 +79,12 @@ case class MergeIntoPaimonTable(
     } else {
       performMergeForNonPkTable(sparkSession)
     }
-    writer.commit(commitMessages)
+    dvSafeWriter.commit(commitMessages)
     Seq.empty[Row]
   }
 
   private def performMergeForPkTable(sparkSession: SparkSession): Seq[CommitMessage] = {
-    writer.write(
+    dvSafeWriter.write(
       constructChangedRows(
         sparkSession,
         createDataset(sparkSession, filteredTargetPlan),
@@ -128,14 +126,14 @@ case class MergeIntoPaimonTable(
         val dvDS = ds.where(
           s"$ROW_KIND_COL = ${RowKind.DELETE.toByteValue} or $ROW_KIND_COL = ${RowKind.UPDATE_AFTER.toByteValue}")
         val deletionVectors = collectDeletionVectors(dataFilePathToMeta, dvDS, sparkSession)
-        val indexCommitMsg = writer.persistDeletionVectors(deletionVectors)
+        val indexCommitMsg = dvSafeWriter.persistDeletionVectors(deletionVectors)
 
         // Step4: filter rows that should be written as the inserted/updated data.
         val toWriteDS = ds
           .where(
             s"$ROW_KIND_COL = ${RowKind.INSERT.toByteValue} or $ROW_KIND_COL = ${RowKind.UPDATE_AFTER.toByteValue}")
           .drop(FILE_PATH_COLUMN, ROW_INDEX_COLUMN)
-        val addCommitMessage = writer.write(toWriteDS)
+        val addCommitMessage = dvSafeWriter.write(toWriteDS)
 
         // Step5: commit index and data commit messages
         addCommitMessage ++ indexCommitMsg
@@ -144,26 +142,38 @@ case class MergeIntoPaimonTable(
       }
     } else {
       val touchedFilePathsSet = mutable.Set.empty[String]
+      val intersectionFilePaths = mutable.Set.empty[String]
+
       def hasUpdate(actions: Seq[MergeAction]): Boolean = {
         actions.exists {
           case _: UpdateAction | _: DeleteAction => true
           case _ => false
         }
       }
-      if (hasUpdate(matchedActions)) {
-        touchedFilePathsSet ++= findTouchedFiles(
-          targetDS.join(sourceDS, new Column(mergeCondition), "inner"),
-          sparkSession)
-      }
-      if (hasUpdate(notMatchedBySourceActions)) {
-        touchedFilePathsSet ++= findTouchedFiles(
-          targetDS.join(sourceDS, new Column(mergeCondition), "left_anti"),
-          sparkSession)
+
+      def findTouchedFiles0(joinType: String): Array[String] = {
+        findTouchedFiles(
+          targetDS.alias("_left").join(sourceDS, toColumn(mergeCondition), joinType),
+          sparkSession,
+          "_left." + FILE_PATH_COLUMN)
       }
 
-      val targetFilePaths: Array[String] = findTouchedFiles(targetDS, sparkSession)
+      if (hasUpdate(matchedActions)) {
+        touchedFilePathsSet ++= findTouchedFiles0("inner")
+      } else if (notMatchedActions.nonEmpty) {
+        intersectionFilePaths ++= findTouchedFiles0("inner")
+      }
+
+      if (hasUpdate(notMatchedBySourceActions)) {
+        touchedFilePathsSet ++= findTouchedFiles0("left_anti")
+      }
+
       val touchedFilePaths: Array[String] = touchedFilePathsSet.toArray
-      val unTouchedFilePaths = targetFilePaths.filterNot(touchedFilePaths.contains)
+      val unTouchedFilePaths = if (notMatchedActions.nonEmpty) {
+        intersectionFilePaths.diff(touchedFilePathsSet).toArray
+      } else {
+        Array[String]()
+      }
 
       val (touchedFiles, touchedFileRelation) =
         createNewRelation(touchedFilePaths, dataFilePathToMeta, relation)
@@ -172,14 +182,15 @@ case class MergeIntoPaimonTable(
 
       // Add FILE_TOUCHED_COL to mark the row as coming from the touched file, if the row has not been
       // modified and was from touched file, it should be kept too.
-      val targetDSWithFileTouchedCol = createDataset(sparkSession, touchedFileRelation)
+      val touchedDsWithFileTouchedCol = createDataset(sparkSession, touchedFileRelation)
         .withColumn(FILE_TOUCHED_COL, lit(true))
-        .union(createDataset(sparkSession, unTouchedFileRelation)
+      val targetDSWithFileTouchedCol = touchedDsWithFileTouchedCol.union(
+        createDataset(sparkSession, unTouchedFileRelation)
           .withColumn(FILE_TOUCHED_COL, lit(false)))
 
       val toWriteDS =
         constructChangedRows(sparkSession, targetDSWithFileTouchedCol).drop(ROW_KIND_COL)
-      val addCommitMessage = writer.write(toWriteDS)
+      val addCommitMessage = dvSafeWriter.write(toWriteDS)
       val deletedCommitMessage = buildDeletedCommitMessage(touchedFiles)
 
       addCommitMessage ++ deletedCommitMessage
@@ -199,7 +210,7 @@ case class MergeIntoPaimonTable(
     val sourceDS = createDataset(sparkSession, sourceTable)
       .withColumn(SOURCE_ROW_COL, lit(true))
 
-    val joinedDS = sourceDS.join(targetDS, new Column(mergeCondition), "fullOuter")
+    val joinedDS = sourceDS.join(targetDS, toColumn(mergeCondition), "fullOuter")
     val joinedPlan = joinedDS.queryExecution.analyzed
 
     def resolveOnJoinedPlan(exprs: Seq[Expression]): Seq[Expression] = {
@@ -207,8 +218,10 @@ case class MergeIntoPaimonTable(
     }
 
     val targetOutput = filteredTargetPlan.output
-    val targetRowNotMatched = resolveOnJoinedPlan(Seq(col(SOURCE_ROW_COL).isNull.expr)).head
-    val sourceRowNotMatched = resolveOnJoinedPlan(Seq(col(TARGET_ROW_COL).isNull.expr)).head
+    val targetRowNotMatched = resolveOnJoinedPlan(
+      Seq(toExpression(sparkSession, col(SOURCE_ROW_COL).isNull))).head
+    val sourceRowNotMatched = resolveOnJoinedPlan(
+      Seq(toExpression(sparkSession, col(TARGET_ROW_COL).isNull))).head
     val matchedExprs = matchedActions.map(_.condition.getOrElse(TrueLiteral))
     val notMatchedExprs = notMatchedActions.map(_.condition.getOrElse(TrueLiteral))
     val notMatchedBySourceExprs = notMatchedBySourceActions.map(_.condition.getOrElse(TrueLiteral))
@@ -243,7 +256,7 @@ case class MergeIntoPaimonTable(
     val outputFields = mutable.ArrayBuffer(tableSchema.fields: _*)
     outputFields += StructField(ROW_KIND_COL, ByteType)
     outputFields ++= metadataCols.map(_.toStructField)
-    val outputSchema = StructType(outputFields)
+    val outputSchema = StructType(outputFields.toSeq)
 
     val joinedRowEncoder = EncoderUtils.encode(joinedPlan.schema)
     val outputEncoder = EncoderUtils.encode(outputSchema).resolveAndBind()
@@ -272,7 +285,7 @@ case class MergeIntoPaimonTable(
         .withColumn(ROW_ID_COL, monotonically_increasing_id())
       val sourceDS = createDataset(sparkSession, sourceTable)
       val count = sourceDS
-        .join(targetDS, new Column(mergeCondition), "inner")
+        .join(targetDS, toColumn(mergeCondition), "inner")
         .select(col(ROW_ID_COL), lit(1).as("one"))
         .groupBy(ROW_ID_COL)
         .agg(sum("one").as("count"))

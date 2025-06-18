@@ -36,19 +36,20 @@ public class CdcRecord implements Serializable {
 
     private RowKind kind;
 
-    private final Map<String, String> fields;
+    // field name -> value
+    private final Map<String, String> data;
 
     private Table table;
 
     public CdcRecord(RowKind kind, Map<String, String> fields, Table table) {
         this.kind = kind;
-        this.fields = fields;
+        this.data = fields;
         this.table = table;
     }
 
-    public CdcRecord(RowKind kind, Map<String, String> fields) {
+    public CdcRecord(RowKind kind, Map<String, String> data) {
         this.kind = kind;
-        this.fields = fields;
+        this.data = data;
     }
 
     public CdcRecord setRowKind(RowKind kind) {
@@ -64,16 +65,16 @@ public class CdcRecord implements Serializable {
         return kind;
     }
 
-    public Map<String, String> fields() {
-        return fields;
+    public Map<String, String> data() {
+        return data;
     }
 
     public CdcRecord fieldNameLowerCase() {
-        Map<String, String> newFields = new HashMap<>();
-        for (Map.Entry<String, String> entry : fields.entrySet()) {
-            newFields.put(entry.getKey().toLowerCase(), entry.getValue());
+        Map<String, String> newData = new HashMap<>();
+        for (Map.Entry<String, String> entry : data.entrySet()) {
+            newData.put(entry.getKey().toLowerCase(), entry.getValue());
         }
-        return new CdcRecord(kind, newFields);
+        return new CdcRecord(kind, newData);
     }
 
     public Table getTable() {
@@ -87,16 +88,16 @@ public class CdcRecord implements Serializable {
         }
 
         CdcRecord that = (CdcRecord) o;
-        return Objects.equals(kind, that.kind) && Objects.equals(fields, that.fields);
+        return Objects.equals(kind, that.kind) && Objects.equals(data, that.data);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(kind, fields);
+        return Objects.hash(kind, data);
     }
 
     @Override
     public String toString() {
-        return kind.shortString() + " " + fields;
+        return kind.shortString() + " " + data;
     }
 }

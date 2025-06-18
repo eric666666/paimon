@@ -22,9 +22,10 @@ import org.apache.paimon.Changelog;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.consumer.ConsumerManager;
-import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.manifest.ExpireFileEntry;
 import org.apache.paimon.operation.SnapshotDeletion;
 import org.apache.paimon.options.ExpireConfig;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
@@ -32,11 +33,17 @@ import org.apache.paimon.utils.TagManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
+
+import static org.apache.paimon.utils.SnapshotManager.findPreviousOrEqualSnapshot;
+import static org.apache.paimon.utils.SnapshotManager.findPreviousSnapshot;
 
 /** An implementation for {@link ExpireSnapshots}. */
 public class ExpireSnapshotsImpl implements ExpireSnapshots {
@@ -44,6 +51,7 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
     private static final Logger LOG = LoggerFactory.getLogger(ExpireSnapshotsImpl.class);
 
     private final SnapshotManager snapshotManager;
+    private final ChangelogManager changelogManager;
     private final ConsumerManager consumerManager;
     private final SnapshotDeletion snapshotDeletion;
     private final TagManager tagManager;
@@ -52,9 +60,11 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
 
     public ExpireSnapshotsImpl(
             SnapshotManager snapshotManager,
+            ChangelogManager changelogManager,
             SnapshotDeletion snapshotDeletion,
             TagManager tagManager) {
         this.snapshotManager = snapshotManager;
+        this.changelogManager = changelogManager;
         this.consumerManager =
                 new ConsumerManager(
                         snapshotManager.fileIO(),
@@ -129,7 +139,7 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
             // No expire happens:
             // write the hint file in order to see the earliest snapshot directly next time
             // should avoid duplicate writes when the file exists
-            if (snapshotManager.readHint(SnapshotManager.EARLIEST) == null) {
+            if (snapshotManager.earliestFileNotExists()) {
                 writeEarliestHint(earliestId);
             }
 
@@ -162,9 +172,15 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Ready to delete merge tree files not used by snapshot #" + id);
             }
-            Snapshot snapshot = snapshotManager.snapshot(id);
+            Snapshot snapshot;
+            try {
+                snapshot = snapshotManager.tryGetSnapshot(id);
+            } catch (FileNotFoundException e) {
+                beginInclusiveId = id + 1;
+                continue;
+            }
             // expire merge tree files and collect changed buckets
-            Predicate<ManifestEntry> skipper;
+            Predicate<ExpireFileEntry> skipper;
             try {
                 skipper = snapshotDeletion.createDataFileSkipperForTags(taggedSnapshots, id);
             } catch (Exception e) {
@@ -185,7 +201,13 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Ready to delete changelog files from snapshot #" + id);
                 }
-                Snapshot snapshot = snapshotManager.snapshot(id);
+                Snapshot snapshot;
+                try {
+                    snapshot = snapshotManager.tryGetSnapshot(id);
+                } catch (FileNotFoundException e) {
+                    beginInclusiveId = id + 1;
+                    continue;
+                }
                 if (snapshot.changelogManifestList() != null) {
                     snapshotDeletion.deleteAddedDataFiles(snapshot.changelogManifestList());
                 }
@@ -198,21 +220,52 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
 
         // delete manifests and indexFiles
         List<Snapshot> skippingSnapshots =
-                SnapshotManager.findOverlappedSnapshots(
-                        taggedSnapshots, beginInclusiveId, endExclusiveId);
-        skippingSnapshots.add(snapshotManager.snapshot(endExclusiveId));
-        Set<String> skippingSet = snapshotDeletion.manifestSkippingSet(skippingSnapshots);
-        for (long id = beginInclusiveId; id < endExclusiveId; id++) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Ready to delete manifests in snapshot #" + id);
-            }
+                findSkippingTags(taggedSnapshots, beginInclusiveId, endExclusiveId);
 
-            Snapshot snapshot = snapshotManager.snapshot(id);
-            snapshotDeletion.cleanUnusedManifests(snapshot, skippingSet);
+        try {
+            skippingSnapshots.add(snapshotManager.tryGetSnapshot(endExclusiveId));
+        } catch (FileNotFoundException e) {
+            // the end exclusive snapshot is gone
+            // there is no need to proceed
+            return 0;
+        }
+
+        Set<String> skippingSet = null;
+        try {
+            skippingSet = new HashSet<>(snapshotDeletion.manifestSkippingSet(skippingSnapshots));
+        } catch (Exception e) {
+            LOG.info("Skip cleaning manifest files due to failed to build skipping set.", e);
+        }
+        if (skippingSet != null) {
+            for (long id = beginInclusiveId; id < endExclusiveId; id++) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Ready to delete manifests in snapshot #" + id);
+                }
+
+                Snapshot snapshot;
+                try {
+                    snapshot = snapshotManager.tryGetSnapshot(id);
+                } catch (FileNotFoundException e) {
+                    beginInclusiveId = id + 1;
+                    continue;
+                }
+                snapshotDeletion.cleanUnusedManifests(snapshot, skippingSet);
+            }
+        }
+
+        // delete snapshot file finally
+        for (long id = beginInclusiveId; id < endExclusiveId; id++) {
+            Snapshot snapshot;
+            try {
+                snapshot = snapshotManager.tryGetSnapshot(id);
+            } catch (FileNotFoundException e) {
+                beginInclusiveId = id + 1;
+                continue;
+            }
             if (expireConfig.isChangelogDecoupled()) {
                 commitChangelog(new Changelog(snapshot));
             }
-            snapshotManager.fileIO().deleteQuietly(snapshotManager.snapshotPath(id));
+            snapshotManager.deleteSnapshot(id);
         }
 
         writeEarliestHint(endExclusiveId);
@@ -221,8 +274,8 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
 
     private void commitChangelog(Changelog changelog) {
         try {
-            snapshotManager.commitChangelog(changelog, changelog.id());
-            snapshotManager.commitLongLivedChangelogLatestHint(changelog.id());
+            changelogManager.commitChangelog(changelog, changelog.id());
+            changelogManager.commitLongLivedChangelogLatestHint(changelog.id());
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -239,5 +292,19 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
     @VisibleForTesting
     public SnapshotDeletion snapshotDeletion() {
         return snapshotDeletion;
+    }
+
+    /** Find the skipping tags in sortedTags for range of [beginInclusive, endExclusive). */
+    public static List<Snapshot> findSkippingTags(
+            List<Snapshot> sortedTags, long beginInclusive, long endExclusive) {
+        List<Snapshot> overlappedSnapshots = new ArrayList<>();
+        int right = findPreviousSnapshot(sortedTags, endExclusive);
+        if (right >= 0) {
+            int left = Math.max(findPreviousOrEqualSnapshot(sortedTags, beginInclusive), 0);
+            for (int i = left; i <= right; i++) {
+                overlappedSnapshots.add(sortedTags.get(i));
+            }
+        }
+        return overlappedSnapshots;
     }
 }

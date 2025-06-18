@@ -18,7 +18,6 @@
 
 package org.apache.paimon.table.system;
 
-import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
@@ -28,8 +27,6 @@ import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
-import org.apache.paimon.schema.SchemaManager;
-import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.FileStoreTableFactory;
 import org.apache.paimon.table.ReadonlyTable;
@@ -40,14 +37,12 @@ import org.apache.paimon.table.source.ReadOnceTableScan;
 import org.apache.paimon.table.source.SingletonSplit;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
-import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.utils.BranchManager;
 import org.apache.paimon.utils.DateTimeUtils;
 import org.apache.paimon.utils.IteratorRecordReader;
-import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.ProjectedRow;
 import org.apache.paimon.utils.SerializationUtils;
 
@@ -62,15 +57,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.SortedMap;
-import java.util.stream.Collectors;
 
 import static org.apache.paimon.catalog.Catalog.SYSTEM_TABLE_SPLITTER;
-import static org.apache.paimon.utils.BranchManager.BRANCH_PREFIX;
-import static org.apache.paimon.utils.BranchManager.branchPath;
-import static org.apache.paimon.utils.FileUtils.listVersionedDirectories;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /** A {@link Table} for showing branches of table. */
 public class BranchesTable implements ReadonlyTable {
@@ -84,21 +72,17 @@ public class BranchesTable implements ReadonlyTable {
                     Arrays.asList(
                             new DataField(
                                     0, "branch_name", SerializationUtils.newStringType(false)),
-                            new DataField(
-                                    1, "created_from_tag", SerializationUtils.newStringType(true)),
-                            new DataField(2, "created_from_snapshot", new BigIntType(true)),
-                            new DataField(3, "create_time", new TimestampType(false, 3))));
+                            new DataField(1, "create_time", new TimestampType(false, 3))));
 
     private final FileIO fileIO;
     private final Path location;
 
-    public BranchesTable(FileStoreTable dataTable) {
-        this(dataTable.fileIO(), dataTable.location());
-    }
+    private final FileStoreTable dataTable;
 
-    public BranchesTable(FileIO fileIO, Path location) {
-        this.fileIO = fileIO;
-        this.location = location;
+    public BranchesTable(FileStoreTable dataTable) {
+        this.fileIO = dataTable.fileIO();
+        this.location = dataTable.location();
+        this.dataTable = dataTable;
     }
 
     @Override
@@ -113,7 +97,12 @@ public class BranchesTable implements ReadonlyTable {
 
     @Override
     public List<String> primaryKeys() {
-        return Arrays.asList("branch_name", "tag_name");
+        return Collections.singletonList("branch_name");
+    }
+
+    @Override
+    public FileIO fileIO() {
+        return dataTable.fileIO();
     }
 
     @Override
@@ -128,7 +117,7 @@ public class BranchesTable implements ReadonlyTable {
 
     @Override
     public Table copy(Map<String, String> dynamicOptions) {
-        return new BranchesTable(fileIO, location);
+        return new BranchesTable(dataTable.copy(dynamicOptions));
     }
 
     private class BranchesScan extends ReadOnceTableScan {
@@ -175,7 +164,7 @@ public class BranchesTable implements ReadonlyTable {
     private static class BranchesRead implements InnerTableRead {
 
         private final FileIO fileIO;
-        private int[][] projection;
+        private RowType readType;
 
         public BranchesRead(FileIO fileIO) {
             this.fileIO = fileIO;
@@ -188,8 +177,8 @@ public class BranchesTable implements ReadonlyTable {
         }
 
         @Override
-        public InnerTableRead withProjection(int[][] projection) {
-            this.projection = projection;
+        public InnerTableRead withReadType(RowType readType) {
+            this.readType = readType;
             return this;
         }
 
@@ -213,10 +202,13 @@ public class BranchesTable implements ReadonlyTable {
                 throw new UncheckedIOException(e);
             }
 
-            if (projection != null) {
+            if (readType != null) {
                 rows =
                         Iterators.transform(
-                                rows, row -> ProjectedRow.from(projection).replaceRow(row));
+                                rows,
+                                row ->
+                                        ProjectedRow.from(readType, BranchesTable.TABLE_TYPE)
+                                                .replaceRow(row));
             }
 
             return new IteratorRecordReader<>(rows);
@@ -224,52 +216,17 @@ public class BranchesTable implements ReadonlyTable {
 
         private List<InternalRow> branches(FileStoreTable table) throws IOException {
             BranchManager branchManager = table.branchManager();
-            SchemaManager schemaManager = new SchemaManager(fileIO, table.location());
 
-            List<Pair<Path, Long>> paths =
-                    listVersionedDirectories(fileIO, branchManager.branchDirectory(), BRANCH_PREFIX)
-                            .map(status -> Pair.of(status.getPath(), status.getModificationTime()))
-                            .collect(Collectors.toList());
             List<InternalRow> result = new ArrayList<>();
-
-            for (Pair<Path, Long> path : paths) {
-                String branchName = path.getLeft().getName().substring(BRANCH_PREFIX.length());
-                String basedTag = null;
-                Long basedSnapshotId = null;
-                long creationTime = path.getRight();
-
-                Optional<TableSchema> tableSchema =
-                        schemaManager.copyWithBranch(branchName).latest();
-                if (tableSchema.isPresent()) {
-                    FileStoreTable branchTable =
-                            FileStoreTableFactory.create(
-                                    fileIO, new Path(branchPath(table.location(), branchName)));
-                    SortedMap<Snapshot, List<String>> snapshotTags =
-                            branchTable.tagManager().tags();
-                    Long earliestSnapshotId = branchTable.snapshotManager().earliestSnapshotId();
-                    if (snapshotTags.isEmpty()) {
-                        // create based on snapshotId
-                        basedSnapshotId = earliestSnapshotId;
-                    } else {
-                        Snapshot snapshot = snapshotTags.firstKey();
-                        if (Objects.equals(earliestSnapshotId, snapshot.id())) {
-                            // create based on tag
-                            List<String> tags = snapshotTags.get(snapshot);
-                            checkArgument(tags.size() == 1);
-                            basedTag = tags.get(0);
-                            basedSnapshotId = snapshot.id();
-                        } else {
-                            // create based on snapshotId
-                            basedSnapshotId = earliestSnapshotId;
-                        }
-                    }
-                }
-
+            List<String> branches = branchManager.branches();
+            Path tablePath = table.location();
+            for (String branch : branches) {
+                String branchPath = BranchManager.branchPath(tablePath, branch);
+                long creationTime =
+                        fileIO.getFileStatus(new Path(branchPath)).getModificationTime();
                 result.add(
                         GenericRow.of(
-                                BinaryString.fromString(branchName),
-                                BinaryString.fromString(basedTag),
-                                basedSnapshotId,
+                                BinaryString.fromString(branch),
                                 Timestamp.fromLocalDateTime(
                                         DateTimeUtils.toLocalDateTime(creationTime))));
             }

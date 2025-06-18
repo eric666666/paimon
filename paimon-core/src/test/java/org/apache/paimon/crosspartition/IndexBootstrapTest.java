@@ -68,7 +68,7 @@ public class IndexBootstrapTest extends TableTestBase {
                 row(3, 6, 6, 7),
                 row(3, 7, 7, 8));
 
-        IndexBootstrap indexBootstrap = new IndexBootstrap(table);
+        IndexBootstrap indexBootstrap = new IndexBootstrap((FileStoreTable) table);
         List<GenericRow> result = new ArrayList<>();
         Consumer<InternalRow> consumer =
                 row -> result.add(GenericRow.of(row.getInt(0), row.getInt(1), row.getInt(2)));
@@ -159,7 +159,9 @@ public class IndexBootstrapTest extends TableTestBase {
                                 .toLocalDateTime()),
                 0L,
                 null,
-                FileSource.APPEND);
+                FileSource.APPEND,
+                null,
+                null);
     }
 
     private Pair<InternalRow, Integer> row(int pt, int col, int pk, int bucket) {

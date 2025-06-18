@@ -30,6 +30,7 @@ import org.apache.paimon.data.serializer.InternalArraySerializer;
 import org.apache.paimon.data.serializer.InternalMapSerializer;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.data.serializer.Serializer;
+import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeRoot;
 import org.apache.paimon.types.DataTypes;
@@ -44,6 +45,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 
@@ -178,6 +180,13 @@ public class EqualiserCodeGeneratorTest {
                                 GenericRow.of(31, BinaryString.fromString("32")),
                                 GenericRow.of(31, BinaryString.fromString("33"))),
                         new InternalRowSerializer(DataTypes.INT(), DataTypes.VARCHAR(2))));
+        TEST_DATA.put(
+                DataTypeRoot.VARIANT,
+                new GeneratedData(
+                        DataTypes.VARIANT(),
+                        Pair.of(
+                                GenericVariant.fromJson("{\"age\":27,\"city\":\"Beijing\"}"),
+                                GenericVariant.fromJson("{\"age\":27,\"city\":\"Hangzhou\"}"))));
     }
 
     @ParameterizedTest
@@ -202,6 +211,30 @@ public class EqualiserCodeGeneratorTest {
                 };
         assertBoolean(equaliser, func, testData.left(), testData.left(), true);
         assertBoolean(equaliser, func, testData.left(), testData.right(), false);
+    }
+
+    @RepeatedTest(100)
+    public void testProjection() {
+        GeneratedData field0 = TEST_DATA.get(DataTypeRoot.INTEGER);
+        GeneratedData field1 = TEST_DATA.get(DataTypeRoot.VARCHAR);
+        GeneratedData field2 = TEST_DATA.get(DataTypeRoot.BIGINT);
+
+        RecordEqualiser equaliser =
+                new EqualiserCodeGenerator(
+                                new DataType[] {field0.dataType, field1.dataType, field2.dataType},
+                                new int[] {1, 2})
+                        .generateRecordEqualiser("projectionFieldEquals")
+                        .newInstance(Thread.currentThread().getContextClassLoader());
+
+        boolean result =
+                equaliser.equals(
+                        GenericRow.of(field0.left(), field1.left(), field2.left()),
+                        GenericRow.of(field0.right(), field1.right(), field2.right()));
+        boolean expected =
+                Objects.equals(
+                        GenericRow.of(field1.left(), field2.left()),
+                        GenericRow.of(field1.right(), field2.right()));
+        assertThat(result).isEqualTo(expected);
     }
 
     @RepeatedTest(100)

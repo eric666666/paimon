@@ -18,9 +18,12 @@
 
 package org.apache.paimon.privilege;
 
+import org.apache.paimon.catalog.AbstractCatalog;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.DelegateCatalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.catalog.PropertyChange;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.ConfigOptions;
 import org.apache.paimon.options.Options;
@@ -44,27 +47,41 @@ public class PrivilegedCatalog extends DelegateCatalog {
                     .defaultValue(PrivilegeManager.PASSWORD_ANONYMOUS);
 
     private final PrivilegeManager privilegeManager;
+    private final PrivilegeManagerLoader privilegeManagerLoader;
 
-    public PrivilegedCatalog(Catalog wrapped, PrivilegeManager privilegeManager) {
+    public PrivilegedCatalog(Catalog wrapped, PrivilegeManagerLoader privilegeManagerLoader) {
         super(wrapped);
-        this.privilegeManager = privilegeManager;
+        this.privilegeManager = privilegeManagerLoader.load();
+        this.privilegeManagerLoader = privilegeManagerLoader;
     }
 
     public static Catalog tryToCreate(Catalog catalog, Options options) {
-        PrivilegeManager privilegeManager =
-                new FileBasedPrivilegeManager(
-                        catalog.warehouse(),
-                        catalog.fileIO(),
+        if (!(rootCatalog(catalog) instanceof AbstractCatalog)) {
+            return catalog;
+        }
+
+        FileBasedPrivilegeManagerLoader fileBasedPrivilegeManagerLoader =
+                new FileBasedPrivilegeManagerLoader(
+                        ((AbstractCatalog) rootCatalog(catalog)).warehouse(),
+                        ((AbstractCatalog) rootCatalog(catalog)).fileIO(),
                         options.get(PrivilegedCatalog.USER),
                         options.get(PrivilegedCatalog.PASSWORD));
-        if (privilegeManager.privilegeEnabled()) {
-            catalog = new PrivilegedCatalog(catalog, privilegeManager);
+        FileBasedPrivilegeManager fileBasedPrivilegeManager =
+                fileBasedPrivilegeManagerLoader.load();
+
+        if (fileBasedPrivilegeManager.privilegeEnabled()) {
+            catalog = new PrivilegedCatalog(catalog, fileBasedPrivilegeManagerLoader);
         }
         return catalog;
     }
 
     public PrivilegeManager privilegeManager() {
         return privilegeManager;
+    }
+
+    @Override
+    public CatalogLoader catalogLoader() {
+        return new PrivilegedCatalogLoader(wrapped.catalogLoader(), privilegeManagerLoader);
     }
 
     @Override
@@ -80,6 +97,13 @@ public class PrivilegedCatalog extends DelegateCatalog {
         privilegeManager.getPrivilegeChecker().assertCanDropDatabase(name);
         wrapped.dropDatabase(name, ignoreIfNotExists, cascade);
         privilegeManager.objectDropped(name);
+    }
+
+    @Override
+    public void alterDatabase(String name, List<PropertyChange> changes, boolean ignoreIfNotExists)
+            throws DatabaseNotExistException {
+        privilegeManager.getPrivilegeChecker().assertCanAlterDatabase(name);
+        super.alterDatabase(name, changes, ignoreIfNotExists);
     }
 
     @Override
@@ -102,12 +126,16 @@ public class PrivilegedCatalog extends DelegateCatalog {
             throws TableNotExistException, TableAlreadyExistException {
         privilegeManager.getPrivilegeChecker().assertCanAlterTable(fromTable);
         wrapped.renameTable(fromTable, toTable, ignoreIfNotExists);
-        Preconditions.checkState(
-                wrapped.tableExists(toTable),
-                "Table "
-                        + toTable
-                        + " does not exist. There might be concurrent renaming. "
-                        + "Aborting updates in privilege system.");
+
+        try {
+            getTable(toTable);
+        } catch (TableNotExistException e) {
+            throw new IllegalStateException(
+                    "Table "
+                            + toTable
+                            + " does not exist. There might be concurrent renaming. "
+                            + "Aborting updates in privilege system.");
+        }
         privilegeManager.objectRenamed(fromTable.getFullName(), toTable.getFullName());
     }
 
@@ -123,7 +151,7 @@ public class PrivilegedCatalog extends DelegateCatalog {
     public Table getTable(Identifier identifier) throws TableNotExistException {
         Table table = wrapped.getTable(identifier);
         if (table instanceof FileStoreTable) {
-            return new PrivilegedFileStoreTable(
+            return PrivilegedFileStoreTable.wrap(
                     (FileStoreTable) table, privilegeManager.getPrivilegeChecker(), identifier);
         } else {
             return table;
@@ -131,10 +159,10 @@ public class PrivilegedCatalog extends DelegateCatalog {
     }
 
     @Override
-    public void dropPartition(Identifier identifier, Map<String, String> partitions)
-            throws TableNotExistException, PartitionNotExistException {
+    public void markDonePartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException {
         privilegeManager.getPrivilegeChecker().assertCanInsert(identifier);
-        wrapped.dropPartition(identifier, partitions);
+        wrapped.markDonePartitions(identifier, partitions);
     }
 
     public void createPrivilegedUser(String user, String password) {
@@ -157,8 +185,11 @@ public class PrivilegedCatalog extends DelegateCatalog {
         Preconditions.checkArgument(
                 privilege.canGrantOnDatabase(),
                 "Privilege " + privilege + " can't be granted on a database");
-        Preconditions.checkArgument(
-                databaseExists(databaseName), "Database " + databaseName + " does not exist");
+        try {
+            getDatabase(databaseName);
+        } catch (DatabaseNotExistException e) {
+            throw new IllegalArgumentException("Database " + databaseName + " does not exist");
+        }
         privilegeManager.grant(user, databaseName, privilege);
     }
 
@@ -166,8 +197,12 @@ public class PrivilegedCatalog extends DelegateCatalog {
         Preconditions.checkArgument(
                 privilege.canGrantOnTable(),
                 "Privilege " + privilege + " can't be granted on a table");
-        Preconditions.checkArgument(
-                tableExists(identifier), "Table " + identifier + " does not exist");
+
+        try {
+            getTable(identifier);
+        } catch (TableNotExistException e) {
+            throw new IllegalArgumentException("Table " + identifier + " does not exist");
+        }
         privilegeManager.grant(user, identifier.getFullName(), privilege);
     }
 

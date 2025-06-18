@@ -18,19 +18,16 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
-import org.apache.paimon.types.DataField;
-
-import org.apache.flink.api.java.typeutils.ListTypeInfo;
+import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 
-import java.util.List;
-
 /**
- * A {@link ProcessFunction} to parse CDC change event to either a list of {@link DataField}s or
- * {@link CdcRecord} and send them to different downstreams.
+ * A {@link ProcessFunction} to parse CDC change event to either a {@link CdcSchema} or {@link
+ * CdcRecord} and send them to different downstreams.
  *
  * <p>This {@link ProcessFunction} can only handle records for a single constant table. To handle
  * records for different tables, see {@link CdcMultiTableParsingProcessFunction}.
@@ -39,8 +36,8 @@ import java.util.List;
  */
 public class CdcParsingProcessFunction<T> extends ProcessFunction<T, CdcRecord> {
 
-    public static final OutputTag<List<DataField>> NEW_DATA_FIELD_LIST_OUTPUT_TAG =
-            new OutputTag<>("new-data-field-list", new ListTypeInfo<>(DataField.class));
+    public static final OutputTag<CdcSchema> SCHEMA_CHANGE_OUTPUT_TAG =
+            new OutputTag<>("table-schema-change", TypeInformation.of(CdcSchema.class));
 
     private final EventParser.Factory<T> parserFactory;
 
@@ -50,7 +47,16 @@ public class CdcParsingProcessFunction<T> extends ProcessFunction<T, CdcRecord> 
         this.parserFactory = parserFactory;
     }
 
-    @Override
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 1.18-.
+     */
+    public void open(OpenContext openContext) throws Exception {
+        open(new Configuration());
+    }
+
+    /**
+     * Do not annotate with <code>@override</code> here to maintain compatibility with Flink 2.0+.
+     */
     public void open(Configuration parameters) throws Exception {
         parser = parserFactory.create();
     }
@@ -59,9 +65,9 @@ public class CdcParsingProcessFunction<T> extends ProcessFunction<T, CdcRecord> 
     public void processElement(T raw, Context context, Collector<CdcRecord> collector)
             throws Exception {
         parser.setRawEvent(raw);
-        List<DataField> schemaChange = parser.parseSchemaChange();
-        if (!schemaChange.isEmpty()) {
-            context.output(NEW_DATA_FIELD_LIST_OUTPUT_TAG, schemaChange);
+        CdcSchema schemaChange = parser.parseSchemaChange();
+        if (schemaChange != null) {
+            context.output(SCHEMA_CHANGE_OUTPUT_TAG, schemaChange);
         }
         parser.parseRecords().forEach(collector::collect);
     }

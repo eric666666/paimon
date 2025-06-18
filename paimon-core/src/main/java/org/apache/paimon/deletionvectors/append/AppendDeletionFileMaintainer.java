@@ -18,6 +18,7 @@
 
 package org.apache.paimon.deletionvectors.append;
 
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.deletionvectors.DeletionVector;
 import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
@@ -47,37 +48,27 @@ public interface AppendDeletionFileMaintainer {
 
     int getBucket();
 
-    DeletionFile getDeletionFile(String dataFile);
-
-    DeletionVector getDeletionVector(String dataFile);
-
     void notifyNewDeletionVector(String dataFile, DeletionVector deletionVector);
-
-    /** In compaction operation, notify that a deletion file of a data file is dropped. */
-    void notifyRemovedDeletionVector(String dataFile);
 
     List<IndexManifestEntry> persist();
 
-    static AppendDeletionFileMaintainer forBucketedAppend(
+    static BucketedAppendDeletionFileMaintainer forBucketedAppend(
             IndexFileHandler indexFileHandler,
-            @Nullable Long snapshotId,
+            @Nullable Snapshot snapshot,
             BinaryRow partition,
             int bucket) {
         // bucket should have only one deletion file, so here we should read old deletion vectors,
         // overwrite the entire deletion file of the bucket when writing deletes.
         DeletionVectorsMaintainer maintainer =
                 new DeletionVectorsMaintainer.Factory(indexFileHandler)
-                        .createOrRestore(snapshotId, partition, bucket);
-        Map<String, DeletionFile> deletionFiles =
-                indexFileHandler.scanDVIndex(snapshotId, partition, bucket);
-        return new BucketedAppendDeletionFileMaintainer(
-                partition, bucket, deletionFiles, maintainer);
+                        .createOrRestore(snapshot, partition, bucket);
+        return new BucketedAppendDeletionFileMaintainer(partition, bucket, maintainer);
     }
 
-    static AppendDeletionFileMaintainer forUnawareAppend(
-            IndexFileHandler indexFileHandler, @Nullable Long snapshotId, BinaryRow partition) {
+    static UnawareAppendDeletionFileMaintainer forUnawareAppend(
+            IndexFileHandler indexFileHandler, @Nullable Snapshot snapshot, BinaryRow partition) {
         Map<String, DeletionFile> deletionFiles =
-                indexFileHandler.scanDVIndex(snapshotId, partition, UNAWARE_BUCKET);
+                indexFileHandler.scanDVIndex(snapshot, partition, UNAWARE_BUCKET);
         return new UnawareAppendDeletionFileMaintainer(indexFileHandler, partition, deletionFiles);
     }
 }

@@ -10,6 +10,9 @@ that you always have docs corresponding to your checked-out version.
 
 Make sure you have installed Hugo on your system.
 Note: An extended version of Hugo <= 0.124.1 is required. you can Find this at [Hugo](https://github.com/gohugoio/hugo/releases/tag/v0.124.1)
+```sh
+go install -tags extended,withdeploy github.com/gohugoio/hugo@v0.124.1
+```
 
 From this directory:
 
@@ -22,7 +25,7 @@ From this directory:
 	hugo -b "" serve
 	```
 
-The site can be viewed at http://localhost:1313/
+The site can be viewed at http://localhost:1313/docs/master/
 
 # Contribute
 

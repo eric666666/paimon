@@ -21,6 +21,8 @@ package org.apache.paimon.table;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.Experimental;
 import org.apache.paimon.annotation.Public;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.stats.Statistics;
@@ -30,12 +32,14 @@ import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.SimpleFileReader;
 
+import javax.annotation.Nullable;
+
 import java.io.Serializable;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 /**
  * A table provides basic abstraction for table type and table scan and table read.
@@ -50,8 +54,17 @@ public interface Table extends Serializable {
     /** A name to identify this table. */
     String name();
 
+    /** Full name of the table, default is database.tableName. */
     default String fullName() {
         return name();
+    }
+
+    /**
+     * UUID of the table, metastore can provide the true UUID of this table, default is the full
+     * name.
+     */
+    default String uuid() {
+        return fullName();
     }
 
     /** Returns the row type of this table. */
@@ -75,12 +88,15 @@ public interface Table extends Serializable {
 
     // ================= Table Operations ====================
 
+    /** File io of this table. */
+    FileIO fileIO();
+
     /** Copy this table with adding dynamic options. */
     Table copy(Map<String, String> dynamicOptions);
 
-    /** Get the latest snapshot id for this table, or empty if there are no snapshots. */
+    /** Get the latest snapshot for this table, or empty if there are no snapshots. */
     @Experimental
-    OptionalLong latestSnapshotId();
+    Optional<Snapshot> latestSnapshot();
 
     /** Get the {@link Snapshot} from snapshot id. */
     @Experimental
@@ -94,6 +110,10 @@ public interface Table extends Serializable {
     @Experimental
     SimpleFileReader<ManifestEntry> manifestFileReader();
 
+    /** Reader to read index manifest entry from index manifest file. */
+    @Experimental
+    SimpleFileReader<IndexManifestEntry> indexManifestFileReader();
+
     /** Rollback table's state to a specific snapshot. */
     @Experimental
     void rollbackTo(long snapshotId);
@@ -103,14 +123,21 @@ public interface Table extends Serializable {
     void createTag(String tagName, long fromSnapshotId);
 
     @Experimental
-    void createTag(String tagName, long fromSnapshotId, Duration timeRetained);
+    void createTag(String tagName, long fromSnapshotId, @Nullable Duration timeRetained);
 
     /** Create a tag from latest snapshot. */
     @Experimental
     void createTag(String tagName);
 
     @Experimental
-    void createTag(String tagName, Duration timeRetained);
+    void createTag(String tagName, @Nullable Duration timeRetained);
+
+    @Experimental
+    void renameTag(String tagName, String targetTagName);
+
+    /** Replace a tag with new snapshot id and new time retained. */
+    @Experimental
+    void replaceTag(String tagName, @Nullable Long fromSnapshotId, @Nullable Duration timeRetained);
 
     /** Delete a tag by name. */
     @Experimental
@@ -118,8 +145,10 @@ public interface Table extends Serializable {
 
     /** Delete tags, tags are separated by commas. */
     @Experimental
-    default void deleteTags(String tagNames) {
-        for (String tagName : tagNames.split(",")) {
+    default void deleteTags(String tagStr) {
+        String[] tagNames =
+                Arrays.stream(tagStr.split(",")).map(String::trim).toArray(String[]::new);
+        for (String tagName : tagNames) {
             deleteTag(tagName);
         }
     }

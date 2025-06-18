@@ -31,6 +31,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** IT Case for {@link ExpirePartitionsProcedure}. */
 public class ExpirePartitionsProcedureITCase extends CatalogITCaseBase {
@@ -347,6 +348,196 @@ public class ExpirePartitionsProcedureITCase extends CatalogITCaseBase {
                 .containsExactlyInAnyOrder("Never-expire:9999-09-09:99:99");
     }
 
+    @Test
+    public void testSortAndLimitExpirePartition() throws Exception {
+        sql(
+                "CREATE TABLE T ("
+                        + " k STRING,"
+                        + " dt STRING,"
+                        + " hm STRING,"
+                        + " PRIMARY KEY (k, dt, hm) NOT ENFORCED"
+                        + ") PARTITIONED BY (dt, hm) WITH ("
+                        + " 'bucket' = '1'"
+                        + ")");
+        FileStoreTable table = paimonTable("T");
+        // Test there are no expired partitions.
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", expiration_time => '1 d'"
+                                        + ", timestamp_formatter => 'yyyy-MM-dd')"))
+                .containsExactlyInAnyOrder("No expired partitions.");
+
+        sql("INSERT INTO T VALUES ('3', '2024-06-02', '02:00')");
+        sql("INSERT INTO T VALUES ('2', '2024-06-02', '01:00')");
+        sql("INSERT INTO T VALUES ('4', '2024-06-03', '01:00')");
+        sql("INSERT INTO T VALUES ('1', '2024-06-01', '01:00')");
+        // This partition never expires.
+        sql("INSERT INTO T VALUES ('Never-expire', '9999-09-09', '99:99')");
+
+        Function<InternalRow, String> consumerReadResult =
+                (InternalRow row) ->
+                        row.getString(0) + ":" + row.getString(1) + ":" + row.getString(2);
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder(
+                        "1:2024-06-01:01:00",
+                        "2:2024-06-02:01:00",
+                        "3:2024-06-02:02:00",
+                        "4:2024-06-03:01:00",
+                        "Never-expire:9999-09-09:99:99");
+
+        // Show a list of expired partitions.
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", expiration_time => '1 d'"
+                                        + ", timestamp_formatter => 'yyyy-MM-dd', max_expires => 3)"))
+                .containsExactly(
+                        "dt=2024-06-01, hm=01:00",
+                        "dt=2024-06-02, hm=01:00",
+                        "dt=2024-06-02, hm=02:00");
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder("4:2024-06-03:01:00", "Never-expire:9999-09-09:99:99");
+    }
+
+    @Test
+    public void testNullPartitionExpire() {
+        sql("CREATE TABLE T (k INT, ds STRING) PARTITIONED BY (ds);");
+        sql("INSERT INTO T VALUES (1, CAST (NULL AS STRING))");
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", expiration_time => '1 d'"
+                                        + ", timestamp_formatter => 'yyyyMMdd')"))
+                .containsExactly("No expired partitions.");
+    }
+
+    @Test
+    public void testExpirePartitionsWithDefaultNum() throws Exception {
+        sql(
+                "CREATE TABLE T ("
+                        + " k STRING,"
+                        + " dt STRING,"
+                        + " PRIMARY KEY (k, dt) NOT ENFORCED"
+                        + ") PARTITIONED BY (dt) WITH ("
+                        + " 'bucket' = '1',"
+                        + " 'partition.expiration-max-num'='2'"
+                        + ")");
+        FileStoreTable table = paimonTable("T");
+
+        sql("INSERT INTO T VALUES ('a', '2024-06-01')");
+        sql("INSERT INTO T VALUES ('b', '2024-06-02')");
+        sql("INSERT INTO T VALUES ('c', '2024-06-03')");
+        // This partition never expires.
+        sql("INSERT INTO T VALUES ('Never-expire', '9999-09-09')");
+        Function<InternalRow, String> consumerReadResult =
+                (InternalRow row) -> row.getString(0) + ":" + row.getString(1);
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder(
+                        "a:2024-06-01", "b:2024-06-02", "c:2024-06-03", "Never-expire:9999-09-09");
+
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", expiration_time => '1 d'"
+                                        + ", timestamp_formatter => 'yyyy-MM-dd')"))
+                .containsExactlyInAnyOrder("dt=2024-06-01", "dt=2024-06-02");
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder("c:2024-06-03", "Never-expire:9999-09-09");
+    }
+
+    @Test
+    public void testExpirePartitionsLoadTablePropsFirst() throws Exception {
+        sql(
+                "CREATE TABLE T ("
+                        + " k STRING,"
+                        + " dt STRING,"
+                        + " PRIMARY KEY (k, dt) NOT ENFORCED"
+                        + ") PARTITIONED BY (dt) WITH ("
+                        + " 'bucket' = '1', "
+                        + " 'write-only' = 'true', "
+                        + " 'partition.timestamp-formatter' = 'yyyy-MM-dd', "
+                        + " 'partition.expiration-max-num'='2'"
+                        + ")");
+        FileStoreTable table = paimonTable("T");
+
+        sql("INSERT INTO T VALUES ('a', '2024-06-01')");
+        sql("INSERT INTO T VALUES ('b', '2024-06-02')");
+        sql("INSERT INTO T VALUES ('c', '2024-06-03')");
+        // This partition never expires.
+        sql("INSERT INTO T VALUES ('Never-expire', '9999-09-09')");
+        Function<InternalRow, String> consumerReadResult =
+                (InternalRow row) -> row.getString(0) + ":" + row.getString(1);
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder(
+                        "a:2024-06-01", "b:2024-06-02", "c:2024-06-03", "Never-expire:9999-09-09");
+
+        // no 'partition.expiration-time' value in table property or procedure parameter.
+        assertThatThrownBy(() -> sql("CALL sys.expire_partitions(`table` => 'default.T')"))
+                .rootCause()
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining(
+                        "Both the partition expiration time and partition field can not be null.");
+
+        // 'partition.timestamp-formatter' value using table property.
+        // 'partition.expiration-time' value using procedure parameter.
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", expiration_time => '1 d')"))
+                .containsExactlyInAnyOrder("dt=2024-06-01", "dt=2024-06-02");
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder("c:2024-06-03", "Never-expire:9999-09-09");
+    }
+
+    @Test
+    public void testExpirePartitionsUseOptionsParam() throws Exception {
+        sql(
+                "CREATE TABLE T ("
+                        + " k STRING,"
+                        + " dt STRING,"
+                        + " PRIMARY KEY (k, dt) NOT ENFORCED"
+                        + ") PARTITIONED BY (dt) WITH ("
+                        + " 'bucket' = '1'"
+                        + ")");
+        FileStoreTable table = paimonTable("T");
+
+        sql("INSERT INTO T VALUES ('a', '2024-06-01')");
+        sql("INSERT INTO T VALUES ('b', '2024-06-02')");
+        sql("INSERT INTO T VALUES ('c', '2024-06-03')");
+        // This partition never expires.
+        sql("INSERT INTO T VALUES ('Never-expire', '9999-09-09')");
+        Function<InternalRow, String> consumerReadResult =
+                (InternalRow row) -> row.getString(0) + ":" + row.getString(1);
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder(
+                        "a:2024-06-01", "b:2024-06-02", "c:2024-06-03", "Never-expire:9999-09-09");
+
+        // set conf in options.
+        assertThat(
+                        callExpirePartitions(
+                                "CALL sys.expire_partitions("
+                                        + "`table` => 'default.T'"
+                                        + ", options => 'partition.expiration-time = 1d,"
+                                        + " partition.expiration-max-num = 2, "
+                                        + " partition.timestamp-formatter = yyyy-MM-dd')"))
+                .containsExactlyInAnyOrder("dt=2024-06-01", "dt=2024-06-02");
+
+        assertThat(read(table, consumerReadResult))
+                .containsExactlyInAnyOrder("c:2024-06-03", "Never-expire:9999-09-09");
+    }
+
     /** Return a list of expired partitions. */
     public List<String> callExpirePartitions(String callSql) {
         return sql(callSql).stream()
@@ -354,7 +545,7 @@ public class ExpirePartitionsProcedureITCase extends CatalogITCaseBase {
                 .collect(Collectors.toList());
     }
 
-    private List<String> read(
+    protected List<String> read(
             FileStoreTable table, Function<InternalRow, String> consumerReadResult)
             throws IOException {
         List<String> ret = new ArrayList<>();

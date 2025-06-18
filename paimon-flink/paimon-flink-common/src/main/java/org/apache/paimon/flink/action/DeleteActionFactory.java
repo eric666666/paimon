@@ -18,9 +18,6 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
-import java.util.Map;
 import java.util.Optional;
 
 /** Factory to create {@link DeleteAction}. */
@@ -37,18 +34,18 @@ public class DeleteActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-
         String filter = params.get(WHERE);
         if (filter == null) {
             throw new IllegalArgumentException(
                     "Please specify deletion filter. If you want to delete all records, please use overwrite (see doc).");
         }
 
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
-
         DeleteAction action =
-                new DeleteAction(tablePath.f0, tablePath.f1, tablePath.f2, filter, catalogConfig);
+                new DeleteAction(
+                        params.getRequired(DATABASE),
+                        params.getRequired(TABLE),
+                        filter,
+                        catalogConfigMap(params));
 
         return Optional.of(action);
     }
@@ -59,8 +56,11 @@ public class DeleteActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  delete --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> --where <filter_spec>");
+                "  delete \\\n"
+                        + " --warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <table_name> \\\n"
+                        + "--where <filter_spec>");
         System.out.println("  delete --path <table_path> --where <filter_spec>");
         System.out.println();
 

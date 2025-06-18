@@ -423,7 +423,7 @@ public class PostgresSyncTableActionITCase extends PostgresActionITCaseBase {
                                 + "Paimon    , Apache Paimon, Apache Paimon PostgreSQL Test Data, "
                                 + "[98, 121, 116, 101, 115], "
                                 + "{\"a\": \"b\"}, "
-                                + "[\"item1\", \"item2\"]"
+                                + "[item1, item2]"
                                 + "]",
                         "+I["
                                 + "2, 2.2, "
@@ -788,5 +788,30 @@ public class PostgresSyncTableActionITCase extends PostgresActionITCaseBase {
 
     private FileStoreTable getFileStoreTable() throws Exception {
         return getFileStoreTable(tableName);
+    }
+
+    @Test
+    @Timeout(60)
+    public void testRuntimeExecutionModeCheckForCdcSync() {
+        Map<String, String> postgresConfig = getBasicPostgresConfig();
+        postgresConfig.put(PostgresSourceOptions.DATABASE_NAME.key(), DATABASE_NAME);
+        postgresConfig.put(PostgresSourceOptions.SCHEMA_NAME.key(), SCHEMA_NAME);
+        postgresConfig.put(PostgresSourceOptions.TABLE_NAME.key(), "schema_evolution_\\d+");
+
+        PostgresSyncTableAction action =
+                syncTableActionBuilder(postgresConfig)
+                        .withCatalogConfig(
+                                Collections.singletonMap(
+                                        CatalogOptions.METASTORE.key(), "test-alter-table"))
+                        .withTableConfig(getBasicTableConfig())
+                        .withPartitionKeys("pt")
+                        .withPrimaryKeys("pt", "_id")
+                        .build();
+
+        assertThatThrownBy(() -> runActionWithBatchEnv(action))
+                .satisfies(
+                        anyCauseMatches(
+                                IllegalArgumentException.class,
+                                "It's only support STREAMING mode for flink-cdc sync table action"));
     }
 }

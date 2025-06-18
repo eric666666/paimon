@@ -40,7 +40,7 @@ import org.apache.paimon.sort.BinaryExternalSortBuffer;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.PartitionKeyExtractor;
-import org.apache.paimon.table.sink.RowPartitionKeyExtractor;
+import org.apache.paimon.table.sink.RowPartitionAllPrimaryKeyExtractor;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
@@ -129,7 +129,7 @@ public class GlobalIndexAssigner implements Serializable, Closeable {
 
         CoreOptions coreOptions = table.coreOptions();
         this.targetBucketRowNumber = (int) coreOptions.dynamicBucketTargetRowNum();
-        this.extractor = new RowPartitionKeyExtractor(table.schema());
+        this.extractor = new RowPartitionAllPrimaryKeyExtractor(table.schema());
         this.keyPartExtractor = new KeyPartPartitionKeyExtractor(table.schema());
 
         // state
@@ -149,7 +149,7 @@ public class GlobalIndexAssigner implements Serializable, Closeable {
                         path.toString(),
                         rocksdbOptions,
                         coreOptions.crossPartitionUpsertIndexTtl());
-        RowType keyType = table.schema().logicalTrimmedPrimaryKeysType();
+        RowType keyType = table.schema().logicalPrimaryKeysType();
         this.keyIndex =
                 stateFactory.valueState(
                         INDEX_NAME,
@@ -174,7 +174,7 @@ public class GlobalIndexAssigner implements Serializable, Closeable {
                         new InternalRowSerializer(table.rowType()),
                         true,
                         coreOptions.writeBufferSpillDiskSize(),
-                        coreOptions.spillCompression());
+                        coreOptions.spillCompressOptions());
     }
 
     public void bootstrapKey(InternalRow value) throws IOException {
@@ -305,8 +305,9 @@ public class GlobalIndexAssigner implements Serializable, Closeable {
                         coreOptions.writeBufferSize() / 2,
                         coreOptions.pageSize(),
                         coreOptions.localSortMaxNumFileHandles(),
-                        coreOptions.spillCompression(),
-                        coreOptions.writeBufferSpillDiskSize());
+                        coreOptions.spillCompressOptions(),
+                        coreOptions.writeBufferSpillDiskSize(),
+                        coreOptions.sequenceFieldSortOrderIsAscending());
 
         Function<SortOrder, RowIterator> iteratorFunction =
                 sortOrder -> {

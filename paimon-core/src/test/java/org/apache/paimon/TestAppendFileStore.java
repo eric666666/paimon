@@ -20,7 +20,7 @@ package org.apache.paimon;
 
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.deletionvectors.DeletionVectorsMaintainer;
-import org.apache.paimon.deletionvectors.append.AppendDeletionFileMaintainer;
+import org.apache.paimon.deletionvectors.append.AppendDeletionFileMaintainerHelper;
 import org.apache.paimon.deletionvectors.append.UnawareAppendDeletionFileMaintainer;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.FileIOFinder;
@@ -93,7 +93,7 @@ public class TestAppendFileStore extends AppendOnlyFileStore {
     }
 
     public FileStoreCommitImpl newCommit() {
-        return super.newCommit(commitUser);
+        return super.newCommit(commitUser, null);
     }
 
     public void commit(CommitMessage... commitMessages) {
@@ -109,30 +109,28 @@ public class TestAppendFileStore extends AppendOnlyFileStore {
         return new CommitMessageImpl(
                 partition,
                 bucket,
+                options().bucket(),
                 DataIncrement.emptyIncrement(),
                 CompactIncrement.emptyIncrement(),
                 new IndexIncrement(Collections.emptyList(), indexFileMetas));
     }
 
     public List<IndexFileMeta> scanDVIndexFiles(BinaryRow partition, int bucket) {
-        Long lastSnapshotId = snapshotManager().latestSnapshotId();
-        return fileHandler.scan(lastSnapshotId, DELETION_VECTORS_INDEX, partition, bucket);
+        Snapshot latestSnapshot = snapshotManager().latestSnapshot();
+        return fileHandler.scan(latestSnapshot, DELETION_VECTORS_INDEX, partition, bucket);
     }
 
     public UnawareAppendDeletionFileMaintainer createDVIFMaintainer(
             BinaryRow partition, Map<String, DeletionFile> dataFileToDeletionFiles) {
-        UnawareAppendDeletionFileMaintainer maintainer =
-                (UnawareAppendDeletionFileMaintainer)
-                        AppendDeletionFileMaintainer.forUnawareAppend(fileHandler, null, partition);
-        maintainer.init(dataFileToDeletionFiles);
-        return maintainer;
+        return AppendDeletionFileMaintainerHelper.fromDeletionFiles(
+                fileHandler, partition, dataFileToDeletionFiles);
     }
 
     public DeletionVectorsMaintainer createOrRestoreDVMaintainer(BinaryRow partition, int bucket) {
-        Long lastSnapshotId = snapshotManager().latestSnapshotId();
+        Snapshot latestSnapshot = snapshotManager().latestSnapshot();
         DeletionVectorsMaintainer.Factory factory =
                 new DeletionVectorsMaintainer.Factory(fileHandler);
-        return factory.createOrRestore(lastSnapshotId, partition, bucket);
+        return factory.createOrRestore(latestSnapshot, partition, bucket);
     }
 
     public CommitMessageImpl writeDVIndexFiles(
@@ -146,6 +144,7 @@ public class TestAppendFileStore extends AppendOnlyFileStore {
         return new CommitMessageImpl(
                 partition,
                 bucket,
+                options().bucket(),
                 DataIncrement.emptyIncrement(),
                 CompactIncrement.emptyIncrement(),
                 new IndexIncrement(dvMaintainer.writeDeletionVectorsIndex()));

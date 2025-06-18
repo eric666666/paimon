@@ -20,8 +20,6 @@ package org.apache.paimon.flink.action;
 
 import org.apache.paimon.flink.service.QueryService;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
 import java.util.Map;
 import java.util.Optional;
 
@@ -39,13 +37,13 @@ public class QueryServiceActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
+        Map<String, String> catalogConfig = catalogConfigMap(params);
         Map<String, String> tableConfig = optionalConfigMap(params, TABLE_CONF);
         String parallStr = params.get(PARALLELISM);
         int parallelism = parallStr == null ? 1 : Integer.parseInt(parallStr);
         Action action =
-                new TableActionBase(tablePath.f0, tablePath.f1, tablePath.f2, catalogConfig) {
+                new TableActionBase(
+                        params.getRequired(DATABASE), params.getRequired(TABLE), catalogConfig) {
                     @Override
                     public void run() throws Exception {
                         QueryService.build(env, table.copy(tableConfig), parallelism);
@@ -63,8 +61,12 @@ public class QueryServiceActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  query-service --warehouse <warehouse-path> --database <database-name> --table <table-name> --parallelism <parallelism>"
-                        + "[--catalog_conf <key>=<value> [--catalog_conf <key>=<value> ...]] "
-                        + "[--table_conf <key>=<value> [--table_conf <key>=<value> ...]] ");
+                "  query-service \\\n"
+                        + "--warehouse <warehouse-path> \\\n"
+                        + "--database <database-name> \\\n"
+                        + "--table <table-name> \\\n"
+                        + "--parallelism <parallelism> \\\n"
+                        + "[--catalog_conf <key>=<value> [--catalog_conf <key>=<value> ...]] \\\n"
+                        + "[--table_conf <key>=<value> [--table_conf <key>=<value> ...]]");
     }
 }

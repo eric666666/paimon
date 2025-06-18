@@ -82,13 +82,7 @@ control the strategy of compaction:
             <td><h5>compaction.min.file-num</h5></td>
             <td style="word-wrap: break-word;">5</td>
             <td>Integer</td>
-            <td>For file set [f_0,...,f_N], the minimum file number which satisfies sum(size(f_i)) &gt;= targetFileSize to trigger a compaction for append table. This value avoids almost-full-file to be compacted, which is not cost-effective.</td>
-        </tr>
-        <tr>
-            <td><h5>compaction.max.file-num</h5></td>
-            <td style="word-wrap: break-word;">5</td>
-            <td>Integer</td>
-            <td>For file set [f_0,...,f_N], the maximum file number to trigger a compaction for append table, even if sum(size(f_i)) &lt; targetFileSize. This value avoids pending too much small files, which slows down the performance.</td>
+            <td>For file set [f_0,...,f_N], the minimum file number to trigger a compaction for append table.</td>
         </tr>
         <tr>
             <td><h5>full-compaction.delta-commits</h5></td>
@@ -196,4 +190,4 @@ The `spark.sql.sources.v2.bucketing.enabled` config is used to enable bucketing 
 Spark will recognize the specific distribution reported by a V2 data source through SupportsReportPartitioning, and
 will try to avoid shuffle if necessary.
 
-The costly join shuffle will be avoided if two tables have same bucketing strategy and same number of buckets.
+The costly join shuffle will be avoided if two tables have the same bucketing strategy and same number of buckets.

@@ -18,6 +18,7 @@
 
 package org.apache.paimon.deletionvectors;
 
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.index.IndexFileHandler;
@@ -138,6 +139,10 @@ public class DeletionVectorsMaintainer {
         return deletionVectors;
     }
 
+    public static Factory factory(IndexFileHandler handler) {
+        return new Factory(handler);
+    }
+
     /** Factory to restore {@link DeletionVectorsMaintainer}. */
     public static class Factory {
 
@@ -148,11 +153,11 @@ public class DeletionVectorsMaintainer {
         }
 
         public DeletionVectorsMaintainer createOrRestore(
-                @Nullable Long snapshotId, BinaryRow partition, int bucket) {
+                @Nullable Snapshot snapshot, BinaryRow partition, int bucket) {
             List<IndexFileMeta> indexFiles =
-                    snapshotId == null
+                    snapshot == null
                             ? Collections.emptyList()
-                            : handler.scan(snapshotId, DELETION_VECTORS_INDEX, partition, bucket);
+                            : handler.scan(snapshot, DELETION_VECTORS_INDEX, partition, bucket);
             Map<String, DeletionVector> deletionVectors =
                     new HashMap<>(handler.readAllDeletionVectors(indexFiles));
             return createOrRestore(deletionVectors);
@@ -160,11 +165,11 @@ public class DeletionVectorsMaintainer {
 
         @VisibleForTesting
         public DeletionVectorsMaintainer createOrRestore(
-                @Nullable Long snapshotId, BinaryRow partition) {
+                @Nullable Snapshot snapshot, BinaryRow partition) {
             List<IndexFileMeta> indexFiles =
-                    snapshotId == null
+                    snapshot == null
                             ? Collections.emptyList()
-                            : handler.scanEntries(snapshotId, DELETION_VECTORS_INDEX, partition)
+                            : handler.scanEntries(snapshot, DELETION_VECTORS_INDEX, partition)
                                     .stream()
                                     .map(IndexManifestEntry::indexFile)
                                     .collect(Collectors.toList());

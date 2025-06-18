@@ -37,28 +37,30 @@ Download the jar file with corresponding version.
 > Currently, paimon provides two types jar: one of which(the bundled jar) is used for read/write data, and the other(action jar) for operations such as manually compaction,
 {{< stable >}}
 
-| Version      | Type        | Jar                                                                                                                                                                           |
-|--------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Flink 1.20   | Bundled Jar | [paimon-flink-1.20-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.20/{{< version >}}/paimon-flink-1.20-{{< version >}}.jar)       |
-| Flink 1.19   | Bundled Jar | [paimon-flink-1.19-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.19/{{< version >}}/paimon-flink-1.19-{{< version >}}.jar)       |
-| Flink 1.18   | Bundled Jar | [paimon-flink-1.18-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.18/{{< version >}}/paimon-flink-1.18-{{< version >}}.jar)       |
-| Flink 1.17   | Bundled Jar | [paimon-flink-1.17-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.17/{{< version >}}/paimon-flink-1.17-{{< version >}}.jar)       |
-| Flink 1.16   | Bundled Jar | [paimon-flink-1.16-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.16/{{< version >}}/paimon-flink-1.16-{{< version >}}.jar)       |
-| Flink 1.15   | Bundled Jar | [paimon-flink-1.15-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.15/{{< version >}}/paimon-flink-1.15-{{< version >}}.jar)       |
+| Version     | Type        | Jar                                                                                                                                                                           |
+|-------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Flink 2.0   | Bundled Jar | [paimon-flink-2.0-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-2.0/{{< version >}}/paimon-flink-2.0-{{< version >}}.jar)          |
+| Flink 1.20  | Bundled Jar | [paimon-flink-1.20-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.20/{{< version >}}/paimon-flink-1.20-{{< version >}}.jar)       |
+| Flink 1.19  | Bundled Jar | [paimon-flink-1.19-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.19/{{< version >}}/paimon-flink-1.19-{{< version >}}.jar)       |
+| Flink 1.18  | Bundled Jar | [paimon-flink-1.18-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.18/{{< version >}}/paimon-flink-1.18-{{< version >}}.jar)       |
+| Flink 1.17  | Bundled Jar | [paimon-flink-1.17-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.17/{{< version >}}/paimon-flink-1.17-{{< version >}}.jar)       |
+| Flink 1.16  | Bundled Jar | [paimon-flink-1.16-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.16/{{< version >}}/paimon-flink-1.16-{{< version >}}.jar)       |
+| Flink 1.15  | Bundled Jar | [paimon-flink-1.15-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-1.15/{{< version >}}/paimon-flink-1.15-{{< version >}}.jar)       |
 | Flink Action | Action Jar  | [paimon-flink-action-{{< version >}}.jar](https://repo.maven.apache.org/maven2/org/apache/paimon/paimon-flink-action/{{< version >}}/paimon-flink-action-{{< version >}}.jar) |
 
 {{< /stable >}}
 
 {{< unstable >}}
 
-| Version      | Type        | Jar                                                                                                                                       |
-|--------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| Flink 1.20   | Bundled Jar | [paimon-flink-1.20-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.20/{{< version >}}/)     |
-| Flink 1.19   | Bundled Jar | [paimon-flink-1.19-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.19/{{< version >}}/)     |
-| Flink 1.18   | Bundled Jar | [paimon-flink-1.18-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.18/{{< version >}}/)     |
-| Flink 1.17   | Bundled Jar | [paimon-flink-1.17-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.17/{{< version >}}/)     |
-| Flink 1.16   | Bundled Jar | [paimon-flink-1.16-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.16/{{< version >}}/)     |
-| Flink 1.15   | Bundled Jar | [paimon-flink-1.15-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.15/{{< version >}}/)     |
+| Version     | Type        | Jar                                                                                                                                      |
+|-------------|-------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| Flink 2.0   | Bundled Jar | [paimon-flink-2.0-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-2.0/{{< version >}}/)      |
+| Flink 1.20  | Bundled Jar | [paimon-flink-1.20-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.20/{{< version >}}/)    |
+| Flink 1.19  | Bundled Jar | [paimon-flink-1.19-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.19/{{< version >}}/)    |
+| Flink 1.18  | Bundled Jar | [paimon-flink-1.18-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.18/{{< version >}}/)    |
+| Flink 1.17  | Bundled Jar | [paimon-flink-1.17-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.17/{{< version >}}/)    |
+| Flink 1.16  | Bundled Jar | [paimon-flink-1.16-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.16/{{< version >}}/)    |
+| Flink 1.15  | Bundled Jar | [paimon-flink-1.15-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-1.15/{{< version >}}/)    |
 | Flink Action | Action Jar  | [paimon-flink-action-{{< version >}}.jar](https://repository.apache.org/snapshots/org/apache/paimon/paimon-flink-action/{{< version >}}/) |
 
 {{< /unstable >}}
@@ -104,7 +106,7 @@ cp flink-shaded-hadoop-2-uber-*.jar <FLINK_HOME>/lib/
 
 **Step 4: Start a Flink Local Cluster**
 
-In order to run multiple Flink jobs at the same time, you need to modify the cluster configuration in `<FLINK_HOME>/conf/flink-conf.yaml`.
+In order to run multiple Flink jobs at the same time, you need to modify the cluster configuration in `<FLINK_HOME>/conf/flink-conf.yaml`(Flink version < 1.19) or `<FLINK_HOME>/conf/config.yaml`(Flink version >= 1.19).
 
 ```yaml
 taskmanager.numberOfTaskSlots: 2
@@ -269,11 +271,16 @@ SELECT * FROM ....;
 ## Setting dynamic options
 
 When interacting with the Paimon table, table options can be tuned without changing the options in the catalog. Paimon will extract job-level dynamic options and take effect in the current session.
-The dynamic option's key format is `paimon.${catalogName}.${dbName}.${tableName}.${config_key}`. The catalogName/dbName/tableName can be `*`, which means matching all the specific parts.
+The dynamic table option's key format is `paimon.${catalogName}.${dbName}.${tableName}.${config_key}`. The catalogName/dbName/tableName can be `*`, which means matching all the specific parts. 
+The dynamic global option's key format is `${config_key}`. Global options will take effect for all the tables. Table options will override global options if there are conflicts.
 
 For example:
 
 ```sql
+-- set scan.timestamp-millis=1697018249001 for all tables
+SET 'scan.timestamp-millis' = '1697018249001';
+SELECT * FROM T;
+
 -- set scan.timestamp-millis=1697018249000 for the table mycatalog.default.T
 SET 'paimon.mycatalog.default.T.scan.timestamp-millis' = '1697018249000';
 SELECT * FROM T;
@@ -281,4 +288,10 @@ SELECT * FROM T;
 -- set scan.timestamp-millis=1697018249000 for the table default.T in any catalog
 SET 'paimon.*.default.T.scan.timestamp-millis' = '1697018249000';
 SELECT * FROM T;
+
+-- set scan.timestamp-millis=1697018249000 for the table mycatalog.default.T1
+-- set scan.timestamp-millis=1697018249001 for others tables
+SET 'paimon.mycatalog.default.T1.scan.timestamp-millis' = '1697018249000';
+SET 'scan.timestamp-millis' = '1697018249001';
+SELECT * FROM T1 JOIN T2 ON xxxx;
 ```

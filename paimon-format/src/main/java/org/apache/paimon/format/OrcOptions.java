@@ -25,12 +25,6 @@ import static org.apache.paimon.options.ConfigOptions.key;
 /** Options for orc format. */
 public class OrcOptions {
 
-    public static final ConfigOption<Integer> ORC_WRITE_BATCH_SIZE =
-            key("orc.write.batch-size")
-                    .intType()
-                    .defaultValue(1024)
-                    .withDescription("write batch size for orc.");
-
     public static final ConfigOption<Integer> ORC_COLUMN_ENCODING_DIRECT =
             key("orc.column.encoding.direct")
                     .intType()
@@ -47,4 +41,11 @@ public class OrcOptions {
                                     + "fraction of the total number of non-null rows, turn off "
                                     + "dictionary encoding in orc. Use 0 to always disable dictionary encoding. "
                                     + "Use 1 to always use dictionary encoding.");
+
+    public static final ConfigOption<Boolean> ORC_TIMESTAMP_LTZ_LEGACY_TYPE =
+            key("orc.timestamp-ltz.legacy.type")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "This option is used to be compatible with the paimon-orc‘s old behavior for the `timestamp_ltz` data type.");
 }

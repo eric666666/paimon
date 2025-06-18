@@ -19,13 +19,13 @@
 package org.apache.paimon.flink.source;
 
 import org.apache.paimon.append.MultiTableUnawareAppendCompactionTask;
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.flink.LogicalTypeConversion;
-import org.apache.paimon.flink.source.operator.CombinedAwareBatchSourceFunction;
-import org.apache.paimon.flink.source.operator.CombinedAwareStreamingSourceFunction;
-import org.apache.paimon.flink.source.operator.CombinedUnawareBatchSourceFunction;
-import org.apache.paimon.flink.source.operator.CombinedUnawareStreamingSourceFunction;
-import org.apache.paimon.table.system.BucketsTable;
+import org.apache.paimon.flink.source.operator.CombinedAwareBatchSource;
+import org.apache.paimon.flink.source.operator.CombinedAwareStreamingSource;
+import org.apache.paimon.flink.source.operator.CombinedUnawareBatchSource;
+import org.apache.paimon.flink.source.operator.CombinedUnawareStreamingSource;
+import org.apache.paimon.table.system.CompactBucketsTable;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
@@ -37,6 +37,8 @@ import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -44,7 +46,8 @@ import java.util.regex.Pattern;
  * compactor jobs in combined mode.
  */
 public class CombinedTableCompactorSourceBuilder {
-    private final Catalog.Loader catalogLoader;
+
+    private final CatalogLoader catalogLoader;
     private final Pattern includingPattern;
     private final Pattern excludingPattern;
     private final Pattern databasePattern;
@@ -53,9 +56,10 @@ public class CombinedTableCompactorSourceBuilder {
     private boolean isContinuous = false;
     private StreamExecutionEnvironment env;
     @Nullable private Duration partitionIdleTime = null;
+    private Map<String, String> tableOptions = new HashMap<>();
 
     public CombinedTableCompactorSourceBuilder(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             Pattern databasePattern,
             Pattern includingPattern,
             Pattern excludingPattern,
@@ -83,11 +87,16 @@ public class CombinedTableCompactorSourceBuilder {
         return this;
     }
 
+    public CombinedTableCompactorSourceBuilder withTableOptions(Map<String, String> tableOptions) {
+        this.tableOptions = tableOptions;
+        return this;
+    }
+
     public DataStream<RowData> buildAwareBucketTableSource() {
         Preconditions.checkArgument(env != null, "StreamExecutionEnvironment should not be null.");
-        RowType produceType = BucketsTable.getRowType();
+        RowType produceType = CompactBucketsTable.getRowType();
         if (isContinuous) {
-            return CombinedAwareStreamingSourceFunction.buildSource(
+            return CombinedAwareStreamingSource.buildSource(
                     env,
                     "Combine-MultiBucketTables--StreamingCompactorSource",
                     InternalTypeInfo.of(LogicalTypeConversion.toLogicalType(produceType)),
@@ -95,9 +104,10 @@ public class CombinedTableCompactorSourceBuilder {
                     includingPattern,
                     excludingPattern,
                     databasePattern,
+                    tableOptions,
                     monitorInterval);
         } else {
-            return CombinedAwareBatchSourceFunction.buildSource(
+            return CombinedAwareBatchSource.buildSource(
                     env,
                     "Combine-MultiBucketTables-BatchCompactorSource",
                     InternalTypeInfo.of(LogicalTypeConversion.toLogicalType(produceType)),
@@ -105,6 +115,7 @@ public class CombinedTableCompactorSourceBuilder {
                     includingPattern,
                     excludingPattern,
                     databasePattern,
+                    tableOptions,
                     partitionIdleTime);
         }
     }
@@ -112,22 +123,24 @@ public class CombinedTableCompactorSourceBuilder {
     public DataStream<MultiTableUnawareAppendCompactionTask> buildForUnawareBucketsTableSource() {
         Preconditions.checkArgument(env != null, "StreamExecutionEnvironment should not be null.");
         if (isContinuous) {
-            return CombinedUnawareStreamingSourceFunction.buildSource(
+            return CombinedUnawareStreamingSource.buildSource(
                     env,
                     "Combined-UnawareBucketTables-StreamingCompactorSource",
                     catalogLoader,
                     includingPattern,
                     excludingPattern,
                     databasePattern,
+                    tableOptions,
                     monitorInterval);
         } else {
-            return CombinedUnawareBatchSourceFunction.buildSource(
+            return CombinedUnawareBatchSource.buildSource(
                     env,
                     "Combined-UnawareBucketTables-BatchCompactorSource",
                     catalogLoader,
                     includingPattern,
                     excludingPattern,
                     databasePattern,
+                    tableOptions,
                     partitionIdleTime);
         }
     }

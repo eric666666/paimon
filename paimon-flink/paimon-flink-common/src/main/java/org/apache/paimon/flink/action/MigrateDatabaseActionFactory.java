@@ -28,6 +28,7 @@ public class MigrateDatabaseActionFactory implements ActionFactory {
 
     private static final String SOURCE_TYPE = "source_type";
     private static final String OPTIONS = "options";
+    private static final String PARALLELISM = "parallelism";
 
     @Override
     public String identifier() {
@@ -36,15 +37,15 @@ public class MigrateDatabaseActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        String warehouse = params.get(WAREHOUSE);
         String connector = params.get(SOURCE_TYPE);
         String sourceHiveDatabase = params.get(DATABASE);
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
+        Map<String, String> catalogConfig = catalogConfigMap(params);
         String tableConf = params.get(OPTIONS);
+        Integer parallelism = Integer.parseInt(params.get(PARALLELISM));
 
         MigrateDatabaseAction migrateDatabaseAction =
                 new MigrateDatabaseAction(
-                        connector, warehouse, sourceHiveDatabase, catalogConfig, tableConf);
+                        connector, sourceHiveDatabase, catalogConfig, tableConf, parallelism);
         return Optional.of(migrateDatabaseAction);
     }
 
@@ -56,9 +57,11 @@ public class MigrateDatabaseActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  migrate_database --warehouse <warehouse_path> --source_type hive "
-                        + "--database <database_name> "
-                        + "[--catalog_conf <key>=<value] "
+                "  migrate_database \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--source_type hive \\\n"
+                        + "--database <database_name> \\\n"
+                        + "[--catalog_conf <key>=<value] \\\n"
                         + "[--options <key>=<value>,<key>=<value>,...]");
     }
 }

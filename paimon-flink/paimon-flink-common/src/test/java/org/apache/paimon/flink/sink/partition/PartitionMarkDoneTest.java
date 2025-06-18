@@ -51,7 +51,7 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.apache.paimon.CoreOptions.DELETION_VECTORS_ENABLED;
 import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_ACTION;
-import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
+import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PartitionMarkDoneTest extends TableTestBase {
@@ -83,10 +83,16 @@ class PartitionMarkDoneTest extends TableTestBase {
                         .build();
         catalog.createTable(identifier, schema, true);
         FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
-        Path location = catalog.getTableLocation(identifier);
+        Path location = table.location();
         Path successFile = new Path(location, "a=0/_SUCCESS");
         PartitionMarkDone markDone =
-                PartitionMarkDone.create(false, false, new MockOperatorStateStore(), table);
+                PartitionMarkDone.create(
+                                getClass().getClassLoader(),
+                                false,
+                                false,
+                                new MockOperatorStateStore(),
+                                table)
+                        .get();
 
         notifyCommits(markDone, true);
         assertThat(table.fileIO().exists(successFile)).isEqualTo(deletionVectors);
@@ -97,7 +103,7 @@ class PartitionMarkDoneTest extends TableTestBase {
         }
     }
 
-    private void notifyCommits(PartitionMarkDone markDone, boolean isCompact) {
+    public static void notifyCommits(PartitionMarkDone markDone, boolean isCompact) {
         ManifestCommittable committable = new ManifestCommittable(Long.MAX_VALUE);
         DataFileMeta file = DataFileTestUtils.newFile();
         CommitMessageImpl compactMessage;
@@ -106,6 +112,7 @@ class PartitionMarkDoneTest extends TableTestBase {
                     new CommitMessageImpl(
                             BinaryRow.singleColumn(0),
                             0,
+                            1,
                             new DataIncrement(emptyList(), emptyList(), emptyList()),
                             new CompactIncrement(singletonList(file), emptyList(), emptyList()),
                             new IndexIncrement(emptyList()));
@@ -114,6 +121,7 @@ class PartitionMarkDoneTest extends TableTestBase {
                     new CommitMessageImpl(
                             BinaryRow.singleColumn(0),
                             0,
+                            1,
                             new DataIncrement(singletonList(file), emptyList(), emptyList()),
                             new CompactIncrement(emptyList(), emptyList(), emptyList()),
                             new IndexIncrement(emptyList()));
@@ -122,7 +130,7 @@ class PartitionMarkDoneTest extends TableTestBase {
         markDone.notifyCommittable(singletonList(committable));
     }
 
-    private static class MockOperatorStateStore implements OperatorStateStore {
+    public static class MockOperatorStateStore implements OperatorStateStore {
 
         @Override
         public <K, V> BroadcastState<K, V> getBroadcastState(
@@ -140,6 +148,27 @@ class PartitionMarkDoneTest extends TableTestBase {
             throw new UnsupportedOperationException();
         }
 
+        // @Override is skipped for compatibility with Flink 1.x.
+        public <K, V> BroadcastState<K, V> getBroadcastState(
+                org.apache.flink.api.common.state.v2.MapStateDescriptor<K, V> mapStateDescriptor)
+                throws Exception {
+            throw new UnsupportedOperationException();
+        }
+
+        // @Override is skipped for compatibility with Flink 1.x.
+        public <S> org.apache.flink.api.common.state.v2.ListState<S> getListState(
+                org.apache.flink.api.common.state.v2.ListStateDescriptor<S> listStateDescriptor)
+                throws Exception {
+            throw new UnsupportedOperationException();
+        }
+
+        // @Override is skipped for compatibility with Flink 1.x.
+        public <S> org.apache.flink.api.common.state.v2.ListState<S> getUnionListState(
+                org.apache.flink.api.common.state.v2.ListStateDescriptor<S> listStateDescriptor)
+                throws Exception {
+            throw new UnsupportedOperationException();
+        }
+
         @Override
         public Set<String> getRegisteredStateNames() {
             throw new UnsupportedOperationException();
@@ -151,7 +180,7 @@ class PartitionMarkDoneTest extends TableTestBase {
         }
     }
 
-    private static class MockListState<T> implements ListState<T> {
+    public static class MockListState<T> implements ListState<T> {
 
         private final List<T> backingList = new ArrayList<>();
 

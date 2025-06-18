@@ -18,17 +18,27 @@
 
 package org.apache.paimon.flink.sink;
 
-import org.apache.paimon.flink.source.AppendBypassCoordinateOperator;
+import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.compact.UnawareBucketNewFilesCompactionCoordinatorOperator;
+import org.apache.paimon.flink.compact.UnawareBucketNewFilesCompactionWorkerOperator;
+import org.apache.paimon.flink.source.AppendBypassCoordinateOperatorFactory;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 
 import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.java.typeutils.EitherTypeInfo;
+import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 
 import javax.annotation.Nullable;
 
 import java.util.Map;
+
+import static org.apache.paimon.flink.utils.ParallelismUtils.forwardParallelism;
+import static org.apache.paimon.flink.utils.ParallelismUtils.setParallelism;
 
 /**
  * Sink for unaware-bucket table.
@@ -59,6 +69,29 @@ public abstract class UnawareBucketSink<T> extends FlinkWriteSink<T> {
             DataStream<T> input, String initialCommitUser, @Nullable Integer parallelism) {
         DataStream<Committable> written = super.doWrite(input, initialCommitUser, this.parallelism);
 
+        Options options = new Options(table.options());
+        if (options.get(FlinkConnectorOptions.PRECOMMIT_COMPACT)) {
+            SingleOutputStreamOperator<Committable> newWritten =
+                    written.transform(
+                                    "New Files Compact Coordinator: " + table.name(),
+                                    new EitherTypeInfo<>(
+                                            new CommittableTypeInfo(),
+                                            new TupleTypeInfo<>(
+                                                    BasicTypeInfo.LONG_TYPE_INFO,
+                                                    new CompactionTaskTypeInfo())),
+                                    new UnawareBucketNewFilesCompactionCoordinatorOperator(
+                                            table.coreOptions()))
+                            .startNewChain()
+                            .forceNonParallel()
+                            .transform(
+                                    "New Files Compact Worker: " + table.name(),
+                                    new CommittableTypeInfo(),
+                                    new UnawareBucketNewFilesCompactionWorkerOperator(table))
+                            .startNewChain();
+            forwardParallelism(newWritten, written);
+            written = newWritten;
+        }
+
         boolean enableCompaction = !table.coreOptions().writeOnly();
         boolean isStreamingMode =
                 input.getExecutionEnvironment()
@@ -67,19 +100,23 @@ public abstract class UnawareBucketSink<T> extends FlinkWriteSink<T> {
                         == RuntimeExecutionMode.STREAMING;
         // if enable compaction, we need to add compaction topology to this job
         if (enableCompaction && isStreamingMode) {
-            written =
+            SingleOutputStreamOperator<Committable> newWritten =
                     written.transform(
                                     "Compact Coordinator: " + table.name(),
                                     new EitherTypeInfo<>(
                                             new CommittableTypeInfo(),
                                             new CompactionTaskTypeInfo()),
-                                    new AppendBypassCoordinateOperator<>(table))
+                                    new AppendBypassCoordinateOperatorFactory<>(table))
+                            .startNewChain()
                             .forceNonParallel()
                             .transform(
                                     "Compact Worker: " + table.name(),
                                     new CommittableTypeInfo(),
-                                    new AppendBypassCompactWorkerOperator(table, initialCommitUser))
-                            .setParallelism(written.getParallelism());
+                                    new AppendBypassCompactWorkerOperator.Factory(
+                                            table, initialCommitUser))
+                            .startNewChain();
+            setParallelism(newWritten, written.getParallelism(), false);
+            written = newWritten;
         }
 
         return written;

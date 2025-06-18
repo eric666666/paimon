@@ -20,9 +20,11 @@ package org.apache.paimon.privilege;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.FileStore;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.index.IndexFileHandler;
+import org.apache.paimon.manifest.IndexManifestFile;
 import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.manifest.ManifestList;
@@ -34,20 +36,25 @@ import org.apache.paimon.operation.PartitionExpire;
 import org.apache.paimon.operation.SnapshotDeletion;
 import org.apache.paimon.operation.SplitRead;
 import org.apache.paimon.operation.TagDeletion;
+import org.apache.paimon.partition.PartitionExpireStrategy;
 import org.apache.paimon.service.ServiceManager;
 import org.apache.paimon.stats.StatsFileHandler;
 import org.apache.paimon.table.BucketMode;
-import org.apache.paimon.table.sink.CommitCallback;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.TagCallback;
 import org.apache.paimon.tag.TagAutoManager;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.SegmentsCache;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
 
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
+
 import javax.annotation.Nullable;
 
+import java.time.Duration;
 import java.util.List;
 
 /** {@link FileStore} with privilege checks. */
@@ -71,8 +78,14 @@ public class PrivilegedFileStore<T> implements FileStore<T> {
 
     @Override
     public SnapshotManager snapshotManager() {
-        privilegeChecker.assertCanSelect(identifier);
+        privilegeChecker.assertCanSelectOrInsert(identifier);
         return wrapped.snapshotManager();
+    }
+
+    @Override
+    public ChangelogManager changelogManager() {
+        privilegeChecker.assertCanSelectOrInsert(identifier);
+        return wrapped.changelogManager();
     }
 
     @Override
@@ -107,6 +120,11 @@ public class PrivilegedFileStore<T> implements FileStore<T> {
     }
 
     @Override
+    public IndexManifestFile.Factory indexManifestFileFactory() {
+        return wrapped.indexManifestFileFactory();
+    }
+
+    @Override
     public IndexFileHandler newIndexFileHandler() {
         return wrapped.newIndexFileHandler();
     }
@@ -135,15 +153,9 @@ public class PrivilegedFileStore<T> implements FileStore<T> {
     }
 
     @Override
-    public FileStoreCommit newCommit(String commitUser) {
+    public FileStoreCommit newCommit(String commitUser, FileStoreTable table) {
         privilegeChecker.assertCanInsert(identifier);
-        return wrapped.newCommit(commitUser);
-    }
-
-    @Override
-    public FileStoreCommit newCommit(String commitUser, List<CommitCallback> callbacks) {
-        privilegeChecker.assertCanInsert(identifier);
-        return wrapped.newCommit(commitUser, callbacks);
+        return wrapped.newCommit(commitUser, table);
     }
 
     @Override
@@ -172,9 +184,21 @@ public class PrivilegedFileStore<T> implements FileStore<T> {
 
     @Nullable
     @Override
-    public PartitionExpire newPartitionExpire(String commitUser) {
+    public PartitionExpire newPartitionExpire(String commitUser, FileStoreTable table) {
         privilegeChecker.assertCanInsert(identifier);
-        return wrapped.newPartitionExpire(commitUser);
+        return wrapped.newPartitionExpire(commitUser, table);
+    }
+
+    @Override
+    public PartitionExpire newPartitionExpire(
+            String commitUser,
+            FileStoreTable table,
+            Duration expirationTime,
+            Duration checkInterval,
+            PartitionExpireStrategy expireStrategy) {
+        privilegeChecker.assertCanInsert(identifier);
+        return wrapped.newPartitionExpire(
+                commitUser, table, expirationTime, checkInterval, expireStrategy);
     }
 
     @Override
@@ -203,5 +227,10 @@ public class PrivilegedFileStore<T> implements FileStore<T> {
     @Override
     public void setManifestCache(SegmentsCache<Path> manifestCache) {
         wrapped.setManifestCache(manifestCache);
+    }
+
+    @Override
+    public void setSnapshotCache(Cache<Path, Snapshot> cache) {
+        wrapped.setSnapshotCache(cache);
     }
 }

@@ -22,6 +22,7 @@ import org.apache.paimon.data.Decimal;
 import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.LocalZoneTimestamp;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.BinaryType;
@@ -43,6 +44,7 @@ import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
+import org.apache.paimon.types.VariantType;
 
 import org.apache.hadoop.hive.common.type.HiveDecimal;
 import org.apache.hadoop.hive.ql.exec.vector.BytesColumnVector;
@@ -61,8 +63,6 @@ import java.util.stream.Collectors;
 
 /** Factory to create {@link FieldWriter}. */
 public class FieldWriterFactory implements DataTypeVisitor<FieldWriter> {
-
-    public static final FieldWriterFactory WRITER_FACTORY = new FieldWriterFactory();
 
     private static final FieldWriter STRING_WRITER =
             (rowId, column, getters, columnId) -> {
@@ -106,6 +106,12 @@ public class FieldWriterFactory implements DataTypeVisitor<FieldWriter> {
     private static final FieldWriter DOUBLE_WRITER =
             (rowId, column, getters, columnId) ->
                     ((DoubleColumnVector) column).vector[rowId] = getters.getDouble(columnId);
+
+    private final boolean legacyTimestampLtzType;
+
+    public FieldWriterFactory(boolean legacyTimestampLtzType) {
+        this.legacyTimestampLtzType = legacyTimestampLtzType;
+    }
 
     @Override
     public FieldWriter visit(CharType charType) {
@@ -185,12 +191,28 @@ public class FieldWriterFactory implements DataTypeVisitor<FieldWriter> {
     @Override
     public FieldWriter visit(LocalZonedTimestampType localZonedTimestampType) {
         return (rowId, column, getters, columnId) -> {
-            Timestamp timestamp =
-                    getters.getTimestamp(columnId, localZonedTimestampType.getPrecision())
-                            .toSQLTimestamp();
+            org.apache.paimon.data.Timestamp localTimestamp =
+                    getters.getTimestamp(columnId, localZonedTimestampType.getPrecision());
+            Timestamp timestamp;
+
+            if (legacyTimestampLtzType) {
+                timestamp = localTimestamp.toSQLTimestamp();
+            } else {
+                LocalZoneTimestamp localZoneTimestamp =
+                        LocalZoneTimestamp.fromEpochMillis(
+                                localTimestamp.getMillisecond(),
+                                localTimestamp.getNanoOfMillisecond());
+                timestamp = java.sql.Timestamp.from(localZoneTimestamp.toInstant());
+            }
+
             TimestampColumnVector vector = (TimestampColumnVector) column;
             vector.set(rowId, timestamp);
         };
+    }
+
+    @Override
+    public FieldWriter visit(VariantType variantType) {
+        throw new UnsupportedOperationException("Unsupported type: " + variantType);
     }
 
     @Override

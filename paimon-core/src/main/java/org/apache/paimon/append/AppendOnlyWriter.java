@@ -19,7 +19,9 @@
 package org.apache.paimon.append;
 
 import org.apache.paimon.annotation.VisibleForTesting;
+import org.apache.paimon.compact.CompactDeletionFile;
 import org.apache.paimon.compact.CompactManager;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.disk.IOManager;
@@ -27,12 +29,11 @@ import org.apache.paimon.disk.RowBuffer;
 import org.apache.paimon.fileindex.FileIndexOptions;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.fs.FileIO;
-import org.apache.paimon.index.IndexFileMeta;
+import org.apache.paimon.io.BundleRecords;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFilePathFactory;
 import org.apache.paimon.io.DataIncrement;
-import org.apache.paimon.io.IndexIncrement;
 import org.apache.paimon.io.RowDataRollingFileWriter;
 import org.apache.paimon.manifest.FileSource;
 import org.apache.paimon.memory.MemoryOwner;
@@ -41,6 +42,7 @@ import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.statistics.SimpleColStatsCollector;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.BatchRecordWriter;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.IOFunction;
 import org.apache.paimon.utils.IOUtils;
@@ -61,7 +63,7 @@ import java.util.concurrent.ExecutionException;
  * A {@link RecordWriter} implementation that only accepts records which are always insert
  * operations and don't have any unique keys or sort keys.
  */
-public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner {
+public class AppendOnlyWriter implements BatchRecordWriter, MemoryOwner {
 
     private final FileIO fileIO;
     private final long schemaId;
@@ -73,15 +75,15 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
     private final IOFunction<List<DataFileMeta>, RecordReaderIterator<InternalRow>> bucketFileRead;
     private final boolean forceCompact;
     private final boolean asyncFileWrite;
+    private final boolean statsDenseStore;
     private final List<DataFileMeta> newFiles;
     private final List<DataFileMeta> deletedFiles;
     private final List<DataFileMeta> compactBefore;
     private final List<DataFileMeta> compactAfter;
-    private final List<IndexFileMeta> indexFilesBefore;
-    private final List<IndexFileMeta> indexFilesAfter;
+    @Nullable private CompactDeletionFile compactDeletionFile;
     private final LongCounter seqNumCounter;
     private final String fileCompression;
-    private final String spillCompression;
+    private final CompressOptions spillCompression;
     private SinkWriter sinkWriter;
     private final SimpleColStatsCollector.Factory[] statsCollectors;
     @Nullable private final IOManager ioManager;
@@ -106,11 +108,12 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
             boolean useWriteBuffer,
             boolean spillable,
             String fileCompression,
-            String spillCompression,
+            CompressOptions spillCompression,
             SimpleColStatsCollector.Factory[] statsCollectors,
             MemorySize maxDiskSize,
             FileIndexOptions fileIndexOptions,
-            boolean asyncFileWrite) {
+            boolean asyncFileWrite,
+            boolean statsDenseStore) {
         this.fileIO = fileIO;
         this.schemaId = schemaId;
         this.fileFormat = fileFormat;
@@ -121,12 +124,11 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
         this.bucketFileRead = bucketFileRead;
         this.forceCompact = forceCompact;
         this.asyncFileWrite = asyncFileWrite;
+        this.statsDenseStore = statsDenseStore;
         this.newFiles = new ArrayList<>();
         this.deletedFiles = new ArrayList<>();
         this.compactBefore = new ArrayList<>();
         this.compactAfter = new ArrayList<>();
-        this.indexFilesBefore = new ArrayList<>();
-        this.indexFilesAfter = new ArrayList<>();
         this.seqNumCounter = new LongCounter(maxSequenceNumber + 1);
         this.fileCompression = fileCompression;
         this.spillCompression = spillCompression;
@@ -145,10 +147,7 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
             deletedFiles.addAll(increment.newFilesIncrement().deletedFiles());
             compactBefore.addAll(increment.compactIncrement().compactBefore());
             compactAfter.addAll(increment.compactIncrement().compactAfter());
-            if (increment.indexIncrement() != null) {
-                indexFilesBefore.addAll(increment.indexIncrement().deletedIndexFiles());
-                indexFilesAfter.addAll(increment.indexIncrement().newIndexFiles());
-            }
+            updateCompactDeletionFile(increment.compactDeletionFile());
         }
     }
 
@@ -169,6 +168,17 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
                 // code in SpillableBuffer.)
                 throw new RuntimeException("Mem table is too small to hold a single element.");
             }
+        }
+    }
+
+    @Override
+    public void writeBundle(BundleRecords bundle) throws Exception {
+        if (sinkWriter instanceof BufferedSinkWriter) {
+            for (InternalRow row : bundle) {
+                write(row);
+            }
+        } else {
+            ((DirectSinkWriter) sinkWriter).writeBundle(bundle);
         }
     }
 
@@ -200,8 +210,9 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
     }
 
     @Override
-    public boolean isCompacting() {
-        return compactManager.isCompacting();
+    public boolean compactNotCompleted() {
+        compactManager.triggerCompaction(false);
+        return compactManager.compactNotCompleted();
     }
 
     @VisibleForTesting
@@ -233,10 +244,14 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
         for (DataFileMeta file : compactAfter) {
             // appendOnlyCompactManager will rewrite the file and no file upgrade will occur, so we
             // can directly delete the file in compactAfter.
-            fileIO.deleteQuietly(pathFactory.toPath(file.fileName()));
+            fileIO.deleteQuietly(pathFactory.toPath(file));
         }
 
         sinkWriter.close();
+
+        if (compactDeletionFile != null) {
+            compactDeletionFile.clean();
+        }
     }
 
     public void toBufferedWriter() throws Exception {
@@ -256,7 +271,7 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
             } finally {
                 // remove small files
                 for (DataFileMeta file : files) {
-                    fileIO.deleteQuietly(pathFactory.toPath(file.fileName()));
+                    fileIO.deleteQuietly(pathFactory.toPath(file));
                 }
             }
         }
@@ -275,7 +290,8 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
                 statsCollectors,
                 fileIndexOptions,
                 FileSource.APPEND,
-                asyncFileWrite);
+                asyncFileWrite,
+                statsDenseStore);
     }
 
     private void trySyncLatestCompaction(boolean blocking)
@@ -286,12 +302,17 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
                         result -> {
                             compactBefore.addAll(result.before());
                             compactAfter.addAll(result.after());
-                            if (result.indexIncrement() != null) {
-                                indexFilesBefore.addAll(
-                                        result.indexIncrement().deletedIndexFiles());
-                                indexFilesAfter.addAll(result.indexIncrement().newIndexFiles());
-                            }
+                            updateCompactDeletionFile(result.deletionFile());
                         });
+    }
+
+    private void updateCompactDeletionFile(@Nullable CompactDeletionFile newDeletionFile) {
+        if (newDeletionFile != null) {
+            compactDeletionFile =
+                    compactDeletionFile == null
+                            ? newDeletionFile
+                            : newDeletionFile.mergeOldFile(compactDeletionFile);
+        }
     }
 
     private CommitIncrement drainIncrement() {
@@ -305,22 +326,15 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
                         new ArrayList<>(compactBefore),
                         new ArrayList<>(compactAfter),
                         Collections.emptyList());
-
-        IndexIncrement indexIncrement = null;
-        if (!indexFilesBefore.isEmpty() || !indexFilesAfter.isEmpty()) {
-            indexIncrement =
-                    new IndexIncrement(
-                            new ArrayList<>(indexFilesAfter), new ArrayList<>(indexFilesBefore));
-        }
+        CompactDeletionFile drainDeletionFile = compactDeletionFile;
 
         newFiles.clear();
         deletedFiles.clear();
         compactBefore.clear();
         compactAfter.clear();
-        indexFilesBefore.clear();
-        indexFilesAfter.clear();
+        compactDeletionFile = null;
 
-        return new CommitIncrement(dataIncrement, compactIncrement, indexIncrement, null);
+        return new CommitIncrement(dataIncrement, compactIncrement, drainDeletionFile);
     }
 
     @Override
@@ -391,6 +405,13 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
             return true;
         }
 
+        public void writeBundle(BundleRecords bundle) throws IOException {
+            if (writer == null) {
+                writer = createRollingRowWriter();
+            }
+            writer.writeBundle(bundle);
+        }
+
         @Override
         public List<DataFileMeta> flush() throws IOException {
             List<DataFileMeta> flushedFiles = new ArrayList<>();
@@ -441,11 +462,12 @@ public class AppendOnlyWriter implements RecordWriter<InternalRow>, MemoryOwner 
 
         private final MemorySize maxDiskSize;
 
-        private final String compression;
+        private final CompressOptions compression;
 
         private RowBuffer writeBuffer;
 
-        private BufferedSinkWriter(boolean spillable, MemorySize maxDiskSize, String compression) {
+        private BufferedSinkWriter(
+                boolean spillable, MemorySize maxDiskSize, CompressOptions compression) {
             this.spillable = spillable;
             this.maxDiskSize = maxDiskSize;
             this.compression = compression;

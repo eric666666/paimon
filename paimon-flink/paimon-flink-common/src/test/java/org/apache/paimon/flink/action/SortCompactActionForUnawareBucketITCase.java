@@ -285,10 +285,9 @@ public class SortCompactActionForUnawareBucketITCase extends ActionITCaseBase {
         createTable();
         SortCompactAction sortCompactAction =
                 new SortCompactAction(
-                                warehouse,
                                 database,
                                 tableName,
-                                Collections.emptyMap(),
+                                Collections.singletonMap("warehouse", warehouse),
                                 Collections.singletonMap(
                                         FlinkConnectorOptions.SINK_PARALLELISM.key(), "20"))
                         .withOrderStrategy("zorder")
@@ -323,10 +322,9 @@ public class SortCompactActionForUnawareBucketITCase extends ActionITCaseBase {
         createTable();
         SortCompactAction sortCompactAction =
                 new SortCompactAction(
-                                warehouse,
                                 database,
                                 tableName,
-                                Collections.emptyMap(),
+                                Collections.singletonMap("warehouse", warehouse),
                                 Collections.emptyMap())
                         .withOrderStrategy("zorder")
                         .withOrderColumns(Collections.singletonList("f0"));
@@ -402,7 +400,7 @@ public class SortCompactActionForUnawareBucketITCase extends ActionITCaseBase {
         }
     }
 
-    private void createTable() throws Exception {
+    protected void createTable() throws Exception {
         catalog.createDatabase(database, true);
         catalog.createTable(identifier(), schema(), true);
     }

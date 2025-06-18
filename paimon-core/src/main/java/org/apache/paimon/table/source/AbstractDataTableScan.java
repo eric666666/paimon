@@ -20,45 +20,54 @@ package org.apache.paimon.table.source;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.CoreOptions.ChangelogProducer;
-import org.apache.paimon.annotation.VisibleForTesting;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.consumer.Consumer;
 import org.apache.paimon.consumer.ConsumerManager;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.manifest.PartitionEntry;
 import org.apache.paimon.metrics.MetricRegistry;
 import org.apache.paimon.operation.FileStoreScan;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.source.snapshot.CompactedStartingScanner;
 import org.apache.paimon.table.source.snapshot.ContinuousCompactorStartingScanner;
 import org.apache.paimon.table.source.snapshot.ContinuousFromSnapshotFullStartingScanner;
 import org.apache.paimon.table.source.snapshot.ContinuousFromSnapshotStartingScanner;
 import org.apache.paimon.table.source.snapshot.ContinuousFromTimestampStartingScanner;
 import org.apache.paimon.table.source.snapshot.ContinuousLatestStartingScanner;
+import org.apache.paimon.table.source.snapshot.EmptyResultStartingScanner;
 import org.apache.paimon.table.source.snapshot.FileCreationTimeStartingScanner;
 import org.apache.paimon.table.source.snapshot.FullCompactedStartingScanner;
 import org.apache.paimon.table.source.snapshot.FullStartingScanner;
-import org.apache.paimon.table.source.snapshot.IncrementalStartingScanner;
-import org.apache.paimon.table.source.snapshot.IncrementalTagStartingScanner;
-import org.apache.paimon.table.source.snapshot.IncrementalTimeStampStartingScanner;
+import org.apache.paimon.table.source.snapshot.IncrementalDeltaStartingScanner;
+import org.apache.paimon.table.source.snapshot.IncrementalDiffStartingScanner;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.table.source.snapshot.StartingScanner;
 import org.apache.paimon.table.source.snapshot.StaticFromSnapshotStartingScanner;
 import org.apache.paimon.table.source.snapshot.StaticFromTagStartingScanner;
 import org.apache.paimon.table.source.snapshot.StaticFromTimestampStartingScanner;
 import org.apache.paimon.table.source.snapshot.StaticFromWatermarkStartingScanner;
+import org.apache.paimon.tag.Tag;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SnapshotManager;
+import org.apache.paimon.utils.TagManager;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.apache.paimon.CoreOptions.FULL_COMPACTION_DELTA_COMMITS;
+import static org.apache.paimon.CoreOptions.IncrementalBetweenScanMode.DIFF;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
 
 /** An abstraction layer above {@link FileStoreScan} to provide input split generation. */
-public abstract class AbstractDataTableScan implements DataTableScan {
+abstract class AbstractDataTableScan implements DataTableScan {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractDataTableScan.class);
 
     private final CoreOptions options;
     protected final SnapshotReader snapshotReader;
@@ -68,7 +77,7 @@ public abstract class AbstractDataTableScan implements DataTableScan {
         this.snapshotReader = snapshotReader;
     }
 
-    @VisibleForTesting
+    @Override
     public AbstractDataTableScan withBucket(int bucket) {
         snapshotReader.withBucket(bucket);
         return this;
@@ -93,6 +102,12 @@ public abstract class AbstractDataTableScan implements DataTableScan {
     }
 
     @Override
+    public AbstractDataTableScan withPartitionsFilter(List<Map<String, String>> partitions) {
+        snapshotReader.withPartitionsFilter(partitions);
+        return this;
+    }
+
+    @Override
     public AbstractDataTableScan withLevelFilter(Filter<Integer> levelFilter) {
         snapshotReader.withLevelFilter(levelFilter);
         return this;
@@ -103,12 +118,19 @@ public abstract class AbstractDataTableScan implements DataTableScan {
         return this;
     }
 
+    @Override
+    public AbstractDataTableScan dropStats() {
+        snapshotReader.dropStats();
+        return this;
+    }
+
     public CoreOptions options() {
         return options;
     }
 
     protected StartingScanner createStartingScanner(boolean isStreaming) {
         SnapshotManager snapshotManager = snapshotReader.snapshotManager();
+        ChangelogManager changelogManager = snapshotReader.changelogManager();
         CoreOptions.StreamScanMode type =
                 options.toConfiguration().get(CoreOptions.STREAM_SCAN_MODE);
         switch (type) {
@@ -116,7 +138,6 @@ public abstract class AbstractDataTableScan implements DataTableScan {
                 checkArgument(
                         isStreaming, "Set 'streaming-compact' in batch mode. This is unexpected.");
                 return new ContinuousCompactorStartingScanner(snapshotManager);
-            case COMPACT_APPEND_NO_BUCKET:
             case FILE_MONITOR:
                 return new FullStartingScanner(snapshotManager);
         }
@@ -129,6 +150,7 @@ public abstract class AbstractDataTableScan implements DataTableScan {
             if (consumer.isPresent()) {
                 return new ContinuousFromSnapshotStartingScanner(
                         snapshotManager,
+                        changelogManager,
                         consumer.get().nextSnapshot(),
                         options.changelogLifecycleDecoupled());
             }
@@ -158,6 +180,7 @@ public abstract class AbstractDataTableScan implements DataTableScan {
                 return isStreaming
                         ? new ContinuousFromTimestampStartingScanner(
                                 snapshotManager,
+                                changelogManager,
                                 startupMillis,
                                 options.changelogLifecycleDecoupled())
                         : new StaticFromTimestampStartingScanner(snapshotManager, startupMillis);
@@ -169,6 +192,7 @@ public abstract class AbstractDataTableScan implements DataTableScan {
                     return isStreaming
                             ? new ContinuousFromSnapshotStartingScanner(
                                     snapshotManager,
+                                    changelogManager,
                                     options.scanSnapshotId(),
                                     options.changelogLifecycleDecoupled())
                             : new StaticFromSnapshotStartingScanner(
@@ -195,55 +219,120 @@ public abstract class AbstractDataTableScan implements DataTableScan {
                         : new StaticFromSnapshotStartingScanner(snapshotManager, scanSnapshotId);
             case INCREMENTAL:
                 checkArgument(!isStreaming, "Cannot read incremental in streaming mode.");
-                Pair<String, String> incrementalBetween = options.incrementalBetween();
-                CoreOptions.IncrementalBetweenScanMode scanType =
-                        options.incrementalBetweenScanMode();
-                ScanMode scanMode;
-                switch (scanType) {
-                    case AUTO:
-                        scanMode =
-                                options.changelogProducer() == ChangelogProducer.NONE
-                                        ? ScanMode.DELTA
-                                        : ScanMode.CHANGELOG;
-                        break;
-                    case DELTA:
-                        scanMode = ScanMode.DELTA;
-                        break;
-                    case CHANGELOG:
-                        scanMode = ScanMode.CHANGELOG;
-                        break;
-                    default:
-                        throw new UnsupportedOperationException(
-                                "Unknown incremental scan type " + scanType.name());
-                }
-                if (options.toMap().get(CoreOptions.INCREMENTAL_BETWEEN.key()) != null) {
-                    try {
-                        return new IncrementalStartingScanner(
-                                snapshotManager,
-                                Long.parseLong(incrementalBetween.getLeft()),
-                                Long.parseLong(incrementalBetween.getRight()),
-                                scanMode);
-                    } catch (NumberFormatException e) {
-                        return new IncrementalTagStartingScanner(
-                                snapshotManager,
-                                incrementalBetween.getLeft(),
-                                incrementalBetween.getRight());
-                    }
-                } else {
-                    return new IncrementalTimeStampStartingScanner(
-                            snapshotManager,
-                            Long.parseLong(incrementalBetween.getLeft()),
-                            Long.parseLong(incrementalBetween.getRight()),
-                            scanMode);
-                }
+                return createIncrementalStartingScanner(snapshotManager);
             default:
                 throw new UnsupportedOperationException(
                         "Unknown startup mode " + startupMode.name());
         }
     }
 
-    @Override
-    public List<PartitionEntry> listPartitionEntries() {
-        return snapshotReader.partitionEntries();
+    private StartingScanner createIncrementalStartingScanner(SnapshotManager snapshotManager) {
+        Options conf = options.toConfiguration();
+
+        if (conf.contains(CoreOptions.INCREMENTAL_BETWEEN)) {
+            Pair<String, String> incrementalBetween = options.incrementalBetween();
+
+            TagManager tagManager =
+                    new TagManager(
+                            snapshotManager.fileIO(),
+                            snapshotManager.tablePath(),
+                            snapshotManager.branch());
+            Optional<Tag> startTag = tagManager.get(incrementalBetween.getLeft());
+            Optional<Tag> endTag = tagManager.get(incrementalBetween.getRight());
+
+            if (startTag.isPresent() && endTag.isPresent()) {
+                return IncrementalDiffStartingScanner.betweenTags(
+                        startTag.get(), endTag.get(), snapshotManager, incrementalBetween);
+            } else {
+                long startId, endId;
+                try {
+                    startId = Long.parseLong(incrementalBetween.getLeft());
+                    endId = Long.parseLong(incrementalBetween.getRight());
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "Didn't find two tags for start '%s' and end '%s', and they are not two snapshot Ids. "
+                                            + "Please set two tags or two snapshot Ids.",
+                                    incrementalBetween.getLeft(), incrementalBetween.getRight()));
+                }
+
+                checkArgument(
+                        endId >= startId,
+                        "Ending snapshotId should >= starting snapshotId %s.",
+                        endId,
+                        startId);
+
+                if (snapshotManager.earliestSnapshot() == null) {
+                    LOG.warn("There is currently no snapshot. Waiting for snapshot generation.");
+                    return new EmptyResultStartingScanner(snapshotManager);
+                }
+
+                if (startId == endId) {
+                    return new EmptyResultStartingScanner(snapshotManager);
+                }
+
+                CoreOptions.IncrementalBetweenScanMode scanMode =
+                        options.incrementalBetweenScanMode();
+                return scanMode == DIFF
+                        ? IncrementalDiffStartingScanner.betweenSnapshotIds(
+                                startId, endId, snapshotManager)
+                        : IncrementalDeltaStartingScanner.betweenSnapshotIds(
+                                startId, endId, snapshotManager, toSnapshotScanMode(scanMode));
+            }
+        } else if (conf.contains(CoreOptions.INCREMENTAL_BETWEEN_TIMESTAMP)) {
+            Pair<Long, Long> incrementalBetween = options.incrementalBetweenTimestamp();
+
+            Snapshot earliestSnapshot = snapshotManager.earliestSnapshot();
+            Snapshot latestSnapshot = snapshotManager.latestSnapshot();
+            if (earliestSnapshot == null || latestSnapshot == null) {
+                return new EmptyResultStartingScanner(snapshotManager);
+            }
+
+            long startTimestamp = incrementalBetween.getLeft();
+            long endTimestamp = incrementalBetween.getRight();
+            checkArgument(
+                    endTimestamp >= startTimestamp,
+                    "Ending timestamp %s should be >= starting timestamp %s.",
+                    endTimestamp,
+                    startTimestamp);
+
+            if (startTimestamp == endTimestamp
+                    || startTimestamp > latestSnapshot.timeMillis()
+                    || endTimestamp < earliestSnapshot.timeMillis()) {
+                return new EmptyResultStartingScanner(snapshotManager);
+            }
+
+            CoreOptions.IncrementalBetweenScanMode scanMode = options.incrementalBetweenScanMode();
+
+            return scanMode == DIFF
+                    ? IncrementalDiffStartingScanner.betweenTimestamps(
+                            startTimestamp, endTimestamp, snapshotManager)
+                    : IncrementalDeltaStartingScanner.betweenTimestamps(
+                            startTimestamp,
+                            endTimestamp,
+                            snapshotManager,
+                            toSnapshotScanMode(scanMode));
+        } else if (conf.contains(CoreOptions.INCREMENTAL_TO_AUTO_TAG)) {
+            String endTag = options.incrementalToAutoTag();
+            return IncrementalDiffStartingScanner.toEndAutoTag(snapshotManager, endTag, options);
+        } else {
+            throw new UnsupportedOperationException("Unknown incremental read mode.");
+        }
+    }
+
+    private ScanMode toSnapshotScanMode(CoreOptions.IncrementalBetweenScanMode scanMode) {
+        switch (scanMode) {
+            case AUTO:
+                return options.changelogProducer() == ChangelogProducer.NONE
+                        ? ScanMode.DELTA
+                        : ScanMode.CHANGELOG;
+            case DELTA:
+                return ScanMode.DELTA;
+            case CHANGELOG:
+                return ScanMode.CHANGELOG;
+            default:
+                throw new UnsupportedOperationException(
+                        "Unsupported incremental scan mode " + scanMode.name());
+        }
     }
 }

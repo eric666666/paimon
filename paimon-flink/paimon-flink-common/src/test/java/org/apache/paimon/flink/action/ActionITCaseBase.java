@@ -32,8 +32,10 @@ import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.StreamTableCommit;
 import org.apache.paimon.table.sink.StreamTableWrite;
+import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
+import org.apache.paimon.table.source.TableScan;
 import org.apache.paimon.types.RowType;
 
 import org.apache.flink.table.api.TableEnvironment;
@@ -45,6 +47,7 @@ import org.junit.jupiter.api.BeforeEach;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -142,6 +145,22 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
         incrementalIdentifier++;
     }
 
+    protected List<InternalRow> getData(String tableName) throws Exception {
+        List<InternalRow> result = new ArrayList<>();
+
+        FileStoreTable table = this.getFileStoreTable(tableName);
+
+        ReadBuilder readBuilder = table.newReadBuilder();
+        TableScan.Plan plan = readBuilder.newScan().plan();
+        List<Split> splits = plan == null ? Collections.emptyList() : plan.splits();
+        TableRead read = readBuilder.newRead();
+        try (RecordReader<InternalRow> recordReader = read.createReader(splits)) {
+            recordReader.forEachRemaining(result::add);
+        }
+
+        return result;
+    }
+
     protected List<String> getResult(TableRead read, List<Split> splits, RowType rowType)
             throws Exception {
         try (RecordReader<InternalRow> recordReader = read.createReader(splits)) {
@@ -191,12 +210,12 @@ public abstract class ActionITCaseBase extends AbstractTestBase {
         }
     }
 
-    protected CloseableIterator<Row> callProcedure(String procedureStatement) {
+    protected CloseableIterator<Row> executeSQL(String procedureStatement) {
         // default execution mode
-        return callProcedure(procedureStatement, true, false);
+        return executeSQL(procedureStatement, true, false);
     }
 
-    protected CloseableIterator<Row> callProcedure(
+    protected CloseableIterator<Row> executeSQL(
             String procedureStatement, boolean isStreaming, boolean dmlSync) {
         TableEnvironment tEnv;
         if (isStreaming) {

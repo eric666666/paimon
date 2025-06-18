@@ -23,13 +23,9 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.sink.StreamWriteBuilder;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.StreamTableScan;
 import org.apache.paimon.table.source.TableScan;
-import org.apache.paimon.types.DataType;
-import org.apache.paimon.types.DataTypes;
-import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommonTestUtils;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -55,12 +51,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** IT cases for {@link CompactAction}. */
 public class CompactActionITCase extends CompactActionITCaseBase {
-
-    private static final DataType[] FIELD_TYPES =
-            new DataType[] {DataTypes.INT(), DataTypes.INT(), DataTypes.INT(), DataTypes.STRING()};
-
-    private static final RowType ROW_TYPE =
-            RowType.of(FIELD_TYPES, new String[] {"k", "v", "hh", "dt"});
 
     @Test
     @Timeout(60)
@@ -167,7 +157,7 @@ public class CompactActionITCase extends CompactActionITCaseBase {
                         snapshotManager.latestSnapshotId() - 2
                                 == snapshotManager.earliestSnapshotId(),
                 Duration.ofSeconds(60_000),
-                Duration.ofSeconds(100),
+                Duration.ofSeconds(10),
                 String.format("Cannot validate snapshot expiration in %s milliseconds.", 60_000));
     }
 
@@ -189,7 +179,6 @@ public class CompactActionITCase extends CompactActionITCaseBase {
             Map<String, String> tableOptions = new HashMap<>();
             tableOptions.put(CoreOptions.BUCKET.key(), "-1");
             tableOptions.put(CoreOptions.COMPACTION_MIN_FILE_NUM.key(), "2");
-            tableOptions.put(CoreOptions.COMPACTION_MAX_FILE_NUM.key(), "2");
 
             table =
                     prepareTable(
@@ -250,7 +239,6 @@ public class CompactActionITCase extends CompactActionITCaseBase {
         tableOptions.put(CoreOptions.CONTINUOUS_DISCOVERY_INTERVAL.key(), "1s");
         tableOptions.put(CoreOptions.BUCKET.key(), "-1");
         tableOptions.put(CoreOptions.COMPACTION_MIN_FILE_NUM.key(), "2");
-        tableOptions.put(CoreOptions.COMPACTION_MAX_FILE_NUM.key(), "2");
 
         FileStoreTable table =
                 prepareTable(
@@ -272,7 +260,7 @@ public class CompactActionITCase extends CompactActionITCaseBase {
 
         checkLatestSnapshot(table, 2, Snapshot.CommitKind.APPEND);
 
-        // repairing that the ut don't specify the real parition of table
+        // repairing that the ut don't specify the real partition of table
         runActionForUnawareTable(true);
 
         // first compaction, snapshot will be 3
@@ -292,7 +280,6 @@ public class CompactActionITCase extends CompactActionITCaseBase {
         Map<String, String> tableOptions = new HashMap<>();
         tableOptions.put(CoreOptions.BUCKET.key(), "-1");
         tableOptions.put(CoreOptions.COMPACTION_MIN_FILE_NUM.key(), "2");
-        tableOptions.put(CoreOptions.COMPACTION_MAX_FILE_NUM.key(), "2");
 
         FileStoreTable table =
                 prepareTable(
@@ -314,7 +301,7 @@ public class CompactActionITCase extends CompactActionITCaseBase {
 
         checkLatestSnapshot(table, 2, Snapshot.CommitKind.APPEND);
 
-        // repairing that the ut don't specify the real parition of table
+        // repairing that the ut don't specify the real partition of table
         runActionForUnawareTable(false);
 
         // first compaction, snapshot will be 3.
@@ -366,7 +353,7 @@ public class CompactActionITCase extends CompactActionITCaseBase {
                 rowData(1, 100, 15, BinaryString.fromString("20221209")));
 
         Assertions.assertThatThrownBy(() -> runAction(false))
-                .hasMessage("Only parition key can be specialized in compaction action.");
+                .hasMessage("Only partition key can be specialized in compaction action.");
     }
 
     @Test
@@ -402,31 +389,6 @@ public class CompactActionITCase extends CompactActionITCaseBase {
                 .hasMessage("sort compact do not support 'partition_idle_time'.");
     }
 
-    private FileStoreTable prepareTable(
-            List<String> partitionKeys,
-            List<String> primaryKeys,
-            List<String> bucketKey,
-            Map<String, String> tableOptions)
-            throws Exception {
-        FileStoreTable table =
-                createFileStoreTable(ROW_TYPE, partitionKeys, primaryKeys, bucketKey, tableOptions);
-
-        StreamWriteBuilder streamWriteBuilder =
-                table.newStreamWriteBuilder().withCommitUser(commitUser);
-        write = streamWriteBuilder.newWrite();
-        commit = streamWriteBuilder.newCommit();
-
-        return table;
-    }
-
-    private void checkLatestSnapshot(
-            FileStoreTable table, long snapshotId, Snapshot.CommitKind commitKind) {
-        SnapshotManager snapshotManager = table.snapshotManager();
-        Snapshot snapshot = snapshotManager.snapshot(snapshotManager.latestSnapshotId());
-        assertThat(snapshot.id()).isEqualTo(snapshotId);
-        assertThat(snapshot.commitKind()).isEqualTo(commitKind);
-    }
-
     private void runAction(boolean isStreaming) throws Exception {
         runAction(isStreaming, false);
     }
@@ -444,17 +406,17 @@ public class CompactActionITCase extends CompactActionITCaseBase {
         }
 
         ArrayList<String> baseArgs =
-                Lists.newArrayList(
-                        "compact",
-                        "--warehouse",
-                        warehouse,
-                        "--database",
-                        database,
-                        "--table",
-                        tableName);
+                Lists.newArrayList("compact", "--database", database, "--table", tableName);
+
         ThreadLocalRandom random = ThreadLocalRandom.current();
+        if (random.nextBoolean()) {
+            baseArgs.addAll(Lists.newArrayList("--warehouse", warehouse));
+        } else {
+            baseArgs.addAll(Lists.newArrayList("--catalog_conf", "warehouse=" + warehouse));
+        }
+
         if (unawareBucket) {
-            if (true) {
+            if (random.nextBoolean()) {
                 baseArgs.addAll(Lists.newArrayList("--where", "k=1"));
             } else {
                 baseArgs.addAll(Lists.newArrayList("--partition", "k=1"));

@@ -32,6 +32,23 @@ Just like all other tables, Paimon tables can be queried with `SELECT` statement
 
 Paimon's batch read returns all the data in a snapshot of the table. By default, batch reads return the latest snapshot.
 
+```sql
+-- read all columns
+SELECT * FROM t;
+```
+
+Paimon also supports reading some hidden metadata columns, currently supporting the following columns:
+
+- `__paimon_file_path`: the file path of the record.
+- `__paimon_partition`: the partition of the record.
+- `__paimon_bucket`: the bucket of the record.
+- `__paimon_row_index`: the row index of the record.
+
+```sql
+-- read all columns and the corresponding file path, partition, bucket, rowIndex of the record
+SELECT *, __paimon_file_path, __paimon_partition, __paimon_bucket, __paimon_row_index FROM t;
+```
+
 ### Batch Time Travel
 
 Paimon batch reads with time travel can specify a snapshot or a tag and read the corresponding data.
@@ -75,15 +92,20 @@ For example:
 By default, will scan changelog files for the table which produces changelog files. Otherwise, scan newly changed files.
 You can also force specifying `'incremental-between-scan-mode'`.
 
-Requires Spark 3.2+.
-
 Paimon supports that use Spark SQL to do the incremental query that implemented by Spark Table Valued Function.
-
-you can use `paimon_incremental_query` in query to extract the incremental data:
 
 ```sql
 -- read the incremental data between snapshot id 12 and snapshot id 20.
 SELECT * FROM paimon_incremental_query('tableName', 12, 20);
+
+-- read the incremental data between ts 1692169900000 and ts 1692169900000.
+SELECT * FROM paimon_incremental_between_timestamp('tableName', '1692169000000', '1692169900000');
+SELECT * FROM paimon_incremental_between_timestamp('tableName', '2025-03-12 00:00:00', '2025-03-12 00:08:00');
+
+-- read the incremental data to tag '2024-12-04'.
+-- Paimon will find an earlier tag and return changes between them.
+-- If the tag doesn't exist or the earlier tag doesn't exist, return empty.
+SELECT * FROM paimon_incremental_to_auto_tag('tableName', '2024-12-04');
 ```
 
 In Batch SQL, the `DELETE` records are not allowed to be returned, so records of `-D` will be dropped.

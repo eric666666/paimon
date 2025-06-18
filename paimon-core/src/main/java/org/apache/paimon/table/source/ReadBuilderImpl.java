@@ -23,10 +23,9 @@ import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.table.InnerTable;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Filter;
-import org.apache.paimon.utils.Projection;
-import org.apache.paimon.utils.TypeUtils;
 
-import java.util.Arrays;
+import javax.annotation.Nullable;
+
 import java.util.Map;
 import java.util.Objects;
 
@@ -40,7 +39,6 @@ public class ReadBuilderImpl implements ReadBuilder {
     private final InnerTable table;
 
     private Predicate filter;
-    private int[][] projection;
 
     private Integer limit = null;
 
@@ -49,7 +47,12 @@ public class ReadBuilderImpl implements ReadBuilder {
 
     private Map<String, String> partitionSpec;
 
+    private @Nullable Integer specifiedBucket = null;
     private Filter<Integer> bucketFilter;
+
+    private @Nullable RowType readType;
+
+    private boolean dropStats = false;
 
     public ReadBuilderImpl(InnerTable table) {
         this.table = table;
@@ -62,10 +65,11 @@ public class ReadBuilderImpl implements ReadBuilder {
 
     @Override
     public RowType readType() {
-        if (projection == null) {
+        if (readType != null) {
+            return readType;
+        } else {
             return table.rowType();
         }
-        return TypeUtils.project(table.rowType(), Projection.of(projection).toTopLevelIndexes());
     }
 
     @Override
@@ -85,9 +89,23 @@ public class ReadBuilderImpl implements ReadBuilder {
     }
 
     @Override
-    public ReadBuilder withProjection(int[][] projection) {
-        this.projection = projection;
+    public ReadBuilder withReadType(RowType readType) {
+        RowType tableRowType = table.rowType();
+        checkState(
+                readType.isPrunedFrom(tableRowType),
+                "read row type must be a pruned type from table row type, read row type: %s, table row type: %s",
+                readType,
+                tableRowType);
+        this.readType = readType;
         return this;
+    }
+
+    @Override
+    public ReadBuilder withProjection(int[] projection) {
+        if (projection == null) {
+            return this;
+        }
+        return withReadType(table.rowType().project(projection));
     }
 
     @Override
@@ -104,8 +122,20 @@ public class ReadBuilderImpl implements ReadBuilder {
     }
 
     @Override
+    public ReadBuilder withBucket(int bucket) {
+        this.specifiedBucket = bucket;
+        return this;
+    }
+
+    @Override
     public ReadBuilder withBucketFilter(Filter<Integer> bucketFilter) {
         this.bucketFilter = bucketFilter;
+        return this;
+    }
+
+    @Override
+    public ReadBuilder dropStats() {
+        this.dropStats = true;
         return this;
     }
 
@@ -138,8 +168,14 @@ public class ReadBuilderImpl implements ReadBuilder {
                         "Unsupported table scan type for shard configuring, the scan is: " + scan);
             }
         }
+        if (specifiedBucket != null) {
+            scan.withBucket(specifiedBucket);
+        }
         if (bucketFilter != null) {
             scan.withBucketFilter(bucketFilter);
+        }
+        if (dropStats) {
+            scan.dropStats();
         }
         return scan;
     }
@@ -147,8 +183,8 @@ public class ReadBuilderImpl implements ReadBuilder {
     @Override
     public TableRead newRead() {
         InnerTableRead read = table.newRead().withFilter(filter);
-        if (projection != null) {
-            read.withProjection(projection);
+        if (readType != null) {
+            read.withReadType(readType);
         }
         return read;
     }
@@ -164,13 +200,13 @@ public class ReadBuilderImpl implements ReadBuilder {
         ReadBuilderImpl that = (ReadBuilderImpl) o;
         return Objects.equals(table.name(), that.table.name())
                 && Objects.equals(filter, that.filter)
-                && Arrays.deepEquals(projection, that.projection);
+                && Objects.equals(readType, that.readType);
     }
 
     @Override
     public int hashCode() {
         int result = Objects.hash(table.name(), filter);
-        result = 31 * result + Arrays.deepHashCode(projection);
+        result = 31 * result + Objects.hash(readType);
         return result;
     }
 }

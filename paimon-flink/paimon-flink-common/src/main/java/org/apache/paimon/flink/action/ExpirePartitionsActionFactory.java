@@ -18,9 +18,6 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
-import java.util.Map;
 import java.util.Optional;
 
 /** Factory to create {@link ExpirePartitionsAction}. */
@@ -35,25 +32,16 @@ public class ExpirePartitionsActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-
-        checkRequiredArgument(params, EXPIRATIONTIME);
-        checkRequiredArgument(params, TIMESTAMPFORMATTER);
-        String expirationTime = params.get(EXPIRATIONTIME);
-        String timestampFormatter = params.get(TIMESTAMPFORMATTER);
         String expireStrategy = params.get(EXPIRE_STRATEGY);
         String timestampPattern = params.get(TIMESTAMP_PATTERN);
 
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
-
         return Optional.of(
                 new ExpirePartitionsAction(
-                        tablePath.f0,
-                        tablePath.f1,
-                        tablePath.f2,
-                        catalogConfig,
-                        expirationTime,
-                        timestampFormatter,
+                        params.getRequired(DATABASE),
+                        params.getRequired(TABLE),
+                        catalogConfigMap(params),
+                        params.getRequired(EXPIRATIONTIME),
+                        params.getRequired(TIMESTAMPFORMATTER),
                         timestampPattern,
                         expireStrategy));
     }
@@ -65,9 +53,15 @@ public class ExpirePartitionsActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  expire_partitions --warehouse <warehouse_path> --database <database_name> "
-                        + "--table <table_name> --tag_name <tag_name> --expiration_time <expiration_time> --timestamp_formatter <timestamp_formatter>"
-                        + "[--timestamp_pattern <timestamp_pattern>] [--expire_strategy <expire_strategy>]");
+                "  expire_partitions \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <table_name> \\\n"
+                        + "--tag_name <tag_name> \\\n"
+                        + "--expiration_time <expiration_time> \\\n"
+                        + "--timestamp_formatter <timestamp_formatter> \\\n"
+                        + "[--timestamp_pattern <timestamp_pattern>] \\\n"
+                        + "[--expire_strategy <expire_strategy>]");
         System.out.println();
     }
 }

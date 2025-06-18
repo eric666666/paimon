@@ -39,14 +39,12 @@ import static org.apache.paimon.CoreOptions.STREAMING_READ_MODE;
 import static org.apache.paimon.options.ConfigOptions.key;
 import static org.apache.paimon.options.description.TextElement.text;
 
-/**
- * Options for flink connector.
- */
+/** Options for flink connector. */
 public class FlinkConnectorOptions {
 
     public static final String NONE = "none";
 
-    public static final String TABLE_DYNAMIC_OPTION_PREFIX = "paimon";
+    public static final String TABLE_DYNAMIC_OPTION_PREFIX = "paimon.";
 
     public static final int MIN_CLUSTERING_SAMPLE_FACTOR = 20;
 
@@ -254,15 +252,6 @@ public class FlinkConnectorOptions {
                             "Weight of managed memory for RocksDB in cross-partition update, Flink will compute the memory size "
                                     + "according to the weight, the actual memory used depends on the running environment.");
 
-    public static final ConfigOption<Boolean> SCAN_PUSH_DOWN =
-            ConfigOptions.key("scan.push-down")
-                    .booleanType()
-                    .defaultValue(true)
-                    .withDescription(
-                            "If true, flink will push down projection, filters, limit to the source. The cost is that it "
-                                    + "is difficult to reuse the source in a job. With flink 1.18 or higher version, it "
-                                    + "is possible to reuse the source even with projection push down.");
-
     public static final ConfigOption<Boolean> SOURCE_CHECKPOINT_ALIGN_ENABLED =
             ConfigOptions.key("source.checkpoint-align.enabled")
                     .booleanType()
@@ -302,12 +291,20 @@ public class FlinkConnectorOptions {
                     .defaultValue(LookupCacheMode.AUTO)
                     .withDescription("The cache mode of lookup join.");
 
-    public static final ConfigOption<String> LOOKUP_DYNAMIC_PARTITION =
-            ConfigOptions.key("lookup.dynamic-partition")
+    public static final ConfigOption<String> SCAN_PARTITIONS =
+            ConfigOptions.key("scan.partitions")
                     .stringType()
                     .noDefaultValue()
+                    .withFallbackKeys("lookup.dynamic-partition")
                     .withDescription(
-                            "Specific dynamic partition for lookup, only support 'max_pt()' currently.");
+                            "Specify the partitions to scan. "
+                                    + "Partitions should be given in the form of key1=value1,key2=value2. "
+                                    + "Partition keys not specified will be filled with the value of "
+                                    + CoreOptions.PARTITION_DEFAULT_NAME.key()
+                                    + ". Multiple partitions should be separated by semicolon (;). "
+                                    + "This option can support normal source tables and lookup join tables. "
+                                    + "For lookup joins, two special values max_pt() and max_two_pt() are also supported, "
+                                    + "specifying the (two) partition(s) with the largest partition value.");
 
     public static final ConfigOption<Duration> LOOKUP_DYNAMIC_PARTITION_REFRESH_INTERVAL =
             ConfigOptions.key("lookup.dynamic-partition.refresh-interval")
@@ -329,6 +326,15 @@ public class FlinkConnectorOptions {
                     .defaultValue(5)
                     .withDescription(
                             "If the pending snapshot count exceeds the threshold, lookup operator will refresh the table in sync.");
+
+    public static final ConfigOption<String> LOOKUP_REFRESH_TIME_PERIODS_BLACKLIST =
+            ConfigOptions.key("lookup.refresh.time-periods-blacklist")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The blacklist contains several time periods. During these time periods, the lookup table's "
+                                    + "cache refreshing is forbidden. Blacklist format is start1->end1,start2->end2,... , "
+                                    + "and the time format is yyyy-MM-dd HH:mm. Only used when lookup table is FULL cache mode.");
 
     public static final ConfigOption<Boolean> SINK_AUTO_TAG_FOR_SAVEPOINT =
             ConfigOptions.key("sink.savepoint.auto-tag")
@@ -358,6 +364,12 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "Allow sink committer and writer operator to be chained together");
 
+    public static final ConfigOption<PartitionMarkDoneActionMode> PARTITION_MARK_DONE_MODE =
+            key("partition.mark-done-action.mode")
+                    .enumType(PartitionMarkDoneActionMode.class)
+                    .defaultValue(PartitionMarkDoneActionMode.PROCESS_TIME)
+                    .withDescription("How to trigger partition mark done action.");
+
     public static final ConfigOption<Duration> PARTITION_IDLE_TIME_TO_DONE =
             key("partition.idle-time-to-done")
                     .durationType()
@@ -373,13 +385,6 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "You can specify time interval for partition, for example, "
                                     + "daily partition is '1 d', hourly partition is '1 h'.");
-
-    public static final ConfigOption<Boolean> PARTITION_MARK_DONE_WHEN_END_INPUT =
-            ConfigOptions.key("partition.end-input-to-done")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            "Whether mark the done status to indicate that the data is ready when end input.");
 
     public static final ConfigOption<String> CLUSTERING_COLUMNS =
             key("sink.clustering.by-columns")
@@ -423,6 +428,68 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "Optional endInput watermark used in case of batch mode or bounded stream.");
 
+    public static final ConfigOption<Boolean> PRECOMMIT_COMPACT =
+            key("precommit-compact")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys("changelog.precommit-compact")
+                    .withDescription(
+                            "If true, it will add a compact coordinator and worker operator after the writer operator,"
+                                    + "in order to compact several changelog files (for primary key tables) "
+                                    + "or newly created data files (for unaware bucket tables) "
+                                    + "from the same partition into large ones, "
+                                    + "which can decrease the number of small files.");
+
+    public static final ConfigOption<Integer> CHANGELOG_PRECOMMIT_COMPACT_THREAD_NUM =
+            key("changelog.precommit-compact.thread-num")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Maximum number of threads to copy bytes from small changelog files. "
+                                    + "By default is the number of processors available to the Java virtual machine.");
+
+    @ExcludeFromDocumentation("Most users won't need to adjust this config")
+    public static final ConfigOption<MemorySize> CHANGELOG_PRECOMMIT_COMPACT_BUFFER_SIZE =
+            key("changelog.precommit-compact.buffer-size")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofMebiBytes(128))
+                    .withDescription(
+                            "The buffer size for copying bytes from small changelog files. "
+                                    + "The default value is 128 MB.");
+
+    public static final ConfigOption<String> SOURCE_OPERATOR_UID_SUFFIX =
+            key("source.operator-uid.suffix")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Set the uid suffix for the source operators. After setting, the uid format is "
+                                    + "${UID_PREFIX}_${TABLE_NAME}_${USER_UID_SUFFIX}. If the uid suffix is not set, flink will "
+                                    + "automatically generate the operator uid, which may be incompatible when the topology changes.");
+
+    public static final ConfigOption<String> SINK_OPERATOR_UID_SUFFIX =
+            key("sink.operator-uid.suffix")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Set the uid suffix for the writer, dynamic bucket assigner and committer operators. The uid format is "
+                                    + "${UID_PREFIX}_${TABLE_NAME}_${USER_UID_SUFFIX}. If the uid suffix is not set, flink will "
+                                    + "automatically generate the operator uid, which may be incompatible when the topology changes.");
+
+    public static final ConfigOption<Boolean> SCAN_BOUNDED =
+            key("scan.bounded")
+                    .booleanType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Bounded mode for Paimon consumer. "
+                                    + "By default, Paimon automatically selects bounded mode based on the mode of the Flink job.");
+
+    public static final ConfigOption<Integer> POSTPONE_DEFAULT_BUCKET_NUM =
+            key("postpone.default-bucket-num")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "Bucket number for the partitions compacted for the first time in postpone bucket tables.");
+
     public static List<ConfigOption<?>> getOptions() {
         final Field[] fields = FlinkConnectorOptions.class.getFields();
         final List<ConfigOption<?>> list = new ArrayList<>(fields.length);
@@ -438,24 +505,21 @@ public class FlinkConnectorOptions {
         return list;
     }
 
-    /**
-     * The mode of lookup cache.
-     */
+    public static String generateCustomUid(
+            String uidPrefix, String tableName, String userDefinedSuffix) {
+        return String.format("%s_%s_%s", uidPrefix, tableName, userDefinedSuffix);
+    }
+
+    /** The mode of lookup cache. */
     public enum LookupCacheMode {
-        /**
-         * Auto mode, try to use partial mode.
-         */
+        /** Auto mode, try to use partial mode. */
         AUTO,
 
-        /**
-         * Use full caching mode.
-         */
+        /** Use full caching mode. */
         FULL
     }
 
-    /**
-     * Watermark emit strategy for scan.
-     */
+    /** Watermark emit strategy for scan. */
     public enum WatermarkEmitStrategy implements DescribedEnum {
         ON_PERIODIC(
                 "on-periodic",
@@ -497,6 +561,34 @@ public class FlinkConnectorOptions {
         private final String description;
 
         SplitAssignMode(String value, String description) {
+            this.value = value;
+            this.description = description;
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+
+        @Override
+        public InlineElement getDescription() {
+            return text(description);
+        }
+    }
+
+    /** The mode for partition mark done. */
+    public enum PartitionMarkDoneActionMode implements DescribedEnum {
+        PROCESS_TIME(
+                "process-time",
+                "Based on the time of the machine, mark the partition done once the processing time passes period time plus delay."),
+        WATERMARK(
+                "watermark",
+                "Based on the watermark of the input, mark the partition done once the watermark passes period time plus delay.");
+
+        private final String value;
+        private final String description;
+
+        PartitionMarkDoneActionMode(String value, String description) {
             this.value = value;
             this.description = description;
         }

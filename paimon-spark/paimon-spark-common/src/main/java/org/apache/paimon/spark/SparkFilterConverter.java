@@ -40,13 +40,16 @@ import org.apache.spark.sql.sources.StringContains;
 import org.apache.spark.sql.sources.StringEndsWith;
 import org.apache.spark.sql.sources.StringStartsWith;
 
+import javax.annotation.Nullable;
+
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.predicate.PredicateBuilder.convertJavaObject;
 
-/** Conversion from {@link Filter} to {@link Predicate}. */
+/** Conversion from {@link Filter} to {@link Predicate}, remove it when Spark 3.2 is dropped. */
 public class SparkFilterConverter {
 
     public static final List<String> SUPPORT_FILTERS =
@@ -75,11 +78,21 @@ public class SparkFilterConverter {
         this.builder = new PredicateBuilder(rowType);
     }
 
+    @Nullable
     public Predicate convertIgnoreFailure(Filter filter) {
+        return convert(filter, true);
+    }
+
+    @Nullable
+    public Predicate convert(Filter filter, boolean ignoreFailure) {
         try {
             return convert(filter);
         } catch (Exception e) {
-            return null;
+            if (ignoreFailure) {
+                return null;
+            } else {
+                throw e;
+            }
         }
     }
 
@@ -92,10 +105,10 @@ public class SparkFilterConverter {
             return builder.equal(index, literal);
         } else if (filter instanceof EqualNullSafe) {
             EqualNullSafe eq = (EqualNullSafe) filter;
+            int index = fieldIndex(eq.attribute());
             if (eq.value() == null) {
-                return builder.isNull(fieldIndex(eq.attribute()));
+                return builder.isNull(index);
             } else {
-                int index = fieldIndex(eq.attribute());
                 Object literal = convertLiteral(index, eq.value());
                 return builder.equal(index, literal);
             }
@@ -139,7 +152,10 @@ public class SparkFilterConverter {
             return PredicateBuilder.or(convert(or.left()), convert(or.right()));
         } else if (filter instanceof Not) {
             Not not = (Not) filter;
-            return convert(not.child()).negate().orElseThrow(UnsupportedOperationException::new);
+            Optional<Predicate> negate = convert(not.child()).negate();
+            if (negate.isPresent()) {
+                return negate.get();
+            }
         } else if (filter instanceof StringStartsWith) {
             StringStartsWith startsWith = (StringStartsWith) filter;
             int index = fieldIndex(startsWith.attribute());
@@ -164,6 +180,11 @@ public class SparkFilterConverter {
 
     public Object convertLiteral(String field, Object value) {
         return convertLiteral(fieldIndex(field), value);
+    }
+
+    public String convertString(String field, Object value) {
+        Object literal = convertLiteral(field, value);
+        return literal == null ? null : literal.toString();
     }
 
     private int fieldIndex(String field) {

@@ -329,7 +329,7 @@ public class StringUtils {
      * </pre>
      *
      * <p>NOTE: This method changed in Lang version 2.0. It no longer trims the CharSequence. That
-     * functionality is available in isBlank().
+     * functionality is available in isNullOrWhitespaceOnly().
      *
      * @param cs the CharSequence to check, may be null
      * @return {@code true} if the CharSequence is empty or null
@@ -538,25 +538,12 @@ public class StringUtils {
         return buf.toString();
     }
 
-    public static boolean isBlank(String str) {
-        int strLen;
-        if (str == null || (strLen = str.length()) == 0) {
-            return true;
-        }
-        for (int i = 0; i < strLen; i++) {
-            if ((!Character.isWhitespace(str.charAt(i)))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     public static String quote(String str) {
         return "`" + str + "`";
     }
 
-    public static String caseSensitiveConversion(String str, boolean allowUpperCase) {
-        return allowUpperCase ? str : str.toLowerCase();
+    public static String toLowerCaseIfNeed(String str, boolean caseSensitive) {
+        return caseSensitive ? str : str.toLowerCase();
     }
 
     public static boolean isNumeric(final CharSequence cs) {
@@ -570,5 +557,13 @@ public class StringUtils {
             }
         }
         return true;
+    }
+
+    // A null-safe trim method.
+    public static String trim(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value.trim();
     }
 }

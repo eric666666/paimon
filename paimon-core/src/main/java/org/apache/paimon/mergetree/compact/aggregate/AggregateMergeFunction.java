@@ -24,9 +24,14 @@ import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.mergetree.compact.MergeFunction;
 import org.apache.paimon.mergetree.compact.MergeFunctionFactory;
+import org.apache.paimon.mergetree.compact.aggregate.factory.FieldAggregatorFactory;
+import org.apache.paimon.mergetree.compact.aggregate.factory.FieldLastNonNullValueAggFactory;
+import org.apache.paimon.mergetree.compact.aggregate.factory.FieldLastValueAggFactory;
+import org.apache.paimon.mergetree.compact.aggregate.factory.FieldPrimaryKeyAggFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowKind;
+import org.apache.paimon.utils.ArrayUtils;
 import org.apache.paimon.utils.Projection;
 
 import javax.annotation.Nullable;
@@ -45,15 +50,23 @@ public class AggregateMergeFunction implements MergeFunction<KeyValue> {
 
     private final InternalRow.FieldGetter[] getters;
     private final FieldAggregator[] aggregators;
+    private final boolean[] nullables;
 
     private KeyValue latestKv;
     private GenericRow row;
     private KeyValue reused;
+    private boolean currentDeleteRow;
+    private final boolean removeRecordOnDelete;
 
     public AggregateMergeFunction(
-            InternalRow.FieldGetter[] getters, FieldAggregator[] aggregators) {
+            InternalRow.FieldGetter[] getters,
+            FieldAggregator[] aggregators,
+            boolean removeRecordOnDelete,
+            boolean[] nullables) {
         this.getters = getters;
         this.aggregators = aggregators;
+        this.removeRecordOnDelete = removeRecordOnDelete;
+        this.nullables = nullables;
     }
 
     @Override
@@ -61,13 +74,21 @@ public class AggregateMergeFunction implements MergeFunction<KeyValue> {
         this.latestKv = null;
         this.row = new GenericRow(getters.length);
         Arrays.stream(aggregators).forEach(FieldAggregator::reset);
+        this.currentDeleteRow = false;
     }
 
     @Override
     public void add(KeyValue kv) {
         latestKv = kv;
-        boolean isRetract =
-                kv.valueKind() != RowKind.INSERT && kv.valueKind() != RowKind.UPDATE_AFTER;
+
+        currentDeleteRow = removeRecordOnDelete && kv.valueKind() == RowKind.DELETE;
+        if (currentDeleteRow) {
+            row = new GenericRow(getters.length);
+            initRow(row, kv.value());
+            return;
+        }
+
+        boolean isRetract = kv.valueKind().isRetract();
         for (int i = 0; i < getters.length; i++) {
             FieldAggregator fieldAggregator = aggregators[i];
             Object accumulator = getters[i].getFieldOrNull(row);
@@ -80,6 +101,19 @@ public class AggregateMergeFunction implements MergeFunction<KeyValue> {
         }
     }
 
+    private void initRow(GenericRow row, InternalRow value) {
+        for (int i = 0; i < getters.length; i++) {
+            Object field = getters[i].getFieldOrNull(value);
+            if (!nullables[i]) {
+                if (field != null) {
+                    row.setField(i, field);
+                } else {
+                    throw new IllegalArgumentException("Field " + i + " can not be null");
+                }
+            }
+        }
+    }
+
     @Override
     public KeyValue getResult() {
         checkNotNull(
@@ -89,15 +123,21 @@ public class AggregateMergeFunction implements MergeFunction<KeyValue> {
         if (reused == null) {
             reused = new KeyValue();
         }
-        return reused.replace(latestKv.key(), latestKv.sequenceNumber(), RowKind.INSERT, row);
+        RowKind rowKind = currentDeleteRow ? RowKind.DELETE : RowKind.INSERT;
+        return reused.replace(latestKv.key(), latestKv.sequenceNumber(), rowKind, row);
+    }
+
+    @Override
+    public boolean requireCopy() {
+        return false;
     }
 
     public static MergeFunctionFactory<KeyValue> factory(
             Options conf,
-            List<String> tableNames,
-            List<DataType> tableTypes,
+            List<String> fieldNames,
+            List<DataType> fieldTypes,
             List<String> primaryKeys) {
-        return new Factory(conf, tableNames, tableTypes, primaryKeys);
+        return new Factory(conf, fieldNames, fieldTypes, primaryKeys);
     }
 
     private static class Factory implements MergeFunctionFactory<KeyValue> {
@@ -105,53 +145,72 @@ public class AggregateMergeFunction implements MergeFunction<KeyValue> {
         private static final long serialVersionUID = 1L;
 
         private final CoreOptions options;
-        private final List<String> tableNames;
-        private final List<DataType> tableTypes;
+        private final List<String> fieldNames;
+        private final List<DataType> fieldTypes;
         private final List<String> primaryKeys;
+        private final boolean removeRecordOnDelete;
 
         private Factory(
                 Options conf,
-                List<String> tableNames,
-                List<DataType> tableTypes,
+                List<String> fieldNames,
+                List<DataType> fieldTypes,
                 List<String> primaryKeys) {
             this.options = new CoreOptions(conf);
-            this.tableNames = tableNames;
-            this.tableTypes = tableTypes;
+            this.fieldNames = fieldNames;
+            this.fieldTypes = fieldTypes;
             this.primaryKeys = primaryKeys;
+            this.removeRecordOnDelete = options.aggregationRemoveRecordOnDelete();
         }
 
         @Override
         public MergeFunction<KeyValue> create(@Nullable int[][] projection) {
-            List<String> fieldNames = tableNames;
-            List<DataType> fieldTypes = tableTypes;
+            List<String> fieldNames = this.fieldNames;
+            List<DataType> fieldTypes = this.fieldTypes;
             if (projection != null) {
                 Projection project = Projection.of(projection);
-                fieldNames = project.project(tableNames);
-                fieldTypes = project.project(tableTypes);
+                fieldNames = project.project(fieldNames);
+                fieldTypes = project.project(fieldTypes);
             }
 
             FieldAggregator[] fieldAggregators = new FieldAggregator[fieldNames.size()];
-            String defaultAggFunc = options.fieldsDefaultFunc();
+            List<String> sequenceFields = options.sequenceField();
             for (int i = 0; i < fieldNames.size(); i++) {
                 String fieldName = fieldNames.get(i);
                 DataType fieldType = fieldTypes.get(i);
-                // aggregate by primary keys, so they do not aggregate
-                boolean isPrimaryKey = primaryKeys.contains(fieldName);
-                String strAggFunc = options.fieldAggFunc(fieldName);
-                strAggFunc = strAggFunc == null ? defaultAggFunc : strAggFunc;
 
-                boolean ignoreRetract = options.fieldAggIgnoreRetract(fieldName);
+                String aggFuncName = getAggFuncName(fieldName, sequenceFields);
                 fieldAggregators[i] =
-                        FieldAggregator.createFieldAggregator(
-                                fieldType,
-                                strAggFunc,
-                                ignoreRetract,
-                                isPrimaryKey,
-                                options,
-                                fieldName);
+                        FieldAggregatorFactory.create(fieldType, fieldName, aggFuncName, options);
             }
 
-            return new AggregateMergeFunction(createFieldGetters(fieldTypes), fieldAggregators);
+            return new AggregateMergeFunction(
+                    createFieldGetters(fieldTypes),
+                    fieldAggregators,
+                    removeRecordOnDelete,
+                    ArrayUtils.toPrimitiveBoolean(
+                            fieldTypes.stream().map(DataType::isNullable).toArray(Boolean[]::new)));
+        }
+
+        private String getAggFuncName(String fieldName, List<String> sequenceFields) {
+            if (sequenceFields.contains(fieldName)) {
+                // no agg for sequence fields, use last_value to do cover
+                return FieldLastValueAggFactory.NAME;
+            }
+
+            if (primaryKeys.contains(fieldName)) {
+                // aggregate by primary keys, so they do not aggregate
+                return FieldPrimaryKeyAggFactory.NAME;
+            }
+
+            String aggFuncName = options.fieldAggFunc(fieldName);
+            if (aggFuncName == null) {
+                aggFuncName = options.fieldsDefaultFunc();
+            }
+            if (aggFuncName == null) {
+                // final default agg func
+                aggFuncName = FieldLastNonNullValueAggFactory.NAME;
+            }
+            return aggFuncName;
         }
     }
 }

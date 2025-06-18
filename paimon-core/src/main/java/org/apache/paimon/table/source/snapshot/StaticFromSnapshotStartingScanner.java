@@ -31,7 +31,7 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  * {@link StartingScanner} for the {@link CoreOptions.StartupMode#FROM_SNAPSHOT} or {@link
  * CoreOptions.StartupMode#FROM_SNAPSHOT_FULL} startup mode of a batch read.
  */
-public class StaticFromSnapshotStartingScanner extends AbstractStartingScanner {
+public class StaticFromSnapshotStartingScanner extends ReadPlanStartingScanner {
 
     private static final Logger LOG =
             LoggerFactory.getLogger(StaticFromSnapshotStartingScanner.class);
@@ -47,17 +47,15 @@ public class StaticFromSnapshotStartingScanner extends AbstractStartingScanner {
     }
 
     @Override
-    public Result scan(SnapshotReader snapshotReader) {
+    public SnapshotReader configure(SnapshotReader snapshotReader) {
         Long earliestSnapshotId = snapshotManager.earliestSnapshotId();
         Long latestSnapshotId = snapshotManager.latestSnapshotId();
 
         if (earliestSnapshotId == null || latestSnapshotId == null) {
-            LOG.warn("There is currently no snapshot. Waiting for snapshot generation.");
-            return new NoSnapshot();
+            throw new IllegalArgumentException("There is currently no snapshot.");
         }
 
-        // Checks earlier whether the specified scan snapshot id is valid and throws the correct
-        // exception.
+        // Checks earlier whether the specified scan snapshot id is valid.
         checkArgument(
                 startingSnapshotId >= earliestSnapshotId && startingSnapshotId <= latestSnapshotId,
                 "The specified scan snapshotId %s is out of available snapshotId range [%s, %s].",
@@ -65,7 +63,6 @@ public class StaticFromSnapshotStartingScanner extends AbstractStartingScanner {
                 earliestSnapshotId,
                 latestSnapshotId);
 
-        return StartingScanner.fromPlan(
-                snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshotId).read());
+        return snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshotId);
     }
 }

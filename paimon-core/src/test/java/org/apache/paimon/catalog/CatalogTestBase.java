@@ -19,17 +19,32 @@
 package org.apache.paimon.catalog;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.PagedList;
+import org.apache.paimon.data.BinaryString;
+import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.fs.FileIO;
-import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.ResolvingFileIO;
 import org.apache.paimon.options.CatalogOptions;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.partition.Partition;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.FormatTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.sink.BatchTableCommit;
+import org.apache.paimon.table.sink.BatchTableWrite;
+import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.system.AllTableOptionsTable;
+import org.apache.paimon.table.system.CatalogOptionsTable;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewImpl;
 
+import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Lists;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Maps;
 
@@ -39,14 +54,27 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
+import static org.apache.paimon.CoreOptions.METASTORE_PARTITIONED_TABLE;
+import static org.apache.paimon.CoreOptions.METASTORE_TAG_TO_PARTITION;
+import static org.apache.paimon.catalog.Catalog.SYSTEM_DATABASE_NAME;
+import static org.apache.paimon.table.system.AllTableOptionsTable.ALL_TABLE_OPTIONS;
+import static org.apache.paimon.table.system.CatalogOptionsTable.CATALOG_OPTIONS;
 import static org.apache.paimon.testutils.assertj.PaimonAssertions.anyCauseMatches;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /** Base test class of paimon catalog in {@link Catalog}. */
 public abstract class CatalogTestBase {
@@ -73,12 +101,20 @@ public abstract class CatalogTestBase {
         Options catalogOptions = new Options();
         catalogOptions.set(CatalogOptions.WAREHOUSE, warehouse);
         CatalogContext catalogContext = CatalogContext.create(catalogOptions);
-        fileIO = FileIO.get(new Path(warehouse), catalogContext);
+        fileIO = new ResolvingFileIO();
+        fileIO.configure(catalogContext);
     }
 
     @AfterEach
     void tearDown() throws Exception {
         if (catalog != null) {
+            List<String> dbs = catalog.listDatabases();
+            for (String db : dbs) {
+                try {
+                    catalog.dropDatabase(db, true, true);
+                } catch (Exception ignored) {
+                }
+            }
             catalog.close();
         }
     }
@@ -100,23 +136,22 @@ public abstract class CatalogTestBase {
     }
 
     @Test
-    public void testDatabaseExistsWhenExists() throws Exception {
-        // Database exists returns true when the database exists
+    public void testDuplicatedDatabaseAfterCreatingTable() throws Exception {
         catalog.createDatabase("test_db", false);
-        boolean exists = catalog.databaseExists("test_db");
-        assertThat(exists).isTrue();
+        Identifier identifier = Identifier.create("test_db", "new_table");
+        Schema schema = Schema.newBuilder().column("pk1", DataTypes.INT()).build();
+        catalog.createTable(identifier, schema, false);
 
-        // Database exists returns false when the database does not exist
-        exists = catalog.databaseExists("non_existing_db");
-        assertThat(exists).isFalse();
+        List<String> databases = catalog.listDatabases();
+        List<String> distinctDatabases = databases.stream().distinct().collect(Collectors.toList());
+        assertEquals(distinctDatabases.size(), databases.size());
     }
 
     @Test
     public void testCreateDatabase() throws Exception {
         // Create database creates a new database when it does not exist
         catalog.createDatabase("new_db", false);
-        boolean exists = catalog.databaseExists("new_db");
-        assertThat(exists).isTrue();
+        catalog.getDatabase("new_db");
 
         catalog.createDatabase("existing_db", false);
 
@@ -133,12 +168,62 @@ public abstract class CatalogTestBase {
     }
 
     @Test
+    public void testAlterDatabase() throws Exception {
+        if (!supportsAlterDatabase()) {
+            return;
+        }
+        // Alter database
+        String databaseName = "db_to_alter";
+        catalog.createDatabase(databaseName, false);
+        String key = "key1";
+        String key2 = "key2";
+        // Add property
+        catalog.alterDatabase(
+                databaseName,
+                Lists.newArrayList(
+                        PropertyChange.setProperty(key, "value"),
+                        PropertyChange.setProperty(key2, "value")),
+                false);
+        Database db = catalog.getDatabase(databaseName);
+        assertEquals("value", db.options().get(key));
+        assertEquals("value", db.options().get(key2));
+        // Update property
+        catalog.alterDatabase(
+                databaseName,
+                Lists.newArrayList(
+                        PropertyChange.setProperty(key, "value1"),
+                        PropertyChange.setProperty(key2, "value1")),
+                false);
+        db = catalog.getDatabase(databaseName);
+        assertEquals("value1", db.options().get(key));
+        assertEquals("value1", db.options().get(key2));
+        // remove property
+        catalog.alterDatabase(
+                databaseName,
+                Lists.newArrayList(
+                        PropertyChange.removeProperty(key), PropertyChange.removeProperty(key2)),
+                false);
+        db = catalog.getDatabase(databaseName);
+        assertFalse(db.options().containsKey(key));
+        assertFalse(db.options().containsKey(key2));
+        // Remove non-existent property
+        catalog.alterDatabase(
+                databaseName,
+                Lists.newArrayList(
+                        PropertyChange.removeProperty(key), PropertyChange.removeProperty(key2)),
+                false);
+        db = catalog.getDatabase(databaseName);
+        assertFalse(db.options().containsKey(key));
+        assertFalse(db.options().containsKey(key2));
+    }
+
+    @Test
     public void testDropDatabase() throws Exception {
         // Drop database deletes the database when it exists and there are no tables
         catalog.createDatabase("db_to_drop", false);
         catalog.dropDatabase("db_to_drop", false, false);
-        boolean exists = catalog.databaseExists("db_to_drop");
-        assertThat(exists).isFalse();
+        assertThatThrownBy(() -> catalog.getDatabase("db_to_drop"))
+                .isInstanceOf(Catalog.DatabaseNotExistException.class);
 
         // Drop database does not throw exception when database does not exist and ignoreIfNotExists
         // is true
@@ -151,8 +236,8 @@ public abstract class CatalogTestBase {
         catalog.createTable(Identifier.create("db_to_drop", "table2"), DEFAULT_TABLE_SCHEMA, false);
 
         catalog.dropDatabase("db_to_drop", false, true);
-        exists = catalog.databaseExists("db_to_drop");
-        assertThat(exists).isFalse();
+        assertThatThrownBy(() -> catalog.getDatabase("db_to_drop"))
+                .isInstanceOf(Catalog.DatabaseNotExistException.class);
 
         // Drop database throws DatabaseNotEmptyException when cascade is false and there are tables
         // in the database
@@ -179,21 +264,106 @@ public abstract class CatalogTestBase {
 
         tables = catalog.listTables("test_db");
         assertThat(tables).containsExactlyInAnyOrder("table1", "table2", "table3");
+
+        // List tables throws DatabaseNotExistException when the database does not exist
+        assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
+                .isThrownBy(() -> catalog.listTables("non_existing_db"));
     }
 
     @Test
-    public void testTableExists() throws Exception {
-        // Table exists returns true when the table exists in the database
-        catalog.createDatabase("test_db", false);
-        Identifier identifier = Identifier.create("test_db", "test_table");
-        catalog.createTable(identifier, DEFAULT_TABLE_SCHEMA, false);
+    public void testListTablesPaged() throws Exception {
+        // List tables paged returns an empty list when there are no tables in the database
+        String databaseName = "tables_paged_db";
+        catalog.createDatabase(databaseName, false);
+        PagedList<String> pagedTables = catalog.listTablesPaged(databaseName, null, null);
+        assertThat(pagedTables.getElements()).isEmpty();
+        assertNull(pagedTables.getNextPageToken());
 
-        boolean exists = catalog.tableExists(identifier);
-        assertThat(exists).isTrue();
+        String[] tableNames = {"table1", "table2", "table3", "abd", "def", "opr"};
+        for (String tableName : tableNames) {
+            catalog.createTable(
+                    Identifier.create(databaseName, tableName), DEFAULT_TABLE_SCHEMA, false);
+        }
 
-        // Table exists returns false when the table does not exist in the database
-        exists = catalog.tableExists(Identifier.create("non_existing_db", "non_existing_table"));
-        assertThat(exists).isFalse();
+        // List tables paged returns a list with the names of all tables in the database in all
+        // catalogs except RestCatalog
+        // even if the maxResults or pageToken is not null
+        pagedTables = catalog.listTablesPaged(databaseName, null, null);
+        assertPagedTables(pagedTables, tableNames);
+
+        int maxResults = 2;
+        pagedTables = catalog.listTablesPaged(databaseName, maxResults, null);
+        assertPagedTables(pagedTables, tableNames);
+
+        String pageToken = "table1";
+        pagedTables = catalog.listTablesPaged(databaseName, maxResults, pageToken);
+        assertPagedTables(pagedTables, tableNames);
+
+        maxResults = 8;
+        pagedTables = catalog.listTablesPaged(databaseName, maxResults, null);
+        assertPagedTables(pagedTables, tableNames);
+
+        pagedTables = catalog.listTablesPaged(databaseName, maxResults, pageToken);
+        assertPagedTables(pagedTables, tableNames);
+
+        // List tables throws DatabaseNotExistException when the database does not exist
+        final int finalMaxResults = maxResults;
+        assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listTablesPaged(
+                                        "non_existing_db", finalMaxResults, pageToken));
+    }
+
+    @Test
+    public void testListTableDetailsPaged() throws Exception {
+        // List table details returns an empty list when there are no tables in the database
+        String databaseName = "table_details_paged_db";
+        catalog.createDatabase(databaseName, false);
+        PagedList<Table> pagedTableDetails =
+                catalog.listTableDetailsPaged(databaseName, null, null);
+        assertThat(pagedTableDetails.getElements()).isEmpty();
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        // List table details paged returns a list with all table in the database in all catalogs
+        // except RestCatalog
+        // even if the maxResults or pageToken is not null
+        String[] tableNames = {"table1", "table2", "table3", "abd", "def", "opr"};
+        for (String tableName : tableNames) {
+            catalog.createTable(
+                    Identifier.create(databaseName, tableName), DEFAULT_TABLE_SCHEMA, false);
+        }
+
+        pagedTableDetails = catalog.listTableDetailsPaged(databaseName, null, null);
+        assertPagedTableDetails(pagedTableDetails, tableNames.length, tableNames);
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        int maxResults = 2;
+        pagedTableDetails = catalog.listTableDetailsPaged(databaseName, maxResults, null);
+        assertPagedTableDetails(pagedTableDetails, tableNames.length, tableNames);
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        String pageToken = "table1";
+        pagedTableDetails = catalog.listTableDetailsPaged(databaseName, maxResults, pageToken);
+        assertPagedTableDetails(pagedTableDetails, tableNames.length, tableNames);
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        maxResults = 8;
+        pagedTableDetails = catalog.listTableDetailsPaged(databaseName, maxResults, null);
+        assertPagedTableDetails(pagedTableDetails, tableNames.length, tableNames);
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        pagedTableDetails = catalog.listTableDetailsPaged(databaseName, maxResults, pageToken);
+        assertPagedTableDetails(pagedTableDetails, tableNames.length, tableNames);
+        assertNull(pagedTableDetails.getNextPageToken());
+
+        // List table details throws DatabaseNotExistException when the database does not exist
+        final int finalMaxResults = maxResults;
+        assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listTableDetailsPaged(
+                                        "non_existing_db", finalMaxResults, pageToken));
     }
 
     @Test
@@ -226,9 +396,17 @@ public abstract class CatalogTestBase {
                 .withMessage("The value of auto-create property should be false.");
         schema.options().remove(CoreOptions.AUTO_CREATE.key());
 
+        // Create table and check the schema
+        schema.options().put("k1", "v1");
         catalog.createTable(identifier, schema, false);
-        boolean exists = catalog.tableExists(identifier);
-        assertThat(exists).isTrue();
+        FileStoreTable dataTable = (FileStoreTable) catalog.getTable(identifier);
+        assertThat(dataTable.schema().toSchema().fields()).isEqualTo(schema.fields());
+        assertThat(dataTable.schema().toSchema().partitionKeys()).isEqualTo(schema.partitionKeys());
+        assertThat(dataTable.schema().toSchema().comment()).isEqualTo(schema.comment());
+        assertThat(dataTable.schema().toSchema().primaryKeys()).isEqualTo(schema.primaryKeys());
+        for (Map.Entry<String, String> option : schema.options().entrySet()) {
+            assertThat(dataTable.options().get(option.getKey())).isEqualTo(option.getValue());
+        }
 
         // Create table throws Exception when table is system table
         assertThatExceptionOfType(IllegalArgumentException.class)
@@ -295,6 +473,31 @@ public abstract class CatalogTestBase {
                                                 ""),
                                         true))
                 .doesNotThrowAnyException();
+        // Create table throws IleaArgumentException when some table options are not set correctly
+        schema.options()
+                .put(
+                        CoreOptions.MERGE_ENGINE.key(),
+                        CoreOptions.MergeEngine.DEDUPLICATE.toString());
+        schema.options().put(CoreOptions.IGNORE_DELETE.key(), "max");
+        assertThatCode(
+                        () ->
+                                catalog.createTable(
+                                        Identifier.create("test_db", "wrong_table"), schema, false))
+                .hasRootCauseInstanceOf(IllegalArgumentException.class);
+
+        // conflict options
+        Schema conflictOptionsSchema =
+                Schema.newBuilder()
+                        .column("a", DataTypes.INT())
+                        .options(ImmutableMap.of("changelog-producer", "input"))
+                        .build();
+        assertThatThrownBy(
+                        () ->
+                                catalog.createTable(
+                                        Identifier.create("test_db", "conflict_options_table"),
+                                        conflictOptionsSchema,
+                                        false))
+                .isInstanceOf(RuntimeException.class);
     }
 
     @Test
@@ -306,18 +509,11 @@ public abstract class CatalogTestBase {
         catalog.createTable(identifier, DEFAULT_TABLE_SCHEMA, false);
         Table systemTable = catalog.getTable(Identifier.create("test_db", "test_table$snapshots"));
         assertThat(systemTable).isNotNull();
+        Table systemTableCheckWithBranch =
+                catalog.getTable(new Identifier("test_db", "test_table", "main", "snapshots"));
+        assertThat(systemTableCheckWithBranch).isNotNull();
         Table dataTable = catalog.getTable(identifier);
         assertThat(dataTable).isNotNull();
-
-        // Get system table throws Exception when table contains multiple '$' separator
-        assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(
-                        () ->
-                                catalog.getTable(
-                                        Identifier.create(
-                                                "test_db", "test_table$snapshots$snapshots")))
-                .withMessage(
-                        "System table can only contain one '$' separator, but this is: test_table$snapshots$snapshots");
 
         // Get system table throws TableNotExistException when data table does not exist
         assertThatExceptionOfType(Catalog.TableNotExistException.class)
@@ -326,7 +522,7 @@ public abstract class CatalogTestBase {
                                 catalog.getTable(
                                         Identifier.create(
                                                 "test_db", "non_existing_table$snapshots")))
-                .withMessage("Table test_db.non_existing_table does not exist.");
+                .withMessage("Table test_db.non_existing_table$snapshots does not exist.");
 
         // Get system table throws TableNotExistException when system table type does not exist
         assertThatExceptionOfType(Catalog.TableNotExistException.class)
@@ -334,7 +530,7 @@ public abstract class CatalogTestBase {
                         () ->
                                 catalog.getTable(
                                         Identifier.create("test_db", "non_existing_table$schema1")))
-                .withMessage("Table test_db.non_existing_table does not exist.");
+                .withMessage("Table test_db.non_existing_table$schema1 does not exist.");
 
         // Get data table throws TableNotExistException when table does not exist
         assertThatExceptionOfType(Catalog.TableNotExistException.class)
@@ -347,6 +543,22 @@ public abstract class CatalogTestBase {
                 .isThrownBy(
                         () -> catalog.getTable(Identifier.create("non_existing_db", "test_table")))
                 .withMessage("Table non_existing_db.test_table does not exist.");
+
+        Table allTableOptionsTable =
+                catalog.getTable(Identifier.create(SYSTEM_DATABASE_NAME, ALL_TABLE_OPTIONS));
+        assertThat(allTableOptionsTable).isNotNull();
+        Table catalogOptionsTable =
+                catalog.getTable(Identifier.create(SYSTEM_DATABASE_NAME, CATALOG_OPTIONS));
+        assertThat(catalogOptionsTable).isNotNull();
+        assertThatExceptionOfType(Catalog.TableNotExistException.class)
+                .isThrownBy(
+                        () -> catalog.getTable(Identifier.create(SYSTEM_DATABASE_NAME, "1111")));
+
+        List<String> sysTables = catalog.listTables(SYSTEM_DATABASE_NAME);
+        assertThat(sysTables)
+                .containsExactlyInAnyOrder(
+                        AllTableOptionsTable.ALL_TABLE_OPTIONS,
+                        CatalogOptionsTable.CATALOG_OPTIONS);
     }
 
     @Test
@@ -357,8 +569,8 @@ public abstract class CatalogTestBase {
         Identifier identifier = Identifier.create("test_db", "table_to_drop");
         catalog.createTable(identifier, DEFAULT_TABLE_SCHEMA, false);
         catalog.dropTable(identifier, false);
-        boolean exists = catalog.tableExists(identifier);
-        assertThat(exists).isFalse();
+        assertThatThrownBy(() -> catalog.getTable(identifier))
+                .isInstanceOf(Catalog.TableNotExistException.class);
 
         // Drop table throws Exception when table is system table
         assertThatExceptionOfType(IllegalArgumentException.class)
@@ -390,8 +602,9 @@ public abstract class CatalogTestBase {
         catalog.createTable(fromTable, DEFAULT_TABLE_SCHEMA, false);
         Identifier toTable = Identifier.create("test_db", "new_table");
         catalog.renameTable(fromTable, toTable, false);
-        assertThat(catalog.tableExists(fromTable)).isFalse();
-        assertThat(catalog.tableExists(toTable)).isTrue();
+        assertThatThrownBy(() -> catalog.getTable(fromTable))
+                .isInstanceOf(Catalog.TableNotExistException.class);
+        catalog.getTable(toTable);
 
         // Rename table throws Exception when original or target table is system table
         assertThatExceptionOfType(IllegalArgumentException.class)
@@ -491,6 +704,19 @@ public abstract class CatalogTestBase {
                         anyCauseMatches(
                                 Catalog.ColumnAlreadyExistException.class,
                                 "Column col1 already exists in the test_db.test_table table."));
+
+        // conflict options
+        assertThatThrownBy(
+                        () ->
+                                catalog.alterTable(
+                                        identifier,
+                                        Lists.newArrayList(
+                                                SchemaChange.setOption(
+                                                        "changelog-producer", "input")),
+                                        false))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining(
+                        "Can not set changelog-producer on table without primary keys");
     }
 
     @Test
@@ -502,7 +728,9 @@ public abstract class CatalogTestBase {
         catalog.createTable(
                 identifier,
                 new Schema(
-                        Lists.newArrayList(new DataField(0, "col1", DataTypes.STRING())),
+                        Lists.newArrayList(
+                                new DataField(0, "col1", DataTypes.STRING()),
+                                new DataField(1, "col2", DataTypes.STRING())),
                         Collections.emptyList(),
                         Collections.emptyList(),
                         Maps.newHashMap(),
@@ -514,7 +742,7 @@ public abstract class CatalogTestBase {
                 false);
         Table table = catalog.getTable(identifier);
 
-        assertThat(table.rowType().getFields()).hasSize(1);
+        assertThat(table.rowType().getFields()).hasSize(2);
         assertThat(table.rowType().getFieldIndex("col1")).isLessThan(0);
         assertThat(table.rowType().getFieldIndex("new_col1")).isEqualTo(0);
 
@@ -525,12 +753,9 @@ public abstract class CatalogTestBase {
                                 catalog.alterTable(
                                         identifier,
                                         Lists.newArrayList(
-                                                SchemaChange.renameColumn("col1", "new_col1")),
+                                                SchemaChange.renameColumn("col2", "new_col1")),
                                         false))
-                .satisfies(
-                        anyCauseMatches(
-                                Catalog.ColumnAlreadyExistException.class,
-                                "Column col1 already exists in the test_db.test_table table."));
+                .isInstanceOf(Catalog.ColumnAlreadyExistException.class);
 
         // Alter table renames a column throws ColumnNotExistException when column does not exist
         assertThatThrownBy(
@@ -541,10 +766,7 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.renameColumn(
                                                         "non_existing_col", "new_col2")),
                                         false))
-                .satisfies(
-                        anyCauseMatches(
-                                Catalog.ColumnNotExistException.class,
-                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
+                .isInstanceOf(Catalog.ColumnNotExistException.class);
     }
 
     @Test
@@ -650,7 +872,7 @@ public abstract class CatalogTestBase {
                 .satisfies(
                         anyCauseMatches(
                                 Catalog.ColumnNotExistException.class,
-                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
+                                "Column non_existing_col does not exist in the test_db.test_table table."));
         // Alter table update a column type throws Exception when column is partition columns
         assertThatThrownBy(
                         () ->
@@ -660,10 +882,7 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnType(
                                                         "dt", DataTypes.DATE())),
                                         false))
-                .satisfies(
-                        anyCauseMatches(
-                                IllegalArgumentException.class,
-                                "Cannot update partition column [dt] type in the table"));
+                .satisfies(anyCauseMatches("Cannot update partition column: [dt]"));
     }
 
     @Test
@@ -721,7 +940,7 @@ public abstract class CatalogTestBase {
                 .satisfies(
                         anyCauseMatches(
                                 Catalog.ColumnNotExistException.class,
-                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
+                                "Column non_existing_col does not exist in the test_db.test_table table."));
     }
 
     @Test
@@ -777,7 +996,7 @@ public abstract class CatalogTestBase {
                 .satisfies(
                         anyCauseMatches(
                                 Catalog.ColumnNotExistException.class,
-                                "Column [non_existing_col] does not exist in the test_db.test_table table."));
+                                "Column non_existing_col does not exist in the test_db.test_table table."));
 
         // Alter table update a column nullability throws Exception when column is pk columns
         assertThatThrownBy(
@@ -788,10 +1007,7 @@ public abstract class CatalogTestBase {
                                                 SchemaChange.updateColumnNullability(
                                                         new String[] {"col2"}, true)),
                                         false))
-                .satisfies(
-                        anyCauseMatches(
-                                UnsupportedOperationException.class,
-                                "Cannot change nullability of primary key"));
+                .satisfies(anyCauseMatches("Cannot change nullability of primary key"));
     }
 
     @Test
@@ -823,5 +1039,533 @@ public abstract class CatalogTestBase {
 
         table = catalog.getTable(identifier);
         assertThat(table.comment().isPresent()).isFalse();
+    }
+
+    @Test
+    public void testView() throws Exception {
+        if (!supportsView()) {
+            return;
+        }
+        Identifier identifier = new Identifier("view_db", "my_view");
+        View view = createView(identifier);
+
+        assertThatThrownBy(() -> catalog.createView(identifier, view, false))
+                .isInstanceOf(Catalog.DatabaseNotExistException.class);
+
+        assertThatThrownBy(() -> catalog.listViews(identifier.getDatabaseName()))
+                .isInstanceOf(Catalog.DatabaseNotExistException.class);
+
+        catalog.createDatabase(identifier.getDatabaseName(), false);
+
+        assertThatThrownBy(() -> catalog.getView(identifier))
+                .isInstanceOf(Catalog.ViewNotExistException.class);
+
+        catalog.createView(identifier, view, false);
+
+        View catalogView = catalog.getView(identifier);
+        assertThat(catalogView.fullName()).isEqualTo(view.fullName());
+        assertThat(catalogView.rowType()).isEqualTo(view.rowType());
+        assertThat(catalogView.query()).isEqualTo(view.query());
+        assertThat(catalogView.dialects()).isEqualTo(view.dialects());
+        assertThat(catalogView.comment()).isEqualTo(view.comment());
+        assertThat(catalogView.options()).containsAllEntriesOf(view.options());
+
+        List<String> views = catalog.listViews(identifier.getDatabaseName());
+        assertThat(views).containsOnly(identifier.getObjectName());
+
+        catalog.createView(identifier, view, true);
+        assertThatThrownBy(() -> catalog.createView(identifier, view, false))
+                .isInstanceOf(Catalog.ViewAlreadyExistException.class);
+
+        Identifier newIdentifier = new Identifier("view_db", "new_view");
+        catalog.renameView(new Identifier("view_db", "unknown"), newIdentifier, true);
+        assertThatThrownBy(
+                        () ->
+                                catalog.renameView(
+                                        new Identifier("view_db", "unknown"), newIdentifier, false))
+                .isInstanceOf(Catalog.ViewNotExistException.class);
+        catalog.renameView(identifier, newIdentifier, false);
+
+        catalog.dropView(newIdentifier, true);
+        assertThatThrownBy(() -> catalog.dropView(newIdentifier, false))
+                .isInstanceOf(Catalog.ViewNotExistException.class);
+    }
+
+    @Test
+    public void testListViewsPaged() throws Exception {
+        if (!supportsView()) {
+            return;
+        }
+
+        // List views returns an empty list when there are no views in the database
+        String databaseName = "views_paged_db";
+        catalog.createDatabase(databaseName, false);
+        PagedList<String> pagedViews = catalog.listViewsPaged(databaseName, null, null);
+        assertThat(pagedViews.getElements()).isEmpty();
+        assertNull(pagedViews.getNextPageToken());
+
+        // List views paged returns a list with the names of all views in the database in all
+        // catalogs except RestCatalog
+        // even if the maxResults or pageToken is not null
+        View view = buildView(databaseName);
+        String[] viewNames = {"view1", "view2", "view3", "abd", "def", "opr"};
+        for (String viewName : viewNames) {
+            catalog.createView(Identifier.create(databaseName, viewName), view, false);
+        }
+
+        pagedViews = catalog.listViewsPaged(databaseName, null, null);
+        assertPagedViews(pagedViews, viewNames);
+
+        int maxResults = 2;
+        pagedViews = catalog.listViewsPaged(databaseName, maxResults, null);
+        assertPagedViews(pagedViews, viewNames);
+
+        String pageToken = "view1";
+        pagedViews = catalog.listViewsPaged(databaseName, maxResults, pageToken);
+        assertPagedViews(pagedViews, viewNames);
+
+        maxResults = 8;
+        pagedViews = catalog.listViewsPaged(databaseName, maxResults, null);
+        assertPagedViews(pagedViews, viewNames);
+
+        pagedViews = catalog.listViewsPaged(databaseName, maxResults, pageToken);
+        assertPagedViews(pagedViews, viewNames);
+
+        // List views throws DatabaseNotExistException when the database does not exist
+        final int finalMaxResults = maxResults;
+        assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listViewsPaged(
+                                        "non_existing_db", finalMaxResults, pageToken));
+    }
+
+    @Test
+    public void testListViewDetailsPaged() throws Exception {
+        if (!supportsView()) {
+            return;
+        }
+
+        // List views returns an empty list when there are no views in the database
+        String databaseName = "view_details_paged_db";
+        catalog.createDatabase(databaseName, false);
+        PagedList<View> pagedViewDetailsPaged =
+                catalog.listViewDetailsPaged(databaseName, null, null);
+        assertThat(pagedViewDetailsPaged.getElements()).isEmpty();
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        // List view details paged returns a list with all view in the database in all catalogs
+        // except RestCatalog
+        // even if the maxResults or pageToken is not null
+        View view = buildView(databaseName);
+        String[] viewNames = {"view1", "view2", "view3", "abd", "def", "opr"};
+        for (String viewName : viewNames) {
+            catalog.createView(Identifier.create(databaseName, viewName), view, false);
+        }
+
+        pagedViewDetailsPaged = catalog.listViewDetailsPaged(databaseName, null, null);
+        assertPagedViewDetails(pagedViewDetailsPaged, view, viewNames.length, viewNames);
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        int maxResults = 2;
+        pagedViewDetailsPaged = catalog.listViewDetailsPaged(databaseName, maxResults, null);
+        assertPagedViewDetails(pagedViewDetailsPaged, view, viewNames.length, viewNames);
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        String pageToken = "view1";
+        pagedViewDetailsPaged = catalog.listViewDetailsPaged(databaseName, maxResults, pageToken);
+        assertPagedViewDetails(pagedViewDetailsPaged, view, viewNames.length, viewNames);
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        maxResults = 8;
+        pagedViewDetailsPaged = catalog.listViewDetailsPaged(databaseName, maxResults, null);
+        assertPagedViewDetails(pagedViewDetailsPaged, view, viewNames.length, viewNames);
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        pagedViewDetailsPaged = catalog.listViewDetailsPaged(databaseName, maxResults, pageToken);
+        assertPagedViewDetails(pagedViewDetailsPaged, view, viewNames.length, viewNames);
+        assertNull(pagedViewDetailsPaged.getNextPageToken());
+
+        // List view details throws DatabaseNotExistException when the database does not exist
+        final int finalMaxResults = maxResults;
+        assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listViewDetailsPaged(
+                                        "non_existing_db", finalMaxResults, pageToken));
+    }
+
+    @Test
+    public void testFormatTable() throws Exception {
+        if (!supportsFormatTable()) {
+            return;
+        }
+
+        Identifier identifier = new Identifier("format_db", "my_format");
+        catalog.createDatabase(identifier.getDatabaseName(), false);
+
+        // create table
+        Schema schema =
+                Schema.newBuilder()
+                        .column("str", DataTypes.STRING())
+                        .column("int", DataTypes.INT())
+                        .options(getFormatTableOptions())
+                        .option("file.format", "csv")
+                        .build();
+        catalog.createTable(identifier, schema, false);
+        assertThat(catalog.listTables(identifier.getDatabaseName()))
+                .contains(identifier.getTableName());
+        assertThat(catalog.getTable(identifier)).isInstanceOf(FormatTable.class);
+
+        // alter table
+        SchemaChange schemaChange = SchemaChange.addColumn("new_col", DataTypes.STRING());
+        assertThatThrownBy(() -> catalog.alterTable(identifier, schemaChange, false))
+                .hasMessageContaining("Only data table support alter table.");
+
+        // drop table
+        catalog.dropTable(identifier, false);
+        assertThatThrownBy(() -> catalog.getTable(identifier))
+                .isInstanceOf(Catalog.TableNotExistException.class);
+
+        // rename table
+        catalog.createTable(identifier, schema, false);
+        Identifier newIdentifier = new Identifier("format_db", "new_format");
+        catalog.renameTable(identifier, newIdentifier, false);
+        assertThatThrownBy(() -> catalog.getTable(identifier))
+                .isInstanceOf(Catalog.TableNotExistException.class);
+        assertThat(catalog.getTable(newIdentifier)).isInstanceOf(FormatTable.class);
+    }
+
+    @Test
+    public void testTableUUID() throws Exception {
+        catalog.createDatabase("test_db", false);
+        Identifier identifier = Identifier.create("test_db", "test_table");
+        catalog.createTable(identifier, DEFAULT_TABLE_SCHEMA, false);
+        Table table = catalog.getTable(identifier);
+        String uuid = table.uuid();
+        assertThat(uuid).startsWith(identifier.getFullName() + ".");
+        assertThat(Long.parseLong(uuid.substring((identifier.getFullName() + ".").length())))
+                .isGreaterThan(0);
+    }
+
+    @Test
+    public void testPartitions() throws Exception {
+        if (!supportPartitions()) {
+            return;
+        }
+        String databaseName = "testPartitionTable";
+        List<Map<String, String>> partitionSpecs =
+                Arrays.asList(
+                        Collections.singletonMap("dt", "20250101"),
+                        Collections.singletonMap("dt", "20250102"));
+        catalog.dropDatabase(databaseName, true, true);
+        catalog.createDatabase(databaseName, true);
+        Identifier identifier = Identifier.create(databaseName, "table");
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(METASTORE_TAG_TO_PARTITION.key(), "dt")
+                        .column("col", DataTypes.INT())
+                        .column("dt", DataTypes.STRING())
+                        .partitionKeys("dt")
+                        .build(),
+                true);
+
+        BatchWriteBuilder writeBuilder = catalog.getTable(identifier).newBatchWriteBuilder();
+        try (BatchTableWrite write = writeBuilder.newWrite();
+                BatchTableCommit commit = writeBuilder.newCommit()) {
+            for (Map<String, String> partitionSpec : partitionSpecs) {
+                write.write(GenericRow.of(0, BinaryString.fromString(partitionSpec.get("dt"))));
+            }
+            commit.commit(write.prepareCommit());
+        }
+
+        assertThat(catalog.listPartitions(identifier).stream().map(Partition::spec))
+                .containsExactlyInAnyOrder(partitionSpecs.get(0), partitionSpecs.get(1));
+
+        assertDoesNotThrow(() -> catalog.markDonePartitions(identifier, partitionSpecs));
+
+        catalog.dropPartitions(identifier, partitionSpecs);
+
+        assertThat(catalog.listPartitions(identifier)).isEmpty();
+
+        assertThatExceptionOfType(Catalog.TableNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listPartitions(
+                                        Identifier.create(databaseName, "non_existing_table")));
+        assertThatExceptionOfType(Catalog.TableNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.markDonePartitions(
+                                        Identifier.create(databaseName, "non_existing_table"),
+                                        partitionSpecs));
+    }
+
+    @Test
+    public void testListPartitionsPaged() throws Exception {
+        if (!supportPartitions()) {
+            return;
+        }
+        String databaseName = "partitions_paged_db";
+        List<Map<String, String>> partitionSpecs =
+                Arrays.asList(
+                        Collections.singletonMap("dt", "20250101"),
+                        Collections.singletonMap("dt", "20250102"),
+                        Collections.singletonMap("dt", "20240102"),
+                        Collections.singletonMap("dt", "20260101"),
+                        Collections.singletonMap("dt", "20250104"),
+                        Collections.singletonMap("dt", "20250103"));
+        catalog.dropDatabase(databaseName, true, true);
+        catalog.createDatabase(databaseName, true);
+        Identifier identifier = Identifier.create(databaseName, "table");
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .option(METASTORE_PARTITIONED_TABLE.key(), "true")
+                        .option(METASTORE_TAG_TO_PARTITION.key(), "dt")
+                        .column("col", DataTypes.INT())
+                        .column("dt", DataTypes.STRING())
+                        .partitionKeys("dt")
+                        .build(),
+                true);
+
+        BatchWriteBuilder writeBuilder = catalog.getTable(identifier).newBatchWriteBuilder();
+        try (BatchTableWrite write = writeBuilder.newWrite();
+                BatchTableCommit commit = writeBuilder.newCommit()) {
+            for (Map<String, String> partitionSpec : partitionSpecs) {
+                write.write(GenericRow.of(0, BinaryString.fromString(partitionSpec.get("dt"))));
+            }
+            commit.commit(write.prepareCommit());
+        }
+
+        // List partitions paged returns a list with all partitions of the table in all catalogs
+        // except RestCatalog even
+        // if the maxResults or pageToken is not null
+        PagedList<Partition> pagedPartitions = catalog.listPartitionsPaged(identifier, null, null);
+        Map[] specs = partitionSpecs.toArray(new Map[0]);
+        assertPagedPartitions(pagedPartitions, specs.length, specs);
+
+        int maxResults = 2;
+        pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, null);
+        assertPagedPartitions(pagedPartitions, specs.length, specs);
+
+        String pageToken = "dt=20250101";
+        pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, pageToken);
+        assertPagedPartitions(pagedPartitions, specs.length, specs);
+
+        maxResults = 8;
+        pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, null);
+        assertPagedPartitions(pagedPartitions, specs.length, specs);
+
+        pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, pageToken);
+        assertPagedPartitions(pagedPartitions, specs.length, specs);
+
+        // List partitions throws TableNotExistException when the table does not exist
+        final int finalMaxResults = maxResults;
+        assertThatExceptionOfType(Catalog.TableNotExistException.class)
+                .isThrownBy(
+                        () ->
+                                catalog.listPartitionsPaged(
+                                        Identifier.create(databaseName, "non_existing_table"),
+                                        finalMaxResults,
+                                        pageToken));
+    }
+
+    protected boolean supportsAlterDatabase() {
+        return false;
+    }
+
+    protected boolean supportsFormatTable() {
+        return false;
+    }
+
+    protected boolean supportsView() {
+        return false;
+    }
+
+    protected boolean supportsViewDialects() {
+        return true;
+    }
+
+    protected void checkPartition(Partition expected, Partition actual) {
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    protected boolean supportPartitions() {
+        return false;
+    }
+
+    protected boolean supportPagedList() {
+        return false;
+    }
+
+    private void assertPagedTables(PagedList<String> tablePagedList, String... tableNames) {
+        List<String> tables = tablePagedList.getElements();
+        if (supportPagedList()) {
+            assertThat(tables).containsExactly(tableNames);
+        } else {
+            assertThat(tables).containsExactlyInAnyOrder(tableNames);
+        }
+        assertNull(tablePagedList.getNextPageToken());
+    }
+
+    protected void assertPagedTableDetails(
+            PagedList<Table> tableDetailsPagedList, int size, String... tableNames) {
+        List<Table> tableDetails = tableDetailsPagedList.getElements();
+        assertEquals(size, tableDetails.size());
+        if (supportPagedList()) {
+            assertThat(tableDetails.stream().map(Table::name).collect(Collectors.toList()))
+                    .containsExactly(tableNames);
+        } else {
+            assertThat(tableDetails.stream().map(Table::name).collect(Collectors.toList()))
+                    .containsExactlyInAnyOrder(tableNames);
+        }
+        List<Schema> schemas =
+                tableDetails.stream()
+                        .filter(table -> table instanceof FileStoreTable)
+                        .map(table -> (FileStoreTable) table)
+                        .map(FileStoreTable::schema)
+                        .map(TableSchema::toSchema)
+                        .collect(Collectors.toList());
+        assertThat(
+                        schemas.stream()
+                                .map(Schema::fields)
+                                .allMatch(fields -> DEFAULT_TABLE_SCHEMA.fields().equals(fields)))
+                .isTrue();
+        assertThat(
+                        schemas.stream()
+                                .map(Schema::partitionKeys)
+                                .allMatch(
+                                        partitionKeys ->
+                                                DEFAULT_TABLE_SCHEMA
+                                                        .partitionKeys()
+                                                        .equals(partitionKeys)))
+                .isTrue();
+        assertThat(
+                        schemas.stream()
+                                .map(Schema::primaryKeys)
+                                .allMatch(
+                                        primaryKeys ->
+                                                DEFAULT_TABLE_SCHEMA
+                                                        .primaryKeys()
+                                                        .equals(primaryKeys)))
+                .isTrue();
+        assertThat(
+                        schemas.stream()
+                                .map(Schema::options)
+                                .allMatch(
+                                        options ->
+                                                DEFAULT_TABLE_SCHEMA.options().size()
+                                                        <= options.size()))
+                .isTrue(); // output schema has path
+        assertThat(
+                        schemas.stream()
+                                .map(Schema::comment)
+                                .allMatch(
+                                        comment -> DEFAULT_TABLE_SCHEMA.comment().equals(comment)))
+                .isTrue();
+    }
+
+    protected View buildView(String databaseName) {
+        Identifier identifier = new Identifier(databaseName, "my_view");
+        RowType rowType = RowType.builder().field("str", DataTypes.STRING()).build();
+        String query = "SELECT * FROM OTHER_TABLE";
+
+        Map<String, String> dialects = new HashMap<>();
+        if (supportsViewDialects()) {
+            dialects.put("spark", "SELECT * FROM SPARK_TABLE");
+        }
+        return new ViewImpl(
+                identifier, rowType.getFields(), query, dialects, null, new HashMap<>());
+    }
+
+    protected void assertPagedViews(PagedList<String> viewPagedList, String... viewNames) {
+        List<String> views = viewPagedList.getElements();
+        if (supportPagedList()) {
+            assertThat(views).containsExactly(viewNames);
+        } else {
+            assertThat(views).containsExactlyInAnyOrder(viewNames);
+        }
+    }
+
+    protected void assertPagedViewDetails(
+            PagedList<View> viewDetailsPagedList, View view, int size, String... viewNames) {
+        List<View> viewDetails = viewDetailsPagedList.getElements();
+        assertEquals(size, viewDetails.size());
+        if (supportPagedList()) {
+            assertThat(viewDetails.stream().map(View::name).collect(Collectors.toList()))
+                    .containsExactlyInAnyOrder(viewNames);
+        } else {
+            assertThat(viewDetails.stream().map(View::name).collect(Collectors.toList()))
+                    .containsExactlyInAnyOrder(viewNames);
+        }
+        assertThat(
+                        viewDetails.stream()
+                                .map(View::rowType)
+                                .allMatch(rowType -> view.rowType().equals(rowType)))
+                .isTrue();
+        assertThat(
+                        viewDetails.stream()
+                                .map(View::query)
+                                .allMatch(query -> view.query().equals(query)))
+                .isTrue();
+        assertThat(
+                        viewDetails.stream()
+                                .map(View::dialects)
+                                .allMatch(dialects -> view.dialects().equals(dialects)))
+                .isTrue();
+        assertThat(
+                        viewDetails.stream()
+                                .map(View::comment)
+                                .allMatch(comment -> view.comment().equals(comment)))
+                .isTrue();
+        assertThat(
+                        viewDetails.stream()
+                                .map(View::options)
+                                .allMatch(options -> view.options().size() <= options.size()))
+                .isTrue(); // last ddl time
+    }
+
+    @SafeVarargs
+    protected final void assertPagedPartitions(
+            PagedList<Partition> partitionsPagedList,
+            int size,
+            Map<String, String>... partitionSpecs) {
+        List<Partition> partitions = partitionsPagedList.getElements();
+        assertEquals(size, partitions.size());
+        if (supportPagedList()) {
+            assertThat(partitions.stream().map(Partition::spec)).containsExactly(partitionSpecs);
+        } else {
+            assertThat(partitions.stream().map(Partition::spec))
+                    .containsExactlyInAnyOrder(partitionSpecs);
+        }
+    }
+
+    protected Map<String, String> getFormatTableOptions() {
+        Map<String, String> options = new HashMap<>(1);
+        options.put("type", "format-table");
+        return options;
+    }
+
+    protected View createView(Identifier identifier) {
+        RowType rowType =
+                RowType.builder()
+                        .field("str", DataTypes.STRING())
+                        .field("int", DataTypes.INT())
+                        .build();
+        String query = "SELECT * FROM OTHER_TABLE";
+        String comment = "it is my view";
+        Map<String, String> options = new HashMap<>();
+        options.put("key1", "v1");
+        options.put("key2", "v2");
+
+        Map<String, String> dialects = new HashMap<>();
+        if (supportsViewDialects()) {
+            dialects.put("flink", "SELECT * FROM FLINK_TABLE");
+            dialects.put("spark", "SELECT * FROM SPARK_TABLE");
+        }
+        return new ViewImpl(identifier, rowType.getFields(), query, dialects, comment, options);
     }
 }

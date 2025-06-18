@@ -19,8 +19,9 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.annotation.Experimental;
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.utils.SingleOutputStreamOperatorUtils;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.BucketMode;
@@ -35,6 +36,7 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import javax.annotation.Nullable;
 
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
+import static org.apache.paimon.flink.utils.ParallelismUtils.forwardParallelism;
 
 /**
  * Builder for sink when syncing records into one Paimon table.
@@ -48,7 +50,8 @@ public class CdcSinkBuilder<T> {
     private EventParser.Factory<T> parserFactory = null;
     private Table table = null;
     private Identifier identifier = null;
-    private Catalog.Loader catalogLoader = null;
+    private CatalogLoader catalogLoader = null;
+    private TypeMapping typeMapping = null;
 
     @Nullable private Integer parallelism;
 
@@ -77,8 +80,13 @@ public class CdcSinkBuilder<T> {
         return this;
     }
 
-    public CdcSinkBuilder<T> withCatalogLoader(Catalog.Loader catalogLoader) {
+    public CdcSinkBuilder<T> withCatalogLoader(CatalogLoader catalogLoader) {
         this.catalogLoader = catalogLoader;
+        return this;
+    }
+
+    public CdcSinkBuilder<T> withTypeMapping(TypeMapping typeMapping) {
+        this.typeMapping = typeMapping;
         return this;
     }
 
@@ -99,17 +107,18 @@ public class CdcSinkBuilder<T> {
         SingleOutputStreamOperator<CdcRecord> parsed =
                 input.forward()
                         .process(new CdcParsingProcessFunction<>(parserFactory))
-                        .name("Side Output")
-                        .setParallelism(input.getParallelism());
+                        .name("Side Output");
+        forwardParallelism(parsed, input);
 
         DataStream<Void> schemaChangeProcessFunction =
                 SingleOutputStreamOperatorUtils.getSideOutput(
-                                parsed, CdcParsingProcessFunction.NEW_DATA_FIELD_LIST_OUTPUT_TAG)
+                                parsed, CdcParsingProcessFunction.SCHEMA_CHANGE_OUTPUT_TAG)
                         .process(
                                 new UpdatedDataFieldsProcessFunction(
                                         new SchemaManager(dataTable.fileIO(), dataTable.location()),
                                         identifier,
-                                        catalogLoader))
+                                        catalogLoader,
+                                        typeMapping))
                         .name("Schema Evolution");
         schemaChangeProcessFunction.getTransformation().setParallelism(1);
         schemaChangeProcessFunction.getTransformation().setMaxParallelism(1);
@@ -139,6 +148,7 @@ public class CdcSinkBuilder<T> {
 
     private DataStreamSink<?> buildForUnawareBucket(DataStream<CdcRecord> parsed) {
         FileStoreTable dataTable = (FileStoreTable) table;
-        return new CdcUnawareBucketSink(dataTable, parallelism).sinkFrom(parsed);
+        // rebalance it to make sure schema change work to avoid infinite loop
+        return new CdcUnawareBucketSink(dataTable, parallelism).sinkFrom(parsed.rebalance());
     }
 }

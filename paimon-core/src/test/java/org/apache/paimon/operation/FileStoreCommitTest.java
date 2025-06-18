@@ -31,8 +31,12 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.index.IndexFileHandler;
 import org.apache.paimon.index.IndexFileMeta;
+import org.apache.paimon.manifest.FileKind;
 import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.manifest.ManifestCommittable;
+import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.manifest.ManifestFile;
+import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.mergetree.compact.DeduplicateMergeFunction;
 import org.apache.paimon.predicate.PredicateBuilder;
 import org.apache.paimon.schema.Schema;
@@ -79,7 +83,9 @@ import java.util.stream.Collectors;
 
 import static org.apache.paimon.index.HashIndexFile.HASH_INDEX;
 import static org.apache.paimon.partition.PartitionPredicate.createPartitionPredicate;
+import static org.apache.paimon.stats.SimpleStats.EMPTY_STATS;
 import static org.apache.paimon.testutils.assertj.PaimonAssertions.anyCauseMatches;
+import static org.apache.paimon.utils.HintFileUtils.LATEST;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -160,7 +166,7 @@ public class FileStoreCommitTest {
         testRandomConcurrentNoConflict(1, false, CoreOptions.ChangelogProducer.NONE);
         SnapshotManager snapshotManager = createStore(false, 1).snapshotManager();
         Path snapshotDir = snapshotManager.snapshotDirectory();
-        Path latest = new Path(snapshotDir, SnapshotManager.LATEST);
+        Path latest = new Path(snapshotDir, LATEST);
 
         assertThat(new LocalFileIO().exists(latest)).isTrue();
 
@@ -181,7 +187,7 @@ public class FileStoreCommitTest {
         Path firstSnapshotPath = snapshotManager.snapshotPath(Snapshot.FIRST_SNAPSHOT_ID);
         LocalFileIO.create().deleteQuietly(firstSnapshotPath);
         // this test succeeds if this call does not fail
-        try (FileStoreCommit commit = store.newCommit(UUID.randomUUID().toString())) {
+        try (FileStoreCommit commit = store.newCommit(UUID.randomUUID().toString(), null)) {
             commit.filterCommitted(Collections.singletonList(new ManifestCommittable(999L)));
         }
     }
@@ -202,7 +208,7 @@ public class FileStoreCommitTest {
         }
 
         // all commit identifiers should be filtered out
-        try (FileStoreCommit commit = store.newCommit(user)) {
+        try (FileStoreCommit commit = store.newCommit(user, null)) {
             assertThat(
                             commit.filterCommitted(
                                     commitIdentifiers.stream()
@@ -238,6 +244,8 @@ public class FileStoreCommitTest {
 
         testRandomConcurrent(
                 dataPerThread,
+                // overwrite cannot produce changelog
+                // so only enable it when changelog producer is none
                 changelogProducer == CoreOptions.ChangelogProducer.NONE,
                 failing,
                 changelogProducer);
@@ -733,7 +741,7 @@ public class FileStoreCommitTest {
 
         // assert part1
         List<IndexManifestEntry> part1Index =
-                indexFileHandler.scanEntries(snapshot.id(), HASH_INDEX, part1);
+                indexFileHandler.scanEntries(snapshot, HASH_INDEX, part1);
         assertThat(part1Index.size()).isEqualTo(2);
 
         IndexManifestEntry indexManifestEntry =
@@ -748,7 +756,7 @@ public class FileStoreCommitTest {
 
         // assert part2
         List<IndexManifestEntry> part2Index =
-                indexFileHandler.scanEntries(snapshot.id(), HASH_INDEX, part2);
+                indexFileHandler.scanEntries(snapshot, HASH_INDEX, part2);
         assertThat(part2Index.size()).isEqualTo(1);
         assertThat(part2Index.get(0).bucket()).isEqualTo(2);
         assertThat(indexFileHandler.readHashIndexList(part2Index.get(0).indexFile()))
@@ -760,7 +768,7 @@ public class FileStoreCommitTest {
         snapshot = store.snapshotManager().latestSnapshot();
 
         // assert update part1
-        part1Index = indexFileHandler.scanEntries(snapshot.id(), HASH_INDEX, part1);
+        part1Index = indexFileHandler.scanEntries(snapshot, HASH_INDEX, part1);
         assertThat(part1Index.size()).isEqualTo(2);
 
         indexManifestEntry =
@@ -774,7 +782,7 @@ public class FileStoreCommitTest {
                 .containsExactlyInAnyOrder(6, 8);
 
         // assert scan one bucket
-        Optional<IndexFileMeta> file = indexFileHandler.scanHashIndex(snapshot.id(), part1, 0);
+        Optional<IndexFileMeta> file = indexFileHandler.scanHashIndex(snapshot, part1, 0);
         assertThat(file).isPresent();
         assertThat(indexFileHandler.readHashIndexList(file.get())).containsExactlyInAnyOrder(1, 4);
 
@@ -783,9 +791,9 @@ public class FileStoreCommitTest {
         store.overwriteData(
                 Collections.singletonList(record1), gen::getPartition, kv -> 0, new HashMap<>());
         snapshot = store.snapshotManager().latestSnapshot();
-        file = indexFileHandler.scanHashIndex(snapshot.id(), part1, 0);
+        file = indexFileHandler.scanHashIndex(snapshot, part1, 0);
         assertThat(file).isEmpty();
-        file = indexFileHandler.scanHashIndex(snapshot.id(), part2, 2);
+        file = indexFileHandler.scanHashIndex(snapshot, part2, 2);
         assertThat(file).isPresent();
 
         // overwrite all partitions
@@ -793,7 +801,7 @@ public class FileStoreCommitTest {
         store.overwriteData(
                 Collections.singletonList(record1), gen::getPartition, kv -> 0, new HashMap<>());
         snapshot = store.snapshotManager().latestSnapshot();
-        file = indexFileHandler.scanHashIndex(snapshot.id(), part2, 2);
+        file = indexFileHandler.scanHashIndex(snapshot, part2, 2);
         assertThat(file).isEmpty();
     }
 
@@ -908,16 +916,125 @@ public class FileStoreCommitTest {
         assertThat(dvs.get("f2").isDeleted(3)).isTrue();
     }
 
+    @Test
+    public void testManifestCompact() throws Exception {
+        TestFileStore store = createStore(false);
+
+        List<KeyValue> keyValues = generateDataList(1);
+        BinaryRow partition = gen.getPartition(keyValues.get(0));
+        // commit 1
+        Snapshot snapshot1 =
+                store.commitData(keyValues, s -> partition, kv -> 0, Collections.emptyMap()).get(0);
+        // commit 2
+        Snapshot snapshot2 =
+                store.overwriteData(keyValues, s -> partition, kv -> 0, Collections.emptyMap())
+                        .get(0);
+        // commit 3
+        Snapshot snapshot3 =
+                store.overwriteData(keyValues, s -> partition, kv -> 0, Collections.emptyMap())
+                        .get(0);
+
+        long deleteNum =
+                store.manifestListFactory().create().readDataManifests(snapshot3).stream()
+                        .mapToLong(ManifestFileMeta::numDeletedFiles)
+                        .sum();
+        assertThat(deleteNum).isGreaterThan(0);
+        store.newCommit().compactManifest();
+        Snapshot latest = store.snapshotManager().latestSnapshot();
+        assertThat(
+                        store.manifestListFactory().create().readDataManifests(latest).stream()
+                                .mapToLong(ManifestFileMeta::numDeletedFiles)
+                                .sum())
+                .isEqualTo(0);
+    }
+
+    @Test
+    public void testDropStatsForOverwrite() throws Exception {
+        TestFileStore store = createStore(false);
+        store.options().toConfiguration().set(CoreOptions.MANIFEST_DELETE_FILE_DROP_STATS, true);
+
+        List<KeyValue> keyValues = generateDataList(1);
+        BinaryRow partition = gen.getPartition(keyValues.get(0));
+        // commit 1
+        Snapshot snapshot1 =
+                store.commitData(keyValues, s -> partition, kv -> 0, Collections.emptyMap()).get(0);
+        // overwrite commit 2
+        Snapshot snapshot2 =
+                store.overwriteData(keyValues, s -> partition, kv -> 0, Collections.emptyMap())
+                        .get(0);
+        ManifestFile manifestFile = store.manifestFileFactory().create();
+        List<ManifestEntry> entries =
+                store.manifestListFactory().create().readDataManifests(snapshot2).stream()
+                        .flatMap(meta -> manifestFile.read(meta.fileName()).stream())
+                        .collect(Collectors.toList());
+        for (ManifestEntry manifestEntry : entries) {
+            if (manifestEntry.kind() == FileKind.DELETE) {
+                assertThat(manifestEntry.file().valueStats()).isEqualTo(EMPTY_STATS);
+            }
+        }
+    }
+
+    @Test
+    public void testManifestCompactFull() throws Exception {
+        // Disable full compaction by options.
+        TestFileStore store =
+                createStore(
+                        false,
+                        Collections.singletonMap(
+                                CoreOptions.MANIFEST_FULL_COMPACTION_FILE_SIZE.key(),
+                                String.valueOf(Long.MAX_VALUE)));
+
+        List<KeyValue> keyValues = generateDataList(1);
+        BinaryRow partition = gen.getPartition(keyValues.get(0));
+        // commit 1
+        Snapshot snapshot =
+                store.commitData(keyValues, s -> partition, kv -> 0, Collections.emptyMap()).get(0);
+
+        for (int i = 0; i < 100; i++) {
+            snapshot =
+                    store.overwriteData(keyValues, s -> partition, kv -> 0, Collections.emptyMap())
+                            .get(0);
+        }
+
+        long deleteNum =
+                store.manifestListFactory().create().readDataManifests(snapshot).stream()
+                        .mapToLong(ManifestFileMeta::numDeletedFiles)
+                        .sum();
+        assertThat(deleteNum).isGreaterThan(0);
+        store.newCommit().compactManifest();
+        Snapshot latest = store.snapshotManager().latestSnapshot();
+        assertThat(
+                        store.manifestListFactory().create().readDataManifests(latest).stream()
+                                .mapToLong(ManifestFileMeta::numDeletedFiles)
+                                .sum())
+                .isEqualTo(0);
+    }
+
+    private TestFileStore createStore(boolean failing, Map<String, String> options)
+            throws Exception {
+        return createStore(failing, 1, CoreOptions.ChangelogProducer.NONE, options);
+    }
+
     private TestFileStore createStore(boolean failing) throws Exception {
         return createStore(failing, 1);
     }
 
     private TestFileStore createStore(boolean failing, int numBucket) throws Exception {
-        return createStore(failing, numBucket, CoreOptions.ChangelogProducer.NONE);
+        return createStore(
+                failing, numBucket, CoreOptions.ChangelogProducer.NONE, Collections.emptyMap());
     }
 
     private TestFileStore createStore(
             boolean failing, int numBucket, CoreOptions.ChangelogProducer changelogProducer)
+            throws Exception {
+        return createStore(failing, numBucket, changelogProducer, Collections.emptyMap());
+    }
+
+    private TestFileStore createStore(
+            boolean failing,
+            int numBucket,
+            CoreOptions.ChangelogProducer changelogProducer,
+            Map<String, String> options)
             throws Exception {
         String root =
                 failing
@@ -932,7 +1049,7 @@ public class FileStoreCommitTest {
                                 TestKeyValueGenerator.DEFAULT_PART_TYPE.getFieldNames(),
                                 TestKeyValueGenerator.getPrimaryKeys(
                                         TestKeyValueGenerator.GeneratorMode.MULTI_PARTITIONED),
-                                Collections.emptyMap(),
+                                options,
                                 null));
         return new TestFileStore.Builder(
                         "avro",

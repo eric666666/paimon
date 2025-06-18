@@ -21,7 +21,9 @@ package org.apache.paimon.catalog;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.table.TableType;
+import org.apache.paimon.table.CatalogTableType;
+import org.apache.paimon.utils.HadoopUtilsITCase.TestFileIOLoader;
+import org.apache.paimon.utils.InstantiationUtil;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -63,7 +65,7 @@ public class CatalogFactoryTest {
         Path root = new Path(path.toUri().toString());
         Options options = new Options();
         options.set(WAREHOUSE, new Path(root, "warehouse").toString());
-        options.set(TABLE_TYPE, TableType.EXTERNAL);
+        options.set(TABLE_TYPE, CatalogTableType.EXTERNAL);
         assertThatThrownBy(() -> CatalogFactory.createCatalog(CatalogContext.create(options)))
                 .hasMessageContaining("Only managed table is supported in File system catalog.");
     }
@@ -83,5 +85,16 @@ public class CatalogFactoryTest {
         assertThat(conf).isInstanceOf(HdfsConfiguration.class);
         assertThat(conf.get("fs.defaultFS")).isEqualTo(defaultFS);
         assertThat(conf.get("dfs.replication")).isEqualTo(replication);
+    }
+
+    @Test
+    public void testContextSerializable() throws IOException, ClassNotFoundException {
+        Configuration conf = new Configuration(false);
+        conf.set("my_key", "my_value");
+        CatalogContext context =
+                CatalogContext.create(
+                        new Options(), conf, new TestFileIOLoader(), new TestFileIOLoader());
+        context = InstantiationUtil.clone(context);
+        assertThat(context.hadoopConf().get("my_key")).isEqualTo(conf.get("my_key"));
     }
 }

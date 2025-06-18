@@ -19,6 +19,7 @@
 package org.apache.paimon.table.source.snapshot;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.Snapshot;
 import org.apache.paimon.table.source.ScanMode;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -26,13 +27,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** {@link StartingScanner} for the {@link CoreOptions.StartupMode#LATEST_FULL} startup mode. */
-public class FullStartingScanner extends AbstractStartingScanner {
+public class FullStartingScanner extends ReadPlanStartingScanner {
 
     private static final Logger LOG = LoggerFactory.getLogger(FullStartingScanner.class);
 
+    private Snapshot startingSnapshot;
+
     public FullStartingScanner(SnapshotManager snapshotManager) {
         super(snapshotManager);
-        this.startingSnapshotId = snapshotManager.latestSnapshotId();
+        this.startingSnapshot = snapshotManager.latestSnapshot();
+        if (this.startingSnapshot != null) {
+            this.startingSnapshotId = startingSnapshot.id();
+        }
     }
 
     @Override
@@ -41,16 +47,15 @@ public class FullStartingScanner extends AbstractStartingScanner {
     }
 
     @Override
-    public Result scan(SnapshotReader snapshotReader) {
-        if (startingSnapshotId == null) {
+    public SnapshotReader configure(SnapshotReader snapshotReader) {
+        if (startingSnapshot == null) {
             // try to get first snapshot again
-            startingSnapshotId = snapshotManager.latestSnapshotId();
+            startingSnapshot = snapshotManager.latestSnapshot();
         }
-        if (startingSnapshotId == null) {
+        if (startingSnapshot == null) {
             LOG.debug("There is currently no snapshot. Waiting for snapshot generation.");
-            return new NoSnapshot();
+            return null;
         }
-        return StartingScanner.fromPlan(
-                snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshotId).read());
+        return snapshotReader.withMode(ScanMode.ALL).withSnapshot(startingSnapshot);
     }
 }

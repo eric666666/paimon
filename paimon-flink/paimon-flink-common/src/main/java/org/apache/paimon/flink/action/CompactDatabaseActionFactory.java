@@ -22,6 +22,8 @@ import org.apache.paimon.utils.TimeUtils;
 
 import java.util.Optional;
 
+import static org.apache.paimon.flink.action.CompactActionFactory.checkCompactStrategy;
+
 /** Factory to create {@link CompactDatabaseAction}. */
 public class CompactDatabaseActionFactory implements ActionFactory {
 
@@ -40,10 +42,7 @@ public class CompactDatabaseActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        CompactDatabaseAction action =
-                new CompactDatabaseAction(
-                        getRequiredValue(params, WAREHOUSE),
-                        optionalConfigMap(params, CATALOG_CONF));
+        CompactDatabaseAction action = new CompactDatabaseAction(catalogConfigMap(params));
 
         action.includingDatabases(params.get(INCLUDING_DATABASES))
                 .includingTables(params.get(INCLUDING_TABLES))
@@ -53,6 +52,11 @@ public class CompactDatabaseActionFactory implements ActionFactory {
         String partitionIdleTime = params.get(PARTITION_IDLE_TIME);
         if (partitionIdleTime != null) {
             action.withPartitionIdleTime(TimeUtils.parseDuration(partitionIdleTime));
+        }
+
+        String compactStrategy = params.get(COMPACT_STRATEGY);
+        if (checkCompactStrategy(compactStrategy)) {
+            action.withFullCompaction(compactStrategy.trim().equalsIgnoreCase(FULL));
         }
 
         return Optional.of(action);
@@ -66,11 +70,12 @@ public class CompactDatabaseActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  compact_database --warehouse <warehouse_path> --including_databases <database-name|name-regular-expr> "
-                        + "[--including_tables <paimon_table_name|name_regular_expr>] "
-                        + "[--excluding_tables <paimon_table_name|name_regular_expr>] "
-                        + "[--mode <compact_mode>]"
-                        + "[--partition_idle_time <partition_idle_time>]");
+                "  compact_database --warehouse <warehouse_path> --including_databases <database-name|name-regular-expr> \\\n"
+                        + "[--including_tables <paimon_table_name|name_regular_expr>] \\\n"
+                        + "[--excluding_tables <paimon_table_name|name_regular_expr>] \\\n"
+                        + "[--mode <compact_mode>] \\\n"
+                        + "[--partition_idle_time <partition_idle_time>] \\\n"
+                        + "[--compact_strategy <compact_strategy>]");
         System.out.println(
                 "  compact_database --warehouse s3://path/to/warehouse --including_databases <database-name|name-regular-expr> "
                         + "[--catalog_conf <paimon_catalog_conf> [--catalog_conf <paimon_catalog_conf> ...]]");
@@ -93,16 +98,21 @@ public class CompactDatabaseActionFactory implements ActionFactory {
         System.out.println(
                 "--partition_idle_time is used to do a full compaction for partition which had not receive any new data for 'partition_idle_time' time. And only these partitions will be compacted.");
         System.out.println("--partition_idle_time is only supported in batch mode. ");
+        System.out.println(
+                "--compact_strategy determines how to pick files to be merged, the default is determined by the runtime execution mode. "
+                        + "`full` : Only supports batch mode. All files will be selected for merging."
+                        + "`minor`: Pick the set of files that need to be merged based on specified conditions.");
+
         System.out.println();
 
         System.out.println("Examples:");
         System.out.println(
                 "  compact_database --warehouse hdfs:///path/to/warehouse --including_databases test_db");
         System.out.println(
-                "  compact_database --warehouse s3:///path/to/warehouse "
-                        + "--including_databases test_db "
-                        + "--catalog_conf s3.endpoint=https://****.com "
-                        + "--catalog_conf s3.access-key=***** "
+                "  compact_database --warehouse s3:///path/to/warehouse \\\n"
+                        + "--including_databases test_db \\\n"
+                        + "--catalog_conf s3.endpoint=https://****.com \\\n"
+                        + "--catalog_conf s3.access-key=***** \\\n"
                         + "--catalog_conf s3.secret-key=***** ");
     }
 }

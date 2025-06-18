@@ -77,19 +77,19 @@ public class UnawareAppendCompactionTask {
         IndexIncrement indexIncrement;
         if (dvEnabled) {
             UnawareAppendDeletionFileMaintainer dvIndexFileMaintainer =
-                    (UnawareAppendDeletionFileMaintainer)
-                            AppendDeletionFileMaintainer.forUnawareAppend(
-                                    table.store().newIndexFileHandler(),
-                                    table.snapshotManager().latestSnapshotId(),
-                                    partition);
+                    AppendDeletionFileMaintainer.forUnawareAppend(
+                            table.store().newIndexFileHandler(),
+                            table.snapshotManager().latestSnapshot(),
+                            partition);
             compactAfter.addAll(
                     write.compactRewrite(
-                            partition, UNAWARE_BUCKET, dvIndexFileMaintainer, compactBefore));
+                            partition,
+                            UNAWARE_BUCKET,
+                            dvIndexFileMaintainer::getDeletionVector,
+                            compactBefore));
 
             compactBefore.forEach(
-                    f -> {
-                        dvIndexFileMaintainer.notifyRemovedDeletionVector(f.fileName());
-                    });
+                    f -> dvIndexFileMaintainer.notifyRemovedDeletionVector(f.fileName()));
             List<IndexManifestEntry> indexEntries = dvIndexFileMaintainer.persist();
             Preconditions.checkArgument(
                     indexEntries.stream().noneMatch(i -> i.kind() == FileKind.ADD));
@@ -108,8 +108,10 @@ public class UnawareAppendCompactionTask {
                 new CompactIncrement(compactBefore, compactAfter, Collections.emptyList());
         return new CommitMessageImpl(
                 partition,
-                0, // bucket 0 is bucket for unaware-bucket table for compatibility with the old
-                // design
+                // bucket 0 is bucket for unaware-bucket table
+                // for compatibility with the old design
+                0,
+                table.coreOptions().bucket(),
                 DataIncrement.emptyIncrement(),
                 compactIncrement,
                 indexIncrement);

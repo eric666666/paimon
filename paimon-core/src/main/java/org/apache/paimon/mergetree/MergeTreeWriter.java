@@ -24,6 +24,7 @@ import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.compact.CompactDeletionFile;
 import org.apache.paimon.compact.CompactManager;
 import org.apache.paimon.compact.CompactResult;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.io.CompactIncrement;
@@ -59,7 +60,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     private final boolean writeBufferSpillable;
     private final MemorySize maxDiskSize;
     private final int sortMaxFan;
-    private final String sortCompression;
+    private final CompressOptions sortCompression;
     private final IOManager ioManager;
 
     private final RowType keyType;
@@ -89,7 +90,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             boolean writeBufferSpillable,
             MemorySize maxDiskSize,
             int sortMaxFan,
-            String sortCompression,
+            CompressOptions sortCompression,
             IOManager ioManager,
             CompactManager compactManager,
             long maxSequenceNumber,
@@ -141,7 +142,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     }
 
     @VisibleForTesting
-    CompactManager compactManager() {
+    public CompactManager compactManager() {
         return compactManager;
     }
 
@@ -240,9 +241,9 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             } else if (changelogProducer == ChangelogProducer.INPUT && isInsertOnly) {
                 List<DataFileMeta> changelogMetas = new ArrayList<>();
                 for (DataFileMeta dataMeta : dataMetas) {
-                    DataFileMeta changelogMeta =
-                            dataMeta.rename(writerFactory.newChangelogPath(0).getName());
-                    writerFactory.copyFile(dataMeta.fileName(), changelogMeta.fileName(), 0);
+                    String newFileName = writerFactory.newChangelogFileName(0);
+                    DataFileMeta changelogMeta = dataMeta.rename(newFileName);
+                    writerFactory.copyFile(dataMeta, changelogMeta);
                     changelogMetas.add(changelogMeta);
                 }
                 newFilesChangelog.addAll(changelogMetas);
@@ -277,8 +278,9 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     }
 
     @Override
-    public boolean isCompacting() {
-        return compactManager.isCompacting();
+    public boolean compactNotCompleted() {
+        compactManager.triggerCompaction(false);
+        return compactManager.compactNotCompleted();
     }
 
     @Override
@@ -288,6 +290,9 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void withInsertOnly(boolean insertOnly) {
+        if (this.isInsertOnly == insertOnly) {
+            return;
+        }
         if (insertOnly && writeBuffer != null && writeBuffer.size() > 0) {
             throw new IllegalStateException(
                     "Insert-only can only be set before any record is received.");
@@ -306,7 +311,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                         new ArrayList<>(compactBefore.values()),
                         new ArrayList<>(compactAfter),
                         new ArrayList<>(compactChangelog));
-        CompactDeletionFile drainDeletionFile = this.compactDeletionFile;
+        CompactDeletionFile drainDeletionFile = compactDeletionFile;
 
         newFiles.clear();
         deletedFiles.clear();
@@ -314,9 +319,9 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         compactBefore.clear();
         compactAfter.clear();
         compactChangelog.clear();
-        this.compactDeletionFile = null;
+        compactDeletionFile = null;
 
-        return new CommitIncrement(dataIncrement, compactIncrement, null, drainDeletionFile);
+        return new CommitIncrement(dataIncrement, compactIncrement, drainDeletionFile);
     }
 
     private void trySyncLatestCompaction(boolean blocking) throws Exception {
@@ -336,7 +341,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                 // 2. This file is not the input of upgraded.
                 if (!compactBefore.containsKey(file.fileName())
                         && !afterFiles.contains(file.fileName())) {
-                    writerFactory.deleteFile(file.fileName(), file.level());
+                    writerFactory.deleteFile(file);
                 }
             } else {
                 compactBefore.put(file.fileName(), file);
@@ -370,7 +375,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         deletedFiles.clear();
 
         for (DataFileMeta file : newFilesChangelog) {
-            writerFactory.deleteFile(file.fileName(), file.level());
+            writerFactory.deleteFile(file);
         }
         newFilesChangelog.clear();
 
@@ -385,12 +390,12 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         compactAfter.clear();
 
         for (DataFileMeta file : compactChangelog) {
-            writerFactory.deleteFile(file.fileName(), file.level());
+            writerFactory.deleteFile(file);
         }
         compactChangelog.clear();
 
         for (DataFileMeta file : delete) {
-            writerFactory.deleteFile(file.fileName(), file.level());
+            writerFactory.deleteFile(file);
         }
 
         if (compactDeletionFile != null) {

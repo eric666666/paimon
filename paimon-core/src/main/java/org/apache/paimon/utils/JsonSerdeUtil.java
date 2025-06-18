@@ -29,9 +29,11 @@ import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.DeserializationContext;
+import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.Module;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.SerializationFeature;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.SerializerProvider;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.deser.std.StdDeserializer;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.databind.module.SimpleModule;
@@ -53,10 +55,12 @@ public class JsonSerdeUtil {
      * Object mapper shared instance to serialize and deserialize the plan. Note that creating and
      * copying of object mappers is expensive and should be avoided.
      */
-    private static final ObjectMapper OBJECT_MAPPER_INSTANCE;
+    public static final ObjectMapper OBJECT_MAPPER_INSTANCE;
 
     static {
         OBJECT_MAPPER_INSTANCE = new ObjectMapper();
+        OBJECT_MAPPER_INSTANCE.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        OBJECT_MAPPER_INSTANCE.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
         OBJECT_MAPPER_INSTANCE.registerModule(createPaimonJacksonModule());
         OBJECT_MAPPER_INSTANCE.registerModule(new JavaTimeModule());
     }
@@ -108,7 +112,7 @@ public class JsonSerdeUtil {
     public static <T extends JsonNode> T getNodeAs(
             JsonNode root, String fieldName, Class<T> clazz) {
         JsonNode node = root.get(fieldName);
-        if (node == null) {
+        if (isNull(node)) {
             return null;
         }
 
@@ -154,21 +158,7 @@ public class JsonSerdeUtil {
         }
     }
 
-    private static Module createPaimonJacksonModule() {
-        SimpleModule module = new SimpleModule("Paimon");
-        registerJsonObjects(
-                module, TableSchema.class, SchemaSerializer.INSTANCE, SchemaSerializer.INSTANCE);
-        registerJsonObjects(
-                module,
-                DataField.class,
-                DataField::serializeJson,
-                DataTypeJsonParser::parseDataField);
-        registerJsonObjects(
-                module, DataType.class, DataType::serializeJson, DataTypeJsonParser::parseDataType);
-        return module;
-    }
-
-    private static <T> void registerJsonObjects(
+    public static <T> void registerJsonObjects(
             SimpleModule module,
             Class<T> clazz,
             JsonSerializer<T> serializer,
@@ -190,6 +180,20 @@ public class JsonSerdeUtil {
                         return deserializer.deserialize(parser.readValueAsTree());
                     }
                 });
+    }
+
+    private static Module createPaimonJacksonModule() {
+        SimpleModule module = new SimpleModule("Paimon");
+        registerJsonObjects(
+                module, TableSchema.class, SchemaSerializer.INSTANCE, SchemaSerializer.INSTANCE);
+        registerJsonObjects(
+                module,
+                DataField.class,
+                DataField::serializeJson,
+                DataTypeJsonParser::parseDataField);
+        registerJsonObjects(
+                module, DataType.class, DataType::serializeJson, DataTypeJsonParser::parseDataType);
+        return module;
     }
 
     /**
@@ -224,7 +228,7 @@ public class JsonSerdeUtil {
             throws JsonProcessingException {
         for (String key : path) {
             jsonNode = jsonNode.get(key);
-            if (jsonNode == null) {
+            if (isNull(jsonNode)) {
                 if (defaultValue != null) {
                     return defaultValue;
                 }
@@ -244,7 +248,7 @@ public class JsonSerdeUtil {
     public static boolean isNodeExists(JsonNode jsonNode, String... path) {
         for (String key : path) {
             jsonNode = jsonNode.get(key);
-            if (jsonNode == null) {
+            if (isNull(jsonNode)) {
                 return false;
             }
         }

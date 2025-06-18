@@ -22,7 +22,9 @@ import org.apache.paimon.catalog.CachingCatalog;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.hive.HiveCatalog;
 import org.apache.paimon.hive.migrate.HiveMigrator;
+import org.apache.paimon.iceberg.migrate.IcebergMigrator;
 import org.apache.paimon.migrate.Migrator;
+import org.apache.paimon.options.Options;
 
 import java.util.List;
 import java.util.Map;
@@ -34,9 +36,10 @@ public class TableMigrationUtils {
             String connector,
             Catalog catalog,
             String sourceDatabase,
-            String souceTableName,
+            String sourceTableName,
             String targetDatabase,
             String targetTableName,
+            Integer parallelism,
             Map<String, String> options) {
         switch (connector) {
             case "hive":
@@ -49,17 +52,44 @@ public class TableMigrationUtils {
                 return new HiveMigrator(
                         (HiveCatalog) catalog,
                         sourceDatabase,
-                        souceTableName,
+                        sourceTableName,
                         targetDatabase,
                         targetTableName,
+                        parallelism,
                         options);
             default:
                 throw new UnsupportedOperationException("Don't support connector " + connector);
         }
     }
 
+    public static Migrator getIcebergImporter(
+            Catalog catalog,
+            String sourceDatabase,
+            String sourceTableName,
+            String targetDatabase,
+            String targetTableName,
+            Integer parallelism,
+            Map<String, String> options,
+            Map<String, String> icebergOptions) {
+
+        Options icebergConf = new Options(icebergOptions);
+        return new IcebergMigrator(
+                catalog,
+                targetDatabase,
+                targetTableName,
+                sourceDatabase,
+                sourceTableName,
+                icebergConf,
+                parallelism,
+                options);
+    }
+
     public static List<Migrator> getImporters(
-            String connector, Catalog catalog, String sourceDatabase, Map<String, String> options) {
+            String connector,
+            Catalog catalog,
+            String sourceDatabase,
+            Integer parallelism,
+            Map<String, String> options) {
         switch (connector) {
             case "hive":
                 if (catalog instanceof CachingCatalog) {
@@ -69,7 +99,7 @@ public class TableMigrationUtils {
                     throw new IllegalArgumentException("Only support Hive Catalog");
                 }
                 return HiveMigrator.databaseMigrators(
-                        (HiveCatalog) catalog, sourceDatabase, options);
+                        (HiveCatalog) catalog, sourceDatabase, options, parallelism);
             default:
                 throw new UnsupportedOperationException("Don't support connector " + connector);
         }

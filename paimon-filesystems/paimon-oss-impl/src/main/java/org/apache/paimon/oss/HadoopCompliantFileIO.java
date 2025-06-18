@@ -22,6 +22,7 @@ import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.PositionOutputStream;
+import org.apache.paimon.fs.RemoteIterator;
 import org.apache.paimon.fs.SeekableInputStream;
 
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -29,6 +30,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -78,6 +80,29 @@ public abstract class HadoopCompliantFileIO implements FileIO {
     }
 
     @Override
+    public RemoteIterator<FileStatus> listFilesIterative(Path path, boolean recursive)
+            throws IOException {
+        org.apache.hadoop.fs.Path hadoopPath = path(path);
+        org.apache.hadoop.fs.RemoteIterator<org.apache.hadoop.fs.LocatedFileStatus> hadoopIter =
+                getFileSystem(hadoopPath).listFiles(hadoopPath, recursive);
+        return new RemoteIterator<FileStatus>() {
+            @Override
+            public boolean hasNext() throws IOException {
+                return hadoopIter.hasNext();
+            }
+
+            @Override
+            public FileStatus next() throws IOException {
+                org.apache.hadoop.fs.FileStatus hadoopStatus = hadoopIter.next();
+                return new HadoopFileStatus(hadoopStatus);
+            }
+
+            @Override
+            public void close() throws IOException {}
+        };
+    }
+
+    @Override
     public boolean exists(Path path) throws IOException {
         org.apache.hadoop.fs.Path hadoopPath = path(path);
         return getFileSystem(hadoopPath).exists(hadoopPath);
@@ -102,11 +127,11 @@ public abstract class HadoopCompliantFileIO implements FileIO {
         return getFileSystem(hadoopSrc).rename(hadoopSrc, hadoopDst);
     }
 
-    private org.apache.hadoop.fs.Path path(Path path) {
+    protected final org.apache.hadoop.fs.Path path(Path path) {
         return new org.apache.hadoop.fs.Path(path.toUri());
     }
 
-    private FileSystem getFileSystem(org.apache.hadoop.fs.Path path) throws IOException {
+    protected final FileSystem getFileSystem(org.apache.hadoop.fs.Path path) throws IOException {
         if (fsMap == null) {
             synchronized (this) {
                 if (fsMap == null) {
@@ -121,12 +146,19 @@ public abstract class HadoopCompliantFileIO implements FileIO {
         if (authority == null) {
             authority = "DEFAULT";
         }
-        FileSystem fs = map.get(authority);
-        if (fs == null) {
-            fs = createFileSystem(path);
-            map.put(authority, fs);
+        try {
+            return map.computeIfAbsent(
+                    authority,
+                    k -> {
+                        try {
+                            return createFileSystem(path);
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    });
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
         }
-        return fs;
     }
 
     protected abstract FileSystem createFileSystem(org.apache.hadoop.fs.Path path)
@@ -285,6 +317,16 @@ public abstract class HadoopCompliantFileIO implements FileIO {
         @Override
         public long getModificationTime() {
             return status.getModificationTime();
+        }
+
+        @Override
+        public long getAccessTime() {
+            return status.getAccessTime();
+        }
+
+        @Override
+        public String getOwner() {
+            return status.getOwner();
         }
     }
 }

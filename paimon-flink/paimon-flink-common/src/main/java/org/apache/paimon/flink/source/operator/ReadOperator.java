@@ -21,12 +21,13 @@ package org.apache.paimon.flink.source.operator;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.flink.FlinkRowData;
+import org.apache.paimon.flink.NestedProjectedRowData;
 import org.apache.paimon.flink.source.metrics.FileStoreSourceReaderMetrics;
 import org.apache.paimon.table.source.DataSplit;
-import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.utils.CloseableIterator;
+import org.apache.paimon.utils.SerializableSupplier;
 
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.runtime.metrics.MetricNames;
@@ -36,17 +37,20 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 
+import javax.annotation.Nullable;
+
 /**
  * The operator that reads the {@link Split splits} received from the preceding {@link
- * MonitorFunction}. Contrary to the {@link MonitorFunction} which has a parallelism of 1, this
- * operator can have DOP > 1.
+ * MonitorSource}. Contrary to the {@link MonitorSource} which has a parallelism of 1, this operator
+ * can have DOP > 1.
  */
 public class ReadOperator extends AbstractStreamOperator<RowData>
         implements OneInputStreamOperator<Split, RowData> {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
-    private final ReadBuilder readBuilder;
+    private final SerializableSupplier<TableRead> readSupplier;
+    @Nullable private final NestedProjectedRowData nestedProjectedRowData;
 
     private transient TableRead read;
     private transient StreamRecord<RowData> reuseRecord;
@@ -54,10 +58,18 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
     private transient IOManager ioManager;
 
     private transient FileStoreSourceReaderMetrics sourceReaderMetrics;
+    // we create our own gauge for currentEmitEventTimeLag and sourceIdleTime, because this operator
+    // is not a FLIP-27
+    // source and Flink can't automatically calculate this metric
+    private transient long emitEventTimeLag = FileStoreSourceReaderMetrics.UNDEFINED;
+    private transient long idleStartTime = FileStoreSourceReaderMetrics.ACTIVE;
     private transient Counter numRecordsIn;
 
-    public ReadOperator(ReadBuilder readBuilder) {
-        this.readBuilder = readBuilder;
+    public ReadOperator(
+            SerializableSupplier<TableRead> readSupplier,
+            @Nullable NestedProjectedRowData nestedProjectedRowData) {
+        this.readSupplier = readSupplier;
+        this.nestedProjectedRowData = nestedProjectedRowData;
     }
 
     @Override
@@ -65,19 +77,8 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
         super.open();
 
         this.sourceReaderMetrics = new FileStoreSourceReaderMetrics(getMetricGroup());
-        // we create our own gauge for currentEmitEventTimeLag, because this operator is not a
-        // FLIP-27 source and Flink can't automatically calculate this metric
-        getMetricGroup()
-                .gauge(
-                        MetricNames.CURRENT_EMIT_EVENT_TIME_LAG,
-                        () -> {
-                            long eventTime = sourceReaderMetrics.getLatestFileCreationTime();
-                            if (eventTime == FileStoreSourceReaderMetrics.UNDEFINED) {
-                                return FileStoreSourceReaderMetrics.UNDEFINED;
-                            } else {
-                                return System.currentTimeMillis() - eventTime;
-                            }
-                        });
+        getMetricGroup().gauge(MetricNames.CURRENT_EMIT_EVENT_TIME_LAG, () -> emitEventTimeLag);
+        getMetricGroup().gauge(MetricNames.SOURCE_IDLE_TIME, this::getIdleTime);
         this.numRecordsIn =
                 InternalSourceReaderMetricGroup.wrap(getMetricGroup())
                         .getIOMetricGroup()
@@ -89,9 +90,10 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
                                 .getEnvironment()
                                 .getIOManager()
                                 .getSpillingDirectoriesPaths());
-        this.read = readBuilder.newRead().withIOManager(ioManager);
+        this.read = readSupplier.get().withIOManager(ioManager);
         this.reuseRow = new FlinkRowData(null);
-        this.reuseRecord = new StreamRecord<>(reuseRow);
+        this.reuseRecord = new StreamRecord<>(null);
+        this.idlingStarted();
     }
 
     @Override
@@ -103,11 +105,15 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
                         .earliestFileCreationEpochMillis()
                         .orElse(FileStoreSourceReaderMetrics.UNDEFINED);
         sourceReaderMetrics.recordSnapshotUpdate(eventTime);
+        // update idleStartTime when reading a new split
+        idleStartTime = FileStoreSourceReaderMetrics.ACTIVE;
 
         boolean firstRecord = true;
         try (CloseableIterator<InternalRow> iterator =
                 read.createReader(split).toCloseableIterator()) {
             while (iterator.hasNext()) {
+                emitEventTimeLag = System.currentTimeMillis() - eventTime;
+
                 // each Split is already counted as one input record,
                 // so we don't need to count the first record
                 if (firstRecord) {
@@ -117,9 +123,17 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
                 }
 
                 reuseRow.replace(iterator.next());
+                if (nestedProjectedRowData == null) {
+                    reuseRecord.replace(reuseRow);
+                } else {
+                    nestedProjectedRowData.replaceRow(reuseRow);
+                    reuseRecord.replace(nestedProjectedRowData);
+                }
                 output.collect(reuseRecord);
             }
         }
+        // start idle when data sending is completed
+        this.idlingStarted();
     }
 
     @Override
@@ -128,5 +142,19 @@ public class ReadOperator extends AbstractStreamOperator<RowData>
         if (ioManager != null) {
             ioManager.close();
         }
+    }
+
+    private void idlingStarted() {
+        if (!isIdling()) {
+            idleStartTime = System.currentTimeMillis();
+        }
+    }
+
+    private boolean isIdling() {
+        return idleStartTime != FileStoreSourceReaderMetrics.ACTIVE;
+    }
+
+    private long getIdleTime() {
+        return isIdling() ? System.currentTimeMillis() - idleStartTime : 0;
     }
 }

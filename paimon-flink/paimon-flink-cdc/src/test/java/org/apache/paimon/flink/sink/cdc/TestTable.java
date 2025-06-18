@@ -112,20 +112,20 @@ public class TestTable {
                     fieldNames.add(newName);
                     isBigInt.add(false);
                 }
-                events.add(new TestCdcEvent(tableName, currentDataFieldList(fieldNames, isBigInt)));
+                events.add(new TestCdcEvent(tableName, currentSchema(fieldNames, isBigInt)));
             } else {
-                Map<String, String> fields = new HashMap<>();
+                Map<String, String> data = new HashMap<>();
                 int key = random.nextInt(numKeys);
-                fields.put("k", String.valueOf(key));
+                data.put("k", String.valueOf(key));
                 int pt = key % numPartitions;
-                fields.put("pt", String.valueOf(pt));
+                data.put("pt", String.valueOf(pt));
 
                 for (int j = 0; j < fieldNames.size(); j++) {
                     String fieldName = fieldNames.get(j);
                     if (isBigInt.get(j)) {
-                        fields.put(fieldName, String.valueOf(random.nextLong()));
+                        data.put(fieldName, String.valueOf(random.nextLong()));
                     } else {
-                        fields.put(fieldName, String.valueOf(random.nextInt()));
+                        data.put(fieldName, String.valueOf(random.nextInt()));
                     }
                 }
 
@@ -140,8 +140,8 @@ public class TestTable {
                         shouldInsert = random.nextInt(5) > 0;
                     }
                     if (shouldInsert) {
-                        records.add(new CdcRecord(RowKind.INSERT, fields));
-                        expected.put(key, fields);
+                        records.add(new CdcRecord(RowKind.INSERT, data));
+                        expected.put(key, data);
                     }
                 }
                 // Generate test data for append table
@@ -149,8 +149,8 @@ public class TestTable {
                     if (expected.containsKey(key)) {
                         records.add(new CdcRecord(RowKind.DELETE, expected.get(key)));
                     } else {
-                        records.add(new CdcRecord(RowKind.INSERT, fields));
-                        expected.put(key, fields);
+                        records.add(new CdcRecord(RowKind.INSERT, data));
+                        expected.put(key, data);
                     }
                 }
                 events.add(new TestCdcEvent(tableName, records, Objects.hash(tableName, key)));
@@ -158,23 +158,22 @@ public class TestTable {
         }
     }
 
-    private List<DataField> currentDataFieldList(List<String> fieldNames, List<Boolean> isBigInt) {
-        List<DataField> fields = new ArrayList<>();
+    private CdcSchema currentSchema(List<String> fieldNames, List<Boolean> isBigInt) {
+        CdcSchema.Builder schemaBuilder = CdcSchema.newBuilder();
 
         // pt
-        fields.add(initialRowType.getFields().get(0));
+        DataField ptField = initialRowType.getFields().get(0);
+        schemaBuilder.column(ptField.name(), ptField.type(), ptField.description());
         // k
-        fields.add(initialRowType.getFields().get(1));
+        DataField pkField = initialRowType.getFields().get(1);
+        schemaBuilder.column(pkField.name(), pkField.type(), pkField.description());
 
         for (int i = 0; i < fieldNames.size(); i++) {
-            fields.add(
-                    new DataField(
-                            2 + i,
-                            fieldNames.get(i),
-                            isBigInt.get(i) ? DataTypes.BIGINT() : DataTypes.INT()));
+            schemaBuilder.column(
+                    fieldNames.get(i), isBigInt.get(i) ? DataTypes.BIGINT() : DataTypes.INT());
         }
 
-        return fields;
+        return schemaBuilder.build();
     }
 
     public RowType initialRowType() {

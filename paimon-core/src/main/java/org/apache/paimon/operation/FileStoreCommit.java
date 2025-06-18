@@ -32,9 +32,6 @@ import java.util.Map;
 /** Commit operation which provides commit and overwrite. */
 public interface FileStoreCommit extends AutoCloseable {
 
-    /** With global lock. */
-    FileStoreCommit withLock(Lock lock);
-
     FileStoreCommit ignoreEmptyCommit(boolean ignoreEmptyCommit);
 
     FileStoreCommit withPartitionExpire(PartitionExpire partitionExpire);
@@ -73,6 +70,9 @@ public interface FileStoreCommit extends AutoCloseable {
     void dropPartitions(List<Map<String, String>> partitions, long commitIdentifier);
 
     void truncateTable(long commitIdentifier);
+
+    /** Compact the manifest entries only. */
+    void compactManifest();
 
     /** Abort an unsuccessful commit. The data files will be deleted. */
     void abort(List<CommitMessage> commitMessages);

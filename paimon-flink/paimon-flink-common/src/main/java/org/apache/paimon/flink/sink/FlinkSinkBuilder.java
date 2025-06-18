@@ -18,6 +18,8 @@
 
 package org.apache.paimon.flink.sink;
 
+import org.apache.paimon.CoreOptions.OrderType;
+import org.apache.paimon.CoreOptions.PartitionSinkStrategy;
 import org.apache.paimon.annotation.Public;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
@@ -25,7 +27,6 @@ import org.apache.paimon.flink.FlinkRowWrapper;
 import org.apache.paimon.flink.sink.index.GlobalDynamicBucketSink;
 import org.apache.paimon.flink.sorter.TableSortInfo;
 import org.apache.paimon.flink.sorter.TableSorter;
-import org.apache.paimon.flink.sorter.TableSorter.OrderType;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -33,6 +34,7 @@ import org.apache.paimon.table.Table;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.DataFormatConverters;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
@@ -44,19 +46,24 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.paimon.CoreOptions.OrderType.HILBERT;
+import static org.apache.paimon.CoreOptions.OrderType.ORDER;
+import static org.apache.paimon.CoreOptions.OrderType.ZORDER;
+import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.FlinkConnectorOptions.CLUSTERING_SAMPLE_FACTOR;
 import static org.apache.paimon.flink.FlinkConnectorOptions.CLUSTERING_STRATEGY;
 import static org.apache.paimon.flink.FlinkConnectorOptions.MIN_CLUSTERING_SAMPLE_FACTOR;
+import static org.apache.paimon.flink.sink.FlinkSink.isStreaming;
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
-import static org.apache.paimon.flink.sorter.TableSorter.OrderType.HILBERT;
-import static org.apache.paimon.flink.sorter.TableSorter.OrderType.ORDER;
-import static org.apache.paimon.flink.sorter.TableSorter.OrderType.ZORDER;
+import static org.apache.paimon.flink.utils.ParallelismUtils.forwardParallelism;
+import static org.apache.paimon.flink.utils.ParallelismUtils.setParallelism;
 import static org.apache.paimon.table.BucketMode.BUCKET_UNAWARE;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 import static org.apache.paimon.utils.Preconditions.checkState;
@@ -75,7 +82,7 @@ public class FlinkSinkBuilder {
 
     private DataStream<RowData> input;
     @Nullable protected Map<String, String> overwritePartition;
-    @Nullable protected Integer parallelism;
+    @Nullable private Integer parallelism;
     @Nullable private TableSortInfo tableSortInfo;
 
     // ============== for extension ==============
@@ -100,10 +107,14 @@ public class FlinkSinkBuilder {
 
         DataFormatConverters.RowConverter converter =
                 new DataFormatConverters.RowConverter(fieldDataTypes);
-        this.input =
-                input.map((MapFunction<Row, RowData>) converter::toInternal)
-                        .setParallelism(input.getParallelism())
-                        .returns(InternalTypeInfo.of(rowType));
+        SingleOutputStreamOperator<RowData> newInput =
+                input.transform(
+                        "Map",
+                        InternalTypeInfo.of(rowType),
+                        new StreamMapWithForwardingRecordAttributes<>(
+                                (MapFunction<Row, RowData>) converter::toInternal));
+        setParallelism(newInput, input.getParallelism(), false);
+        this.input = newInput;
         return this;
     }
 
@@ -125,7 +136,7 @@ public class FlinkSinkBuilder {
     }
 
     /** Set sink parallelism. */
-    public FlinkSinkBuilder parallelism(int parallelism) {
+    public FlinkSinkBuilder parallelism(@Nullable Integer parallelism) {
         this.parallelism = parallelism;
         return this;
     }
@@ -142,7 +153,7 @@ public class FlinkSinkBuilder {
             return this;
         }
         checkState(input != null, "The input stream should be specified earlier.");
-        if (FlinkSink.isStreaming(input) || !table.bucketMode().equals(BUCKET_UNAWARE)) {
+        if (isStreaming(input) || !table.bucketMode().equals(BUCKET_UNAWARE)) {
             LOG.warn(
                     "Clustering is enabled; however, it has been skipped as "
                             + "it only supports the bucket unaware table without primary keys and "
@@ -208,20 +219,24 @@ public class FlinkSinkBuilder {
 
     /** Build {@link DataStreamSink}. */
     public DataStreamSink<?> build() {
+        setParallelismIfAdaptiveConflict();
         input = trySortInput(input);
         DataStream<InternalRow> input = mapToInternalRow(this.input, table.rowType());
         if (table.coreOptions().localMergeEnabled() && table.schema().primaryKeys().size() > 0) {
-            input =
+            SingleOutputStreamOperator<InternalRow> newInput =
                     input.forward()
                             .transform(
                                     "local merge",
                                     input.getType(),
-                                    new LocalMergeOperator(table.schema()))
-                            .setParallelism(input.getParallelism());
+                                    new LocalMergeOperator.Factory(table.schema()));
+            forwardParallelism(newInput, input);
+            input = newInput;
         }
 
         BucketMode bucketMode = table.bucketMode();
         switch (bucketMode) {
+            case POSTPONE_MODE:
+                return buildPostponeBucketSink(input);
             case HASH_FIXED:
                 return buildForFixedBucket(input);
             case HASH_DYNAMIC:
@@ -235,11 +250,16 @@ public class FlinkSinkBuilder {
         }
     }
 
-    protected DataStream<InternalRow> mapToInternalRow(
+    public static DataStream<InternalRow> mapToInternalRow(
             DataStream<RowData> input, org.apache.paimon.types.RowType rowType) {
-        return input.map((MapFunction<RowData, InternalRow>) FlinkRowWrapper::new)
-                .setParallelism(input.getParallelism())
-                .returns(org.apache.paimon.flink.utils.InternalTypeInfo.fromRowType(rowType));
+        SingleOutputStreamOperator<InternalRow> result =
+                input.transform(
+                        "Map",
+                        org.apache.paimon.flink.utils.InternalTypeInfo.fromRowType(rowType),
+                        new StreamMapWithForwardingRecordAttributes<>(
+                                (MapFunction<RowData, InternalRow>) FlinkRowWrapper::new));
+        forwardParallelism(result, input);
+        return result;
     }
 
     protected DataStreamSink<?> buildDynamicBucketSink(
@@ -256,6 +276,16 @@ public class FlinkSinkBuilder {
     }
 
     protected DataStreamSink<?> buildForFixedBucket(DataStream<InternalRow> input) {
+        int bucketNums = table.bucketSpec().getNumBuckets();
+        if (parallelism == null
+                && bucketNums < input.getParallelism()
+                && table.partitionKeys().isEmpty()) {
+            // For non-partitioned table, if the bucketNums is less than job parallelism.
+            LOG.warn(
+                    "For non-partitioned table, if bucketNums is less than the parallelism of inputOperator,"
+                            + " then the parallelism of writerOperator will be set to bucketNums.");
+            parallelism = bucketNums;
+        }
         DataStream<InternalRow> partitioned =
                 partition(
                         input,
@@ -265,10 +295,27 @@ public class FlinkSinkBuilder {
         return sink.sinkFrom(partitioned);
     }
 
+    private DataStreamSink<?> buildPostponeBucketSink(DataStream<InternalRow> input) {
+        FixedBucketSink sink = new FixedBucketSink(table, overwritePartition, null);
+        String commitUser = createCommitUser(table.coreOptions().toConfiguration());
+        DataStream<Committable> written = sink.doWrite(input, commitUser, parallelism);
+        return sink.doCommit(written, commitUser);
+    }
+
     private DataStreamSink<?> buildUnawareBucketSink(DataStream<InternalRow> input) {
         checkArgument(
                 table.primaryKeys().isEmpty(),
                 "Unaware bucket mode only works with append-only table for now.");
+
+        if (!table.partitionKeys().isEmpty()
+                && table.coreOptions().partitionSinkStrategy() == PartitionSinkStrategy.HASH) {
+            input =
+                    partition(
+                            input,
+                            new RowDataHashPartitionChannelComputer(table.schema()),
+                            parallelism);
+        }
+
         return new RowUnawareBucketSink(table, overwritePartition, logSinkFunction, parallelism)
                 .sinkFrom(input);
     }
@@ -281,5 +328,49 @@ public class FlinkSinkBuilder {
             return sorter.sort();
         }
         return input;
+    }
+
+    private void setParallelismIfAdaptiveConflict() {
+        try {
+            boolean parallelismUndefined = parallelism == null || parallelism == -1;
+            boolean isStreaming = isStreaming(input);
+            boolean isAdaptiveParallelismEnabled =
+                    AdaptiveParallelism.isEnabled(input.getExecutionEnvironment());
+            boolean writeMCacheEnabled = table.coreOptions().writeManifestCache().getBytes() > 0;
+            boolean hashDynamicMode = table.bucketMode() == BucketMode.HASH_DYNAMIC;
+            if (parallelismUndefined
+                    && !isStreaming
+                    && isAdaptiveParallelismEnabled
+                    && (writeMCacheEnabled || hashDynamicMode)) {
+                List<String> messages = new ArrayList<>();
+                if (writeMCacheEnabled) {
+                    messages.add("Write Manifest Cache");
+                }
+                if (hashDynamicMode) {
+                    messages.add("Dynamic Bucket Mode");
+                }
+
+                String parallelismSource;
+                if (input.getParallelism() > 0) {
+                    parallelismSource = "input parallelism";
+                    parallelism = input.getParallelism();
+                } else {
+                    parallelismSource = "AdaptiveBatchScheduler's default max parallelism";
+                    parallelism =
+                            AdaptiveParallelism.getDefaultMaxParallelism(
+                                    input.getExecutionEnvironment().getConfiguration(),
+                                    input.getExecutionConfig());
+                }
+                String msg =
+                        String.format(
+                                "Paimon Sink with %s does not support Flink's Adaptive Parallelism mode. "
+                                        + "Configuring sink parallelism to `%s` instead. You can also set Paimon "
+                                        + "`sink.parallelism` manually to override this configuration.",
+                                messages, parallelismSource);
+                LOG.warn(msg);
+            }
+        } catch (NoClassDefFoundError ignored) {
+            // before 1.17, there is no adaptive parallelism
+        }
     }
 }

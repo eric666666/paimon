@@ -20,13 +20,16 @@ package org.apache.paimon.operation.metrics;
 
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.metrics.Counter;
 import org.apache.paimon.metrics.MetricGroup;
 import org.apache.paimon.metrics.MetricRegistry;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.stream.DoubleStream;
 import java.util.stream.LongStream;
 
@@ -38,16 +41,31 @@ public class CompactionMetrics {
     public static final String MAX_LEVEL0_FILE_COUNT = "maxLevel0FileCount";
     public static final String AVG_LEVEL0_FILE_COUNT = "avgLevel0FileCount";
     public static final String COMPACTION_THREAD_BUSY = "compactionThreadBusy";
+    public static final String AVG_COMPACTION_TIME = "avgCompactionTime";
+    public static final String COMPACTION_COMPLETED_COUNT = "compactionCompletedCount";
+    public static final String COMPACTION_QUEUED_COUNT = "compactionQueuedCount";
+    public static final String MAX_COMPACTION_INPUT_SIZE = "maxCompactionInputSize";
+    public static final String MAX_COMPACTION_OUTPUT_SIZE = "maxCompactionOutputSize";
+    public static final String AVG_COMPACTION_INPUT_SIZE = "avgCompactionInputSize";
+    public static final String AVG_COMPACTION_OUTPUT_SIZE = "avgCompactionOutputSize";
+    public static final String MAX_TOTAL_FILE_SIZE = "maxTotalFileSize";
+    public static final String AVG_TOTAL_FILE_SIZE = "avgTotalFileSize";
+
     private static final long BUSY_MEASURE_MILLIS = 60_000;
+    private static final int COMPACTION_TIME_WINDOW = 100;
 
     private final MetricGroup metricGroup;
     private final Map<PartitionAndBucket, ReporterImpl> reporters;
     private final Map<Long, CompactTimer> compactTimers;
+    private final Queue<Long> compactionTimes;
+    private Counter compactionsCompletedCounter;
+    private Counter compactionsQueuedCounter;
 
     public CompactionMetrics(MetricRegistry registry, String tableName) {
         this.metricGroup = registry.tableMetricGroup(GROUP_NAME, tableName);
         this.reporters = new HashMap<>();
         this.compactTimers = new ConcurrentHashMap<>();
+        this.compactionTimes = new ConcurrentLinkedQueue<>();
 
         registerGenericCompactionMetrics();
     }
@@ -61,17 +79,52 @@ public class CompactionMetrics {
         metricGroup.gauge(MAX_LEVEL0_FILE_COUNT, () -> getLevel0FileCountStream().max().orElse(-1));
         metricGroup.gauge(
                 AVG_LEVEL0_FILE_COUNT, () -> getLevel0FileCountStream().average().orElse(-1));
+        metricGroup.gauge(
+                MAX_COMPACTION_INPUT_SIZE, () -> getCompactionInputSizeStream().max().orElse(-1));
+        metricGroup.gauge(
+                MAX_COMPACTION_OUTPUT_SIZE, () -> getCompactionOutputSizeStream().max().orElse(-1));
+        metricGroup.gauge(
+                AVG_COMPACTION_INPUT_SIZE,
+                () -> getCompactionInputSizeStream().average().orElse(-1));
+        metricGroup.gauge(
+                AVG_COMPACTION_OUTPUT_SIZE,
+                () -> getCompactionOutputSizeStream().average().orElse(-1));
 
+        metricGroup.gauge(
+                AVG_COMPACTION_TIME, () -> getCompactionTimeStream().average().orElse(0.0));
         metricGroup.gauge(COMPACTION_THREAD_BUSY, () -> getCompactBusyStream().sum());
+
+        compactionsCompletedCounter = metricGroup.counter(COMPACTION_COMPLETED_COUNT);
+        compactionsQueuedCounter = metricGroup.counter(COMPACTION_QUEUED_COUNT);
+
+        metricGroup.gauge(MAX_TOTAL_FILE_SIZE, () -> getTotalFileSizeStream().max().orElse(-1));
+        metricGroup.gauge(AVG_TOTAL_FILE_SIZE, () -> getTotalFileSizeStream().average().orElse(-1));
     }
 
     private LongStream getLevel0FileCountStream() {
         return reporters.values().stream().mapToLong(r -> r.level0FileCount);
     }
 
+    private LongStream getCompactionInputSizeStream() {
+        return reporters.values().stream().mapToLong(r -> r.compactionInputSize);
+    }
+
+    private LongStream getCompactionOutputSizeStream() {
+        return reporters.values().stream().mapToLong(r -> r.compactionOutputSize);
+    }
+
     private DoubleStream getCompactBusyStream() {
         return compactTimers.values().stream()
                 .mapToDouble(t -> 100.0 * t.calculateLength() / BUSY_MEASURE_MILLIS);
+    }
+
+    private DoubleStream getCompactionTimeStream() {
+        return compactionTimes.stream().mapToDouble(Long::doubleValue);
+    }
+
+    @VisibleForTesting
+    public LongStream getTotalFileSizeStream() {
+        return reporters.values().stream().mapToLong(r -> r.totalFileSize);
     }
 
     public void close() {
@@ -85,6 +138,20 @@ public class CompactionMetrics {
 
         void reportLevel0FileCount(long count);
 
+        void reportCompactionTime(long time);
+
+        void increaseCompactionsCompletedCount();
+
+        void increaseCompactionsQueuedCount();
+
+        void decreaseCompactionsQueuedCount();
+
+        void reportCompactionInputSize(long bytes);
+
+        void reportCompactionOutputSize(long bytes);
+
+        void reportTotalFileSize(long bytes);
+
         void unregister();
     }
 
@@ -92,6 +159,9 @@ public class CompactionMetrics {
 
         private final PartitionAndBucket key;
         private long level0FileCount;
+        private long compactionInputSize = 0;
+        private long compactionOutputSize = 0;
+        private long totalFileSize = 0;
 
         private ReporterImpl(PartitionAndBucket key) {
             this.key = key;
@@ -106,8 +176,48 @@ public class CompactionMetrics {
         }
 
         @Override
+        public void reportCompactionTime(long time) {
+            synchronized (compactionTimes) {
+                compactionTimes.add(time);
+                if (compactionTimes.size() > COMPACTION_TIME_WINDOW) {
+                    compactionTimes.poll();
+                }
+            }
+        }
+
+        @Override
+        public void reportCompactionInputSize(long bytes) {
+            this.compactionInputSize = bytes;
+        }
+
+        @Override
+        public void reportCompactionOutputSize(long bytes) {
+            this.compactionOutputSize = bytes;
+        }
+
+        @Override
+        public void reportTotalFileSize(long bytes) {
+            this.totalFileSize = bytes;
+        }
+
+        @Override
         public void reportLevel0FileCount(long count) {
             this.level0FileCount = count;
+        }
+
+        @Override
+        public void increaseCompactionsCompletedCount() {
+            compactionsCompletedCounter.inc();
+        }
+
+        @Override
+        public void increaseCompactionsQueuedCount() {
+            compactionsQueuedCounter.inc();
+        }
+
+        @Override
+        public void decreaseCompactionsQueuedCount() {
+            compactionsQueuedCounter.dec();
         }
 
         @Override

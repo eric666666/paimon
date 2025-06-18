@@ -21,9 +21,14 @@ package org.apache.paimon.table;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.FileStore;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.consumer.ConsumerManager;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.manifest.ManifestCacheFilter;
+import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.manifest.ManifestFileMeta;
+import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.stats.Statistics;
 import org.apache.paimon.table.query.LocalTableQuery;
@@ -36,14 +41,17 @@ import org.apache.paimon.table.source.InnerTableRead;
 import org.apache.paimon.table.source.StreamDataTableScan;
 import org.apache.paimon.table.source.snapshot.SnapshotReader;
 import org.apache.paimon.utils.BranchManager;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.SegmentsCache;
+import org.apache.paimon.utils.SimpleFileReader;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
+
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 /** Delegated {@link FileStoreTable}. */
 public abstract class DelegatedFileStoreTable implements FileStoreTable {
@@ -54,6 +62,10 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
         this.wrapped = wrapped;
     }
 
+    public FileStoreTable wrapped() {
+        return wrapped;
+    }
+
     @Override
     public String name() {
         return wrapped.name();
@@ -62,6 +74,11 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
     @Override
     public String fullName() {
         return wrapped.fullName();
+    }
+
+    @Override
+    public String uuid() {
+        return wrapped.uuid();
     }
 
     @Override
@@ -77,6 +94,21 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
     @Override
     public SnapshotManager snapshotManager() {
         return wrapped.snapshotManager();
+    }
+
+    @Override
+    public ChangelogManager changelogManager() {
+        return wrapped.changelogManager();
+    }
+
+    @Override
+    public SchemaManager schemaManager() {
+        return wrapped.schemaManager();
+    }
+
+    @Override
+    public ConsumerManager consumerManager() {
+        return wrapped.consumerManager();
     }
 
     @Override
@@ -105,6 +137,16 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
     }
 
     @Override
+    public void setSnapshotCache(Cache<Path, Snapshot> cache) {
+        wrapped.setSnapshotCache(cache);
+    }
+
+    @Override
+    public void setStatsCache(Cache<String, Statistics> cache) {
+        wrapped.setStatsCache(cache);
+    }
+
+    @Override
     public TableSchema schema() {
         return wrapped.schema();
     }
@@ -125,13 +167,28 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
     }
 
     @Override
-    public OptionalLong latestSnapshotId() {
-        return wrapped.latestSnapshotId();
+    public Optional<Snapshot> latestSnapshot() {
+        return wrapped.latestSnapshot();
     }
 
     @Override
     public Snapshot snapshot(long snapshotId) {
         return wrapped.snapshot(snapshotId);
+    }
+
+    @Override
+    public SimpleFileReader<ManifestFileMeta> manifestListReader() {
+        return wrapped.manifestListReader();
+    }
+
+    @Override
+    public SimpleFileReader<ManifestEntry> manifestFileReader() {
+        return wrapped.manifestFileReader();
+    }
+
+    @Override
+    public SimpleFileReader<IndexManifestEntry> indexManifestFileReader() {
+        return wrapped.indexManifestFileReader();
     }
 
     @Override
@@ -157,6 +214,16 @@ public abstract class DelegatedFileStoreTable implements FileStoreTable {
     @Override
     public void createTag(String tagName, long fromSnapshotId, Duration timeRetained) {
         wrapped.createTag(tagName, fromSnapshotId, timeRetained);
+    }
+
+    @Override
+    public void renameTag(String tagName, String targetTagName) {
+        wrapped.renameTag(tagName, targetTagName);
+    }
+
+    @Override
+    public void replaceTag(String tagName, Long fromSnapshotId, Duration timeRetained) {
+        wrapped.replaceTag(tagName, fromSnapshotId, timeRetained);
     }
 
     @Override

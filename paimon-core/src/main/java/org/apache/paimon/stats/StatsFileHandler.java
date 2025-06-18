@@ -54,11 +54,11 @@ public class StatsFileHandler {
      * @return stats
      */
     public Optional<Statistics> readStats() {
-        Long latestSnapshotId = snapshotManager.latestSnapshotId();
-        if (latestSnapshotId == null) {
+        Snapshot latestSnapshot = snapshotManager.latestSnapshot();
+        if (latestSnapshot == null) {
             throw new IllegalStateException("Unable to obtain the latest snapshot");
         }
-        return readStats(latestSnapshotId);
+        return readStats(latestSnapshot);
     }
 
     /**
@@ -66,18 +66,15 @@ public class StatsFileHandler {
      *
      * @return stats
      */
-    public Optional<Statistics> readStats(long snapshotId) {
-        return readStats(snapshotManager.snapshot(snapshotId));
+    public Optional<Statistics> readStats(Snapshot snapshot) {
+        String file = snapshot.statistics();
+        return file == null ? Optional.empty() : Optional.of(readStats(file));
     }
 
-    public Optional<Statistics> readStats(Snapshot snapshot) {
-        if (snapshot.statistics() == null) {
-            return Optional.empty();
-        } else {
-            Statistics stats = statsFile.read(snapshot.statistics());
-            stats.deserializeFieldsFromString(schemaManager.schema(stats.schemaId()));
-            return Optional.of(stats);
-        }
+    public Statistics readStats(String file) {
+        Statistics stats = statsFile.read(file);
+        stats.deserializeFieldsFromString(schemaManager.schema(stats.schemaId()));
+        return stats;
     }
 
     /** Delete stats of the specified snapshot. */

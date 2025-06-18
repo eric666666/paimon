@@ -32,8 +32,15 @@ import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.types.DataTypes;
 
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.SourceOperatorStreamTask;
+import org.apache.flink.streaming.util.MockOutput;
+import org.apache.flink.streaming.util.MockStreamConfig;
 import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -45,11 +52,20 @@ import java.util.stream.Collectors;
 /** Tests for {@link AppendOnlySingleTableCompactionWorkerOperator}. */
 public class AppendOnlySingleTableCompactionWorkerOperatorTest extends TableTestBase {
 
-    @Test
+    @RepeatedTest(10)
     public void testAsyncCompactionWorks() throws Exception {
         createTableDefault();
         AppendOnlySingleTableCompactionWorkerOperator workerOperator =
-                new AppendOnlySingleTableCompactionWorkerOperator(getTableDefault(), "user");
+                new AppendOnlySingleTableCompactionWorkerOperator.Factory(getTableDefault(), "user")
+                        .createStreamOperator(
+                                new StreamOperatorParameters<>(
+                                        new SourceOperatorStreamTask<Integer>(
+                                                new DummyEnvironment()),
+                                        new MockStreamConfig(new Configuration(), 1),
+                                        new MockOutput<>(new ArrayList<>()),
+                                        null,
+                                        null,
+                                        null));
 
         // write 200 files
         List<CommitMessage> commitMessages = writeDataDefault(200, 20);
@@ -96,13 +112,27 @@ public class AppendOnlySingleTableCompactionWorkerOperatorTest extends TableTest
                                                         .size()
                                                 == 1)
                                 .isTrue());
+        // need to close the operator to release the thread pool and close all files.
+        workerOperator.close();
+
+        // wait the last runnable in thread pool to stop
+        Thread.sleep(2_000);
     }
 
     @Test
     public void testAsyncCompactionFileDeletedWhenShutdown() throws Exception {
         createTableDefault();
         AppendOnlySingleTableCompactionWorkerOperator workerOperator =
-                new AppendOnlySingleTableCompactionWorkerOperator(getTableDefault(), "user");
+                new AppendOnlySingleTableCompactionWorkerOperator.Factory(getTableDefault(), "user")
+                        .createStreamOperator(
+                                new StreamOperatorParameters<>(
+                                        new SourceOperatorStreamTask<Integer>(
+                                                new DummyEnvironment()),
+                                        new MockStreamConfig(new Configuration(), 1),
+                                        new MockOutput<>(new ArrayList<>()),
+                                        null,
+                                        null,
+                                        null));
 
         // write 200 files
         List<CommitMessage> commitMessages = writeDataDefault(200, 40);
@@ -136,8 +166,7 @@ public class AppendOnlySingleTableCompactionWorkerOperatorTest extends TableTest
             List<DataFileMeta> fileMetas =
                     ((CommitMessageImpl) commitMessage).compactIncrement().compactAfter();
             for (DataFileMeta fileMeta : fileMetas) {
-                Assertions.assertThat(
-                                localFileIO.exists(dataFilePathFactory.toPath(fileMeta.fileName())))
+                Assertions.assertThat(localFileIO.exists(dataFilePathFactory.toPath(fileMeta)))
                         .isTrue();
             }
             if (i++ > 2) {
@@ -164,9 +193,7 @@ public class AppendOnlySingleTableCompactionWorkerOperatorTest extends TableTest
                 List<DataFileMeta> fileMetas =
                         ((CommitMessageImpl) commitMessage).compactIncrement().compactAfter();
                 for (DataFileMeta fileMeta : fileMetas) {
-                    Assertions.assertThat(
-                                    localFileIO.exists(
-                                            dataFilePathFactory.toPath(fileMeta.fileName())))
+                    Assertions.assertThat(localFileIO.exists(dataFilePathFactory.toPath(fileMeta)))
                             .isFalse();
                 }
             } catch (Exception e) {
@@ -182,7 +209,6 @@ public class AppendOnlySingleTableCompactionWorkerOperatorTest extends TableTest
         schemaBuilder.column("f1", DataTypes.BIGINT());
         schemaBuilder.column("f2", DataTypes.STRING());
         schemaBuilder.option(CoreOptions.BUCKET.key(), "-1");
-        schemaBuilder.option(CoreOptions.COMPACTION_MAX_FILE_NUM.key(), "5");
         return schemaBuilder.build();
     }
 

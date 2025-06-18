@@ -19,10 +19,11 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.CatalogUtils;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.FlinkCatalogFactory;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.util.AbstractTestBase;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
@@ -42,6 +43,7 @@ import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FailingFileIO;
 import org.apache.paimon.utils.TraceableFileIO;
 
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.junit.jupiter.api.Test;
@@ -154,14 +156,14 @@ public class FlinkCdcSyncDatabaseSinkITCase extends AbstractTestBase {
                         .allowRestart(enableFailure)
                         .build();
 
-        TestCdcSourceFunction sourceFunction = new TestCdcSourceFunction(events);
-        DataStreamSource<TestCdcEvent> source = env.addSource(sourceFunction);
+        TestCdcSource testCdcSource = new TestCdcSource(events);
+        DataStreamSource<TestCdcEvent> source =
+                env.fromSource(testCdcSource, WatermarkStrategy.noWatermarks(), "TestCdcSource");
         source.setParallelism(2);
 
         Options catalogOptions = new Options();
         catalogOptions.set("warehouse", tempDir.toString());
-        Catalog.Loader catalogLoader =
-                () -> FlinkCatalogFactory.createPaimonCatalog(catalogOptions);
+        CatalogLoader catalogLoader = () -> FlinkCatalogFactory.createPaimonCatalog(catalogOptions);
 
         new FlinkCdcSyncDatabaseSinkBuilder<TestCdcEvent>()
                 .withInput(source)
@@ -171,6 +173,7 @@ public class FlinkCdcSyncDatabaseSinkITCase extends AbstractTestBase {
                 // each table can only get 2 slots
                 .withTableOptions(Collections.singletonMap(SINK_PARALLELISM.key(), "2"))
                 .withDatabase(DATABASE_NAME)
+                .withTypeMapping(TypeMapping.defaultMapping())
                 .withCatalogLoader(catalogLoader)
                 .build();
 

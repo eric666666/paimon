@@ -89,7 +89,7 @@ public abstract class SimpleColStatsExtractorTest {
         for (GenericRow row : data) {
             writer.addElement(row);
         }
-        writer.finish();
+        writer.close();
 
         SimpleStatsCollector collector = new SimpleStatsCollector(rowType, stats);
         for (GenericRow row : data) {
@@ -99,7 +99,7 @@ public abstract class SimpleColStatsExtractorTest {
 
         SimpleStatsExtractor extractor = format.createStatsExtractor(rowType, stats).get();
         assertThat(extractor).isNotNull();
-        SimpleColStats[] actual = extractor.extract(fileIO, path);
+        SimpleColStats[] actual = extractor.extract(fileIO, path, fileIO.getFileSize(path));
         for (int i = 0; i < expected.length; i++) {
             expected[i] = regenerate(expected[i], rowType.getTypeAt(i));
         }

@@ -39,6 +39,7 @@ import org.apache.paimon.utils.VersionedObjectSerializer;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -84,6 +85,15 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
         return suggestedFileSize;
     }
 
+    public List<ExpireFileEntry> readExpireFileEntries(String fileName, @Nullable Long fileSize) {
+        List<ManifestEntry> entries = read(fileName, fileSize);
+        List<ExpireFileEntry> result = new ArrayList<>(entries.size());
+        for (ManifestEntry entry : entries) {
+            result.add(ExpireFileEntry.from(entry));
+        }
+        return result;
+    }
+
     /**
      * Write several {@link ManifestEntry}s into manifest files.
      *
@@ -106,7 +116,12 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
                 suggestedFileSize);
     }
 
-    private class ManifestEntryWriter extends SingleFileWriter<ManifestEntry, ManifestFileMeta> {
+    public ManifestEntryWriter createManifestEntryWriter(Path manifestPath) {
+        return new ManifestEntryWriter(writerFactory, manifestPath, compression);
+    }
+
+    /** Writer for {@link ManifestEntry}. */
+    public class ManifestEntryWriter extends SingleFileWriter<ManifestEntry, ManifestFileMeta> {
 
         private final SimpleStatsCollector partitionStatsCollector;
         private final SimpleStatsConverter partitionStatsSerializer;
@@ -114,6 +129,10 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
         private long numAddedFiles = 0;
         private long numDeletedFiles = 0;
         private long schemaId = Long.MIN_VALUE;
+        private int minBucket = Integer.MAX_VALUE;
+        private int maxBucket = Integer.MIN_VALUE;
+        private int minLevel = Integer.MAX_VALUE;
+        private int maxLevel = Integer.MIN_VALUE;
 
         ManifestEntryWriter(FormatWriterFactory factory, Path path, String fileCompression) {
             super(
@@ -123,7 +142,6 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
                     serializer::toRow,
                     fileCompression,
                     false);
-
             this.partitionStatsCollector = new SimpleStatsCollector(partitionType);
             this.partitionStatsSerializer = new SimpleStatsConverter(partitionType);
         }
@@ -143,6 +161,10 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
                     throw new UnsupportedOperationException("Unknown entry kind: " + entry.kind());
             }
             schemaId = Math.max(schemaId, entry.file().schemaId());
+            minBucket = Math.min(minBucket, entry.bucket());
+            maxBucket = Math.max(maxBucket, entry.bucket());
+            minLevel = Math.min(minLevel, entry.level());
+            maxLevel = Math.max(maxLevel, entry.level());
 
             partitionStatsCollector.collect(entry.partition());
         }
@@ -151,13 +173,17 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
         public ManifestFileMeta result() throws IOException {
             return new ManifestFileMeta(
                     path.getName(),
-                    fileIO.getFileSize(path),
+                    outputBytes,
                     numAddedFiles,
                     numDeletedFiles,
-                    partitionStatsSerializer.toBinary(partitionStatsCollector.extract()),
+                    partitionStatsSerializer.toBinaryAllMode(partitionStatsCollector.extract()),
                     numAddedFiles + numDeletedFiles > 0
                             ? schemaId
-                            : schemaManager.latest().get().id());
+                            : schemaManager.latest().get().id(),
+                    minBucket,
+                    maxBucket,
+                    minLevel,
+                    maxLevel);
         }
     }
 
@@ -209,19 +235,6 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
                     compression,
                     pathFactory.manifestFileFactory(),
                     suggestedFileSize,
-                    cache);
-        }
-
-        public ObjectsFile<SimpleFileEntry> createSimpleFileEntryReader() {
-            RowType entryType = VersionedObjectSerializer.versionType(ManifestEntry.SCHEMA);
-            return new ObjectsFile<>(
-                    fileIO,
-                    new SimpleFileEntrySerializer(),
-                    entryType,
-                    fileFormat.createReaderFactory(entryType),
-                    fileFormat.createWriterFactory(entryType),
-                    compression,
-                    pathFactory.manifestFileFactory(),
                     cache);
         }
     }

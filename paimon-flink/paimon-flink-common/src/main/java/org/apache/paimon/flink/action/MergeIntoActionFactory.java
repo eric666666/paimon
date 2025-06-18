@@ -18,12 +18,9 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.flink.api.java.tuple.Tuple3;
-
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -62,12 +59,12 @@ public class MergeIntoActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        Tuple3<String, String, String> tablePath = getTablePath(params);
-
-        Map<String, String> catalogConfig = optionalConfigMap(params, CATALOG_CONF);
 
         MergeIntoAction action =
-                new MergeIntoAction(tablePath.f0, tablePath.f1, tablePath.f2, catalogConfig);
+                new MergeIntoAction(
+                        params.getRequired(DATABASE),
+                        params.getRequired(TABLE),
+                        catalogConfigMap(params));
 
         if (params.has(TARGET_AS)) {
             action.withTargetAlias(params.get(TARGET_AS));
@@ -78,26 +75,22 @@ public class MergeIntoActionFactory implements ActionFactory {
             action.withSourceSqls(sourceSqls.toArray(new String[0]));
         }
 
-        checkRequiredArgument(params, SOURCE_TABLE);
-        action.withSourceTable(params.get(SOURCE_TABLE));
+        action.withSourceTable(params.getRequired(SOURCE_TABLE));
 
-        checkRequiredArgument(params, ON);
-        action.withMergeCondition(params.get(ON));
+        action.withMergeCondition(params.getRequired(ON));
 
         List<String> actions =
                 Arrays.stream(params.get(MERGE_ACTIONS).split(","))
                         .map(String::trim)
                         .collect(Collectors.toList());
         if (actions.contains(MATCHED_UPSERT)) {
-            checkRequiredArgument(params, MATCHED_UPSERT_SET);
             action.withMatchedUpsert(
-                    params.get(MATCHED_UPSERT_CONDITION), params.get(MATCHED_UPSERT_SET));
+                    params.get(MATCHED_UPSERT_CONDITION), params.getRequired(MATCHED_UPSERT_SET));
         }
         if (actions.contains(NOT_MATCHED_BY_SOURCE_UPSERT)) {
-            checkRequiredArgument(params, NOT_MATCHED_BY_SOURCE_UPSERT_SET);
             action.withNotMatchedBySourceUpsert(
                     params.get(NOT_MATCHED_BY_SOURCE_UPSERT_CONDITION),
-                    params.get(NOT_MATCHED_BY_SOURCE_UPSERT_SET));
+                    params.getRequired(NOT_MATCHED_BY_SOURCE_UPSERT_SET));
         }
         if (actions.contains(MATCHED_DELETE)) {
             action.withMatchedDelete(params.get(MATCHED_DELETE_CONDITION));
@@ -106,10 +99,9 @@ public class MergeIntoActionFactory implements ActionFactory {
             action.withNotMatchedBySourceDelete(params.get(NOT_MATCHED_BY_SOURCE_DELETE_CONDITION));
         }
         if (actions.contains(NOT_MATCHED_INSERT)) {
-            checkRequiredArgument(params, NOT_MATCHED_INSERT_VALUES);
             action.withNotMatchedInsert(
                     params.get(NOT_MATCHED_INSERT_CONDITION),
-                    params.get(NOT_MATCHED_INSERT_VALUES));
+                    params.getRequired(NOT_MATCHED_INSERT_VALUES));
         }
 
         action.validate();
@@ -124,22 +116,23 @@ public class MergeIntoActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  merge_into --warehouse <warehouse_path>\n"
-                        + "             --database <database_name>\n"
-                        + "             --table <target_table_name>\n"
-                        + "             [--target_as <target_table_alias>]\n"
-                        + "             [--source_sql <sql> ...]\n"
-                        + "             --source_table <source_table_name>\n"
-                        + "             --on <merge_condition>\n"
-                        + "             --merge_actions <matched-upsert,matched-delete,not-matched-insert,not-matched-by-source-upsert,not-matched-by-source-delete>\n"
-                        + "             --matched_upsert_condition <matched_condition>\n"
-                        + "             --matched_upsert_set <upsert_changes>\n"
-                        + "             --matched_delete_condition <matched_condition>\n"
-                        + "             --not_matched_insert_condition <not_matched_condition>\n"
-                        + "             --not_matched_insert_values <insert_values>\n"
-                        + "             --not_matched_by_source_upsert_condition <not_matched_by_source_condition>\n"
-                        + "             --not_matched_by_source_upsert_set <not_matched_upsert_changes>\n"
-                        + "             --not_matched_by_source_delete_condition <not_matched_by_source_condition>");
+                "  merge_into \\\n"
+                        + "--warehouse <warehouse_path> \\\n"
+                        + "--database <database_name> \\\n"
+                        + "--table <target_table_name> \\\n"
+                        + "[--target_as <target_table_alias>] \\\n"
+                        + "[--source_sql <sql> ...] \\\n"
+                        + "--source_table <source_table_name> \\\n"
+                        + "--on <merge_condition> \\\n"
+                        + "--merge_actions <matched-upsert,matched-delete,not-matched-insert,not-matched-by-source-upsert,not-matched-by-source-delete> \\\n"
+                        + "--matched_upsert_condition <matched_condition> \\\n"
+                        + "--matched_upsert_set <upsert_changes> \\\n"
+                        + "--matched_delete_condition <matched_condition> \\\n"
+                        + "--not_matched_insert_condition <not_matched_condition> \\\n"
+                        + "--not_matched_insert_values <insert_values> \\\n"
+                        + "--not_matched_by_source_upsert_condition <not_matched_by_source_condition> \\\n"
+                        + "--not_matched_by_source_upsert_set <not_matched_upsert_changes> \\\n"
+                        + "--not_matched_by_source_delete_condition <not_matched_by_source_condition>");
 
         System.out.println("  matched_upsert_set format:");
         System.out.println(
@@ -193,12 +186,13 @@ public class MergeIntoActionFactory implements ActionFactory {
 
         System.out.println("Examples:");
         System.out.println(
-                "  merge_into --path hdfs:///path/to/T\n"
-                        + "             --source_table S\n"
-                        + "             --on \"T.k = S.k\"\n"
-                        + "             --merge_actions matched-upsert\n"
-                        + "             --matched_upsert_condition \"T.v <> S.v\"\n"
-                        + "             --matched_upsert_set \"v = S.v\"");
+                "  merge_into \\\n"
+                        + "--path hdfs:///path/to/T \\\n"
+                        + "--source_table S \\\n"
+                        + "--on \"T.k = S.k\" \\\n"
+                        + "--merge_actions matched-upsert \\\n"
+                        + "--matched_upsert_condition \"T.v <> S.v\" \\\n"
+                        + "--matched_upsert_set \"v = S.v\"");
         System.out.println(
                 "  It will find matched rows of target table that meet condition (T.k = S.k), then update T.v with S.v where (T.v <> S.v).");
     }

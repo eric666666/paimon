@@ -18,6 +18,8 @@
 
 package org.apache.paimon.flink.sink;
 
+import org.apache.paimon.flink.ProcessRecordAttributesUtil;
+import org.apache.paimon.flink.utils.RuntimeContextUtils;
 import org.apache.paimon.index.BucketAssigner;
 import org.apache.paimon.index.HashBucketAssigner;
 import org.apache.paimon.index.SimpleHashBucketAssigner;
@@ -32,6 +34,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.runtime.streamrecord.RecordAttributes;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 /** Assign bucket for the input record, output record with bucket. */
@@ -67,19 +70,21 @@ public class HashBucketAssignerOperator<T> extends AbstractStreamOperator<Tuple2
     public void initializeState(StateInitializationContext context) throws Exception {
         super.initializeState(context);
 
-        // Each job can only have one user name and this name must be consistent across restarts.
-        // We cannot use job id as commit user name here because user may change job id by creating
+        // Each job can only have one username and this name must be consistent across restarts.
+        // We cannot use job id as commit username here because user may change job id by creating
         // a savepoint, stop the job and then resume from savepoint.
         String commitUser =
                 StateUtils.getSingleValueFromState(
                         context, "commit_user_state", String.class, initialCommitUser);
 
-        int numberTasks = getRuntimeContext().getNumberOfParallelSubtasks();
-        int taskId = getRuntimeContext().getIndexOfThisSubtask();
+        int numberTasks = RuntimeContextUtils.getNumberOfParallelSubtasks(getRuntimeContext());
+        int taskId = RuntimeContextUtils.getIndexOfThisSubtask(getRuntimeContext());
         long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
+        Integer maxBucketsNum = table.coreOptions().dynamicBucketMaxBuckets();
         this.assigner =
                 overwrite
-                        ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
+                        ? new SimpleHashBucketAssigner(
+                                numberTasks, taskId, targetRowNum, maxBucketsNum)
                         : new HashBucketAssigner(
                                 table.snapshotManager(),
                                 commitUser,
@@ -87,7 +92,8 @@ public class HashBucketAssignerOperator<T> extends AbstractStreamOperator<Tuple2
                                 numberTasks,
                                 MathUtils.min(numAssigners, numberTasks),
                                 taskId,
-                                targetRowNum);
+                                targetRowNum,
+                                maxBucketsNum);
         this.extractor = extractorFunction.apply(table.schema());
     }
 
@@ -98,6 +104,11 @@ public class HashBucketAssignerOperator<T> extends AbstractStreamOperator<Tuple2
                 assigner.assign(
                         extractor.partition(value), extractor.trimmedPrimaryKey(value).hashCode());
         output.collect(new StreamRecord<>(new Tuple2<>(value, bucket)));
+    }
+
+    @Override
+    public void processRecordAttributes(RecordAttributes recordAttributes) {
+        ProcessRecordAttributesUtil.processWithOutput(recordAttributes, output);
     }
 
     @Override

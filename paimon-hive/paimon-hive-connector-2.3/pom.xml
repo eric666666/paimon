@@ -25,7 +25,7 @@ under the License.
     <parent>
         <artifactId>paimon-hive</artifactId>
         <groupId>org.apache.paimon</groupId>
-        <version>sl-0.9-SNAPSHOT</version>
+        <version>1.1-SNAPSHOT</version>
     </parent>
 
     <artifactId>paimon-hive-connector-2.3</artifactId>
@@ -81,7 +81,7 @@ under the License.
 
         <dependency>
             <groupId>org.apache.flink</groupId>
-            <artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+            <artifactId>flink-table-planner_${flink.scala.binary.version}</artifactId>
             <version>${test.flink.version}</version>
             <scope>test</scope>
         </dependency>
@@ -104,6 +104,20 @@ under the License.
                     <artifactId>orc-core</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-csv</artifactId>
+            <version>${test.flink.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-json</artifactId>
+            <version>${test.flink.version}</version>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
@@ -149,7 +163,7 @@ under the License.
         </dependency>
 
         <dependency>
-            <groupId>com.klarna</groupId>
+            <groupId>io.github.hiverunner</groupId>
             <artifactId>hiverunner</artifactId>
             <version>${hiverunner.version}</version>
             <scope>test</scope>
@@ -553,6 +567,13 @@ under the License.
                     <artifactId>junit</artifactId>
                 </exclusion>
             </exclusions>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-flink-${iceberg.flink.version}</artifactId>
+            <version>${iceberg.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

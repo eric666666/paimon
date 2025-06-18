@@ -23,7 +23,6 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
-import org.apache.paimon.iceberg.AppendOnlyIcebergCommitCallback;
 import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.operation.AppendOnlyFileStoreScan;
 import org.apache.paimon.operation.AppendOnlyFileStoreWrite;
@@ -33,7 +32,6 @@ import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.query.LocalTableQuery;
-import org.apache.paimon.table.sink.CommitCallback;
 import org.apache.paimon.table.sink.TableWriteImpl;
 import org.apache.paimon.table.source.AbstractDataTableRead;
 import org.apache.paimon.table.source.AppendOnlySplitGenerator;
@@ -42,14 +40,14 @@ import org.apache.paimon.table.source.InnerTableRead;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.SplitGenerator;
 import org.apache.paimon.types.RowKind;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.Preconditions;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.function.BiConsumer;
 
 /** {@link FileStoreTable} for append table. */
-class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
+public class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
 
     private static final long serialVersionUID = 1L;
 
@@ -59,7 +57,7 @@ class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
         this(fileIO, path, tableSchema, CatalogEnvironment.empty());
     }
 
-    AppendOnlyFileStoreTable(
+    public AppendOnlyFileStoreTable(
             FileIO fileIO,
             Path path,
             TableSchema tableSchema,
@@ -78,7 +76,7 @@ class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
                             new CoreOptions(tableSchema.options()),
                             tableSchema.logicalPartitionType(),
                             tableSchema.logicalBucketKeyType(),
-                            tableSchema.logicalRowType(),
+                            tableSchema.logicalRowType().notNull(),
                             name(),
                             catalogEnvironment);
         }
@@ -119,8 +117,8 @@ class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
             }
 
             @Override
-            public void projection(int[][] projection) {
-                read.withProjection(projection);
+            public void applyReadType(RowType readType) {
+                read.withReadType(readType);
             }
 
             @Override
@@ -157,17 +155,5 @@ class AppendOnlyFileStoreTable extends AbstractFileStoreTable {
     @Override
     public LocalTableQuery newLocalTableQuery() {
         throw new UnsupportedOperationException();
-    }
-
-    @Override
-    protected List<CommitCallback> createCommitCallbacks(String commitUser) {
-        List<CommitCallback> callbacks = super.createCommitCallbacks(commitUser);
-        CoreOptions options = coreOptions();
-
-        if (options.metadataIcebergCompatible()) {
-            callbacks.add(new AppendOnlyIcebergCommitCallback(this, commitUser));
-        }
-
-        return callbacks;
     }
 }

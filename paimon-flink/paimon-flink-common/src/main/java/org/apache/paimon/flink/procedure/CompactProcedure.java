@@ -21,6 +21,8 @@ package org.apache.paimon.flink.procedure;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.CompactAction;
 import org.apache.paimon.flink.action.SortCompactAction;
+import org.apache.paimon.utils.Preconditions;
+import org.apache.paimon.utils.TimeUtils;
 
 import org.apache.flink.table.annotation.ArgumentHint;
 import org.apache.flink.table.annotation.DataTypeHint;
@@ -30,9 +32,11 @@ import org.apache.flink.table.procedure.ProcedureContext;
 import java.util.Collections;
 import java.util.Map;
 
+import static org.apache.paimon.flink.action.ActionFactory.FULL;
+import static org.apache.paimon.flink.action.CompactActionFactory.checkCompactStrategy;
 import static org.apache.paimon.utils.ParameterUtils.getPartitions;
 import static org.apache.paimon.utils.ParameterUtils.parseCommaSeparatedKeyValues;
-import static org.apache.paimon.utils.StringUtils.isBlank;
+import static org.apache.paimon.utils.StringUtils.isNullOrWhitespaceOnly;
 
 /** Compact procedure. */
 public class CompactProcedure extends ProcedureBase {
@@ -52,7 +56,15 @@ public class CompactProcedure extends ProcedureBase {
                         isOptional = true),
                 @ArgumentHint(name = "order_by", type = @DataTypeHint("STRING"), isOptional = true),
                 @ArgumentHint(name = "options", type = @DataTypeHint("STRING"), isOptional = true),
-                @ArgumentHint(name = "where", type = @DataTypeHint("STRING"), isOptional = true)
+                @ArgumentHint(name = "where", type = @DataTypeHint("STRING"), isOptional = true),
+                @ArgumentHint(
+                        name = "partition_idle_time",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "compact_strategy",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true)
             })
     public String[] call(
             ProcedureContext procedureContext,
@@ -61,47 +73,57 @@ public class CompactProcedure extends ProcedureBase {
             String orderStrategy,
             String orderByColumns,
             String tableOptions,
-            String where)
+            String where,
+            String partitionIdleTime,
+            String compactStrategy)
             throws Exception {
-        String warehouse = catalog.warehouse();
         Map<String, String> catalogOptions = catalog.options();
         Map<String, String> tableConf =
-                isBlank(tableOptions)
+                isNullOrWhitespaceOnly(tableOptions)
                         ? Collections.emptyMap()
                         : parseCommaSeparatedKeyValues(tableOptions);
         Identifier identifier = Identifier.fromString(tableId);
         CompactAction action;
         String jobName;
-        if (isBlank(orderStrategy) && isBlank(orderByColumns)) {
+        if (isNullOrWhitespaceOnly(orderStrategy) && isNullOrWhitespaceOnly(orderByColumns)) {
             action =
                     new CompactAction(
-                            warehouse,
                             identifier.getDatabaseName(),
                             identifier.getObjectName(),
                             catalogOptions,
                             tableConf);
-            jobName = "Compact Job";
-        } else if (!isBlank(orderStrategy) && !isBlank(orderByColumns)) {
+            if (!isNullOrWhitespaceOnly(partitionIdleTime)) {
+                action.withPartitionIdleTime(TimeUtils.parseDuration(partitionIdleTime));
+            }
+
+            if (checkCompactStrategy(compactStrategy)) {
+                action.withFullCompaction(compactStrategy.trim().equalsIgnoreCase(FULL));
+            }
+            jobName = "Compact Job : " + identifier.getFullName();
+        } else if (!isNullOrWhitespaceOnly(orderStrategy)
+                && !isNullOrWhitespaceOnly(orderByColumns)) {
+            Preconditions.checkArgument(
+                    isNullOrWhitespaceOnly(partitionIdleTime),
+                    "sort compact do not support 'partition_idle_time'.");
             action =
                     new SortCompactAction(
-                                    warehouse,
                                     identifier.getDatabaseName(),
                                     identifier.getObjectName(),
                                     catalogOptions,
                                     tableConf)
                             .withOrderStrategy(orderStrategy)
                             .withOrderColumns(orderByColumns.split(","));
-            jobName = "Sort Compact Job";
+            jobName = "Sort Compact Job : " + identifier.getFullName();
         } else {
             throw new IllegalArgumentException(
                     "You must specify 'order strategy' and 'order by columns' both.");
         }
 
-        if (!(isBlank(partitions))) {
+        if (!(isNullOrWhitespaceOnly(partitions))) {
             action.withPartitions(getPartitions(partitions.split(";")));
         }
 
-        if (!isBlank(where)) {
+        if (!isNullOrWhitespaceOnly(where)) {
             action.withWhereSql(where);
         }
 

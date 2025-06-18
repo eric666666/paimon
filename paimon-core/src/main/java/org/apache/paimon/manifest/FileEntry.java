@@ -19,17 +19,26 @@
 package org.apache.paimon.manifest;
 
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.utils.FileStorePathFactory;
+import org.apache.paimon.utils.Filter;
 import org.apache.paimon.utils.Preconditions;
 
 import javax.annotation.Nullable;
 
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
+import static org.apache.paimon.utils.ManifestReadThreadPool.randomlyExecuteSequentialReturn;
 import static org.apache.paimon.utils.ManifestReadThreadPool.sequentialBatchedExecute;
 
 /** Entry representing a file. */
@@ -45,11 +54,16 @@ public interface FileEntry {
 
     String fileName();
 
+    @Nullable
+    String externalPath();
+
     Identifier identifier();
 
     BinaryRow minKey();
 
     BinaryRow maxKey();
+
+    List<String> extraFiles();
 
     /**
      * The same {@link Identifier} indicates that the {@link ManifestEntry} refers to the same data
@@ -60,40 +74,81 @@ public interface FileEntry {
         public final int bucket;
         public final int level;
         public final String fileName;
+        public final List<String> extraFiles;
+        @Nullable private final byte[] embeddedIndex;
+        @Nullable public final String externalPath;
 
         /* Cache the hash code for the string */
         private Integer hash;
 
-        public Identifier(BinaryRow partition, int bucket, int level, String fileName) {
+        public Identifier(
+                BinaryRow partition,
+                int bucket,
+                int level,
+                String fileName,
+                List<String> extraFiles,
+                @Nullable byte[] embeddedIndex,
+                @Nullable String externalPath) {
             this.partition = partition;
             this.bucket = bucket;
             this.level = level;
             this.fileName = fileName;
+            this.extraFiles = extraFiles;
+            this.embeddedIndex = embeddedIndex;
+            this.externalPath = externalPath;
         }
 
         @Override
         public boolean equals(Object o) {
-            if (!(o instanceof Identifier)) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
                 return false;
             }
             Identifier that = (Identifier) o;
-            return Objects.equals(partition, that.partition)
-                    && bucket == that.bucket
+            return bucket == that.bucket
                     && level == that.level
-                    && Objects.equals(fileName, that.fileName);
+                    && Objects.equals(partition, that.partition)
+                    && Objects.equals(fileName, that.fileName)
+                    && Objects.equals(extraFiles, that.extraFiles)
+                    && Objects.deepEquals(embeddedIndex, that.embeddedIndex)
+                    && Objects.deepEquals(externalPath, that.externalPath);
         }
 
         @Override
         public int hashCode() {
             if (hash == null) {
-                hash = Objects.hash(partition, bucket, level, fileName);
+                hash =
+                        Objects.hash(
+                                partition,
+                                bucket,
+                                level,
+                                fileName,
+                                extraFiles,
+                                Arrays.hashCode(embeddedIndex),
+                                externalPath);
             }
             return hash;
         }
 
         @Override
         public String toString() {
-            return String.format("{%s, %d, %d, %s}", partition, bucket, level, fileName);
+            return "{partition="
+                    + partition
+                    + ", bucket="
+                    + bucket
+                    + ", level="
+                    + level
+                    + ", fileName="
+                    + fileName
+                    + ", extraFiles="
+                    + extraFiles
+                    + ", embeddedIndex="
+                    + Arrays.toString(embeddedIndex)
+                    + ", externalPath="
+                    + externalPath
+                    + '}';
         }
 
         public String toString(FileStorePathFactory pathFactory) {
@@ -103,7 +158,13 @@ public interface FileEntry {
                     + ", level "
                     + level
                     + ", file "
-                    + fileName;
+                    + fileName
+                    + ", extraFiles "
+                    + extraFiles
+                    + ", embeddedIndex "
+                    + Arrays.toString(embeddedIndex)
+                    + ", externalPath "
+                    + externalPath;
         }
     }
 
@@ -160,5 +221,55 @@ public interface FileEntry {
                 file -> manifestFile.read(file.fileName(), file.fileSize()),
                 manifestFiles,
                 manifestReadParallelism);
+    }
+
+    static Set<Identifier> readDeletedEntries(
+            ManifestFile manifestFile,
+            List<ManifestFileMeta> manifestFiles,
+            @Nullable Integer manifestReadParallelism) {
+        return readDeletedEntries(
+                m ->
+                        manifestFile.read(
+                                m.fileName(),
+                                m.fileSize(),
+                                Filter.alwaysTrue(),
+                                deletedFilter(),
+                                Filter.alwaysTrue()),
+                manifestFiles,
+                manifestReadParallelism);
+    }
+
+    static <T extends FileEntry> Set<Identifier> readDeletedEntries(
+            Function<ManifestFileMeta, List<T>> manifestReader,
+            List<ManifestFileMeta> manifestFiles,
+            @Nullable Integer manifestReadParallelism) {
+        manifestFiles =
+                manifestFiles.stream()
+                        .filter(file -> file.numDeletedFiles() > 0)
+                        .collect(Collectors.toList());
+        Function<ManifestFileMeta, List<Identifier>> processor =
+                file ->
+                        manifestReader.apply(file).stream()
+                                // filter again, ensure is delete
+                                .filter(e -> e.kind() == FileKind.DELETE)
+                                .map(FileEntry::identifier)
+                                .collect(Collectors.toList());
+        Iterator<Identifier> identifiers =
+                randomlyExecuteSequentialReturn(processor, manifestFiles, manifestReadParallelism);
+        Set<Identifier> result = ConcurrentHashMap.newKeySet();
+        while (identifiers.hasNext()) {
+            result.add(identifiers.next());
+        }
+        return result;
+    }
+
+    static Filter<InternalRow> deletedFilter() {
+        Function<InternalRow, FileKind> getter = ManifestEntrySerializer.kindGetter();
+        return row -> getter.apply(row) == FileKind.DELETE;
+    }
+
+    static Filter<InternalRow> addFilter() {
+        Function<InternalRow, FileKind> getter = ManifestEntrySerializer.kindGetter();
+        return row -> getter.apply(row) == FileKind.ADD;
     }
 }

@@ -81,14 +81,16 @@ import javax.annotation.Nullable;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.apache.paimon.CoreOptions.ChangelogProducer.FULL_COMPACTION;
 import static org.apache.paimon.CoreOptions.MergeEngine.DEDUPLICATE;
 import static org.apache.paimon.lookup.LookupStoreFactory.bfGenerator;
 import static org.apache.paimon.mergetree.LookupFile.localFilePrefix;
+import static org.apache.paimon.utils.FileStorePathFactory.createFormatPathFactories;
 
 /** {@link FileStoreWrite} for {@link KeyValueFileStore}. */
 public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
@@ -99,13 +101,14 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     private final KeyValueFileWriterFactory.Builder writerFactoryBuilder;
     private final Supplier<Comparator<InternalRow>> keyComparatorSupplier;
     private final Supplier<FieldsComparator> udsComparatorSupplier;
-    private final Supplier<RecordEqualiser> valueEqualiserSupplier;
+    private final Supplier<RecordEqualiser> logDedupEqualSupplier;
     private final MergeFunctionFactory<KeyValue> mfFactory;
     private final CoreOptions options;
     private final FileIO fileIO;
     private final RowType keyType;
     private final RowType valueType;
     private final RowType partitionType;
+    private final String commitUser;
     @Nullable private final RecordLevelExpire recordLevelExpire;
     @Nullable private Cache<String, LookupFile> lookupFileCache;
 
@@ -119,10 +122,10 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             RowType valueType,
             Supplier<Comparator<InternalRow>> keyComparatorSupplier,
             Supplier<FieldsComparator> udsComparatorSupplier,
-            Supplier<RecordEqualiser> valueEqualiserSupplier,
+            Supplier<RecordEqualiser> logDedupEqualSupplier,
             MergeFunctionFactory<KeyValue> mfFactory,
             FileStorePathFactory pathFactory,
-            Map<String, FileStorePathFactory> format2PathFactory,
+            BiFunction<CoreOptions, String, FileStorePathFactory> formatPathFactory,
             SnapshotManager snapshotManager,
             FileStoreScan scan,
             @Nullable IndexMaintainer.Factory<KeyValue> indexFactory,
@@ -131,10 +134,10 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             KeyValueFieldsExtractor extractor,
             String tableName) {
         super(
-                commitUser,
                 snapshotManager,
                 scan,
                 options,
+                partitionType,
                 indexFactory,
                 deletionVectorsMaintainerFactory,
                 tableName);
@@ -142,6 +145,8 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
         this.partitionType = partitionType;
         this.keyType = keyType;
         this.valueType = valueType;
+        this.commitUser = commitUser;
+
         this.udsComparatorSupplier = udsComparatorSupplier;
         this.readerFactoryBuilder =
                 KeyValueFileReaderFactory.builder(
@@ -154,7 +159,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                         pathFactory,
                         extractor,
                         options);
-        this.recordLevelExpire = RecordLevelExpire.create(options, valueType);
+        this.recordLevelExpire = RecordLevelExpire.create(options, schema, schemaManager);
         this.writerFactoryBuilder =
                 KeyValueFileWriterFactory.builder(
                         fileIO,
@@ -162,17 +167,16 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                         keyType,
                         valueType,
                         options.fileFormat(),
-                        format2PathFactory,
+                        createFormatPathFactories(options, formatPathFactory),
                         options.targetFileSize(true));
         this.keyComparatorSupplier = keyComparatorSupplier;
-        this.valueEqualiserSupplier = valueEqualiserSupplier;
+        this.logDedupEqualSupplier = logDedupEqualSupplier;
         this.mfFactory = mfFactory;
         this.options = options;
     }
 
     @Override
     protected MergeTreeWriter createWriter(
-            @Nullable Long snapshotId,
             BinaryRow partition,
             int bucket,
             List<DataFileMeta> restoreFiles,
@@ -192,16 +196,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 writerFactoryBuilder.build(partition, bucket, options);
         Comparator<InternalRow> keyComparator = keyComparatorSupplier.get();
         Levels levels = new Levels(keyComparator, restoreFiles, options.numLevels());
-        UniversalCompaction universalCompaction =
-                new UniversalCompaction(
-                        options.maxSizeAmplificationPercent(),
-                        options.sortedRunSizeRatio(),
-                        options.numSortedRunCompactionTrigger(),
-                        options.optimizedCompactionInterval());
-        CompactStrategy compactStrategy =
-                options.needLookup()
-                        ? new ForceUpLevel0Compaction(universalCompaction)
-                        : universalCompaction;
+        CompactStrategy compactStrategy = createCompactStrategy(options);
         CompactManager compactManager =
                 createCompactManager(
                         partition, bucket, compactStrategy, compactExecutor, levels, dvMaintainer);
@@ -210,7 +205,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 bufferSpillable(),
                 options.writeBufferSpillDiskSize(),
                 options.localSortMaxNumFileHandles(),
-                options.spillCompression(),
+                options.spillCompressOptions(),
                 ioManager,
                 compactManager,
                 restoredMaxSeqNumber,
@@ -225,7 +220,39 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
 
     @VisibleForTesting
     public boolean bufferSpillable() {
-        return options.writeBufferSpillable(fileIO.isObjectStore(), isStreamingMode);
+        return options.writeBufferSpillable(fileIO.isObjectStore(), isStreamingMode, true);
+    }
+
+    private CompactStrategy createCompactStrategy(CoreOptions options) {
+        if (options.needLookup()) {
+            if (CoreOptions.LookupCompactMode.RADICAL.equals(options.lookupCompact())) {
+                return new ForceUpLevel0Compaction(
+                        new UniversalCompaction(
+                                options.maxSizeAmplificationPercent(),
+                                options.sortedRunSizeRatio(),
+                                options.numSortedRunCompactionTrigger(),
+                                options.optimizedCompactionInterval()));
+            } else if (CoreOptions.LookupCompactMode.GENTLE.equals(options.lookupCompact())) {
+                return new UniversalCompaction(
+                        options.maxSizeAmplificationPercent(),
+                        options.sortedRunSizeRatio(),
+                        options.numSortedRunCompactionTrigger(),
+                        options.optimizedCompactionInterval(),
+                        options.lookupCompactMaxInterval());
+            }
+        }
+
+        UniversalCompaction universal =
+                new UniversalCompaction(
+                        options.maxSizeAmplificationPercent(),
+                        options.sortedRunSizeRatio(),
+                        options.numSortedRunCompactionTrigger(),
+                        options.optimizedCompactionInterval());
+        if (options.compactionForceUpLevel0()) {
+            return new ForceUpLevel0Compaction(universal);
+        } else {
+            return universal;
+        }
     }
 
     private CompactManager createCompactManager(
@@ -260,7 +287,9 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                             ? null
                             : compactionMetrics.createReporter(partition, bucket),
                     dvMaintainer,
-                    options.prepareCommitWaitCompaction());
+                    options.prepareCommitWaitCompaction(),
+                    options.needLookup(),
+                    recordLevelExpire);
         }
     }
 
@@ -294,8 +323,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                     userDefinedSeqComparator,
                     mfFactory,
                     mergeSorter,
-                    valueEqualiserSupplier.get(),
-                    options.changelogRowDeduplicate());
+                    logDedupEqualSupplier.get());
         } else if (lookupStrategy.needLookup) {
             LookupLevels.ValueProcessor<?> processor;
             LookupMergeTreeCompactRewriter.MergeFunctionWrapperFactory<?> wrapperFactory;
@@ -308,7 +336,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 lookupReaderFactory =
                         readerFactoryBuilder
                                 .copyWithoutProjection()
-                                .withValueProjection(new int[0][])
+                                .withReadValueType(RowType.of())
                                 .build(partition, bucket, dvFactory);
                 processor = new ContainsValueProcessor();
                 wrapperFactory = new FirstRowMergeFunctionWrapperFactory();
@@ -318,12 +346,12 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                                 ? new PositionedKeyValueProcessor(
                                         valueType,
                                         lookupStrategy.produceChangelog
-                                                || mergeEngine != DEDUPLICATE)
+                                                || mergeEngine != DEDUPLICATE
+                                                || !options.sequenceField().isEmpty())
                                 : new KeyValueProcessor(valueType);
                 wrapperFactory =
                         new LookupMergeFunctionWrapperFactory<>(
-                                valueEqualiserSupplier.get(),
-                                options.changelogRowDeduplicate(),
+                                logDedupEqualSupplier.get(),
                                 lookupStrategy,
                                 UserDefinedSeqComparator.create(valueType, options));
             }
@@ -339,7 +367,8 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                     mergeSorter,
                     wrapperFactory,
                     lookupStrategy.produceChangelog,
-                    dvMaintainer);
+                    dvMaintainer,
+                    options);
         } else {
             return new MergeTreeCompactRewriter(
                     readerFactory,
@@ -387,6 +416,11 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 lookupStoreFactory,
                 bfGenerator(options),
                 lookupFileCache);
+    }
+
+    @Override
+    protected Function<WriterContainer<KeyValue>, Boolean> createWriterCleanChecker() {
+        return createConflictAwareWriterCleanChecker(commitUser, snapshotManager);
     }
 
     @Override

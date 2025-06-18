@@ -21,6 +21,7 @@ package org.apache.paimon.flink.sink.partition;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.CoreOptions.MergeEngine;
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.flink.FlinkConnectorOptions.PartitionMarkDoneActionMode;
 import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.partition.actions.PartitionMarkDoneAction;
@@ -32,29 +33,36 @@ import org.apache.paimon.utils.InternalRowPartitionComputer;
 import org.apache.paimon.utils.PartitionPathUtils;
 
 import org.apache.flink.api.common.state.OperatorStateStore;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nullable;
-
-import java.io.Closeable;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
+import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_IDLE_TIME_TO_DONE;
-import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
+import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_MARK_DONE_MODE;
 
 /** Mark partition done. */
-public class PartitionMarkDone implements Closeable {
+public class PartitionMarkDone implements PartitionListener {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PartitionMarkDone.class);
 
     private final InternalRowPartitionComputer partitionComputer;
     private final PartitionMarkDoneTrigger trigger;
     private final List<PartitionMarkDoneAction> actions;
     private final boolean waitCompaction;
+    private final PartitionMarkDoneActionMode partitionMarkDoneActionMode;
 
-    @Nullable
-    public static PartitionMarkDone create(
+    public static Optional<PartitionMarkDone> create(
+            ClassLoader cl,
             boolean isStreaming,
             boolean isRestored,
             OperatorStateStore stateStore,
@@ -64,20 +72,21 @@ public class PartitionMarkDone implements Closeable {
         Options options = coreOptions.toConfiguration();
 
         if (disablePartitionMarkDone(isStreaming, table, options)) {
-            return null;
+            return Optional.empty();
         }
 
         InternalRowPartitionComputer partitionComputer =
                 new InternalRowPartitionComputer(
                         coreOptions.partitionDefaultName(),
                         table.schema().logicalPartitionType(),
-                        table.partitionKeys().toArray(new String[0]));
+                        table.partitionKeys().toArray(new String[0]),
+                        coreOptions.legacyPartitionName());
 
         PartitionMarkDoneTrigger trigger =
                 PartitionMarkDoneTrigger.create(coreOptions, isRestored, stateStore);
 
         List<PartitionMarkDoneAction> actions =
-                PartitionMarkDoneAction.createActions(table, coreOptions);
+                PartitionMarkDoneAction.createActions(cl, table, coreOptions);
 
         // if batch read skip level 0 files, we should wait compaction to mark done
         // otherwise, some data may not be readable, and there might be data delays
@@ -86,7 +95,13 @@ public class PartitionMarkDone implements Closeable {
                         && (coreOptions.deletionVectorsEnabled()
                                 || coreOptions.mergeEngine() == MergeEngine.FIRST_ROW);
 
-        return new PartitionMarkDone(partitionComputer, trigger, actions, waitCompaction);
+        return Optional.of(
+                new PartitionMarkDone(
+                        partitionComputer,
+                        trigger,
+                        actions,
+                        waitCompaction,
+                        options.get(PARTITION_MARK_DONE_MODE)));
     }
 
     private static boolean disablePartitionMarkDone(
@@ -108,14 +123,25 @@ public class PartitionMarkDone implements Closeable {
             InternalRowPartitionComputer partitionComputer,
             PartitionMarkDoneTrigger trigger,
             List<PartitionMarkDoneAction> actions,
-            boolean waitCompaction) {
+            boolean waitCompaction,
+            PartitionMarkDoneActionMode partitionMarkDoneActionMode) {
         this.partitionComputer = partitionComputer;
         this.trigger = trigger;
         this.actions = actions;
         this.waitCompaction = waitCompaction;
+        this.partitionMarkDoneActionMode = partitionMarkDoneActionMode;
     }
 
+    @Override
     public void notifyCommittable(List<ManifestCommittable> committables) {
+        if (partitionMarkDoneActionMode == PartitionMarkDoneActionMode.WATERMARK) {
+            markDoneByWatermark(committables);
+        } else {
+            markDoneByProcessTime(committables);
+        }
+    }
+
+    private void markDoneByProcessTime(List<ManifestCommittable> committables) {
         Set<BinaryRow> partitions = new HashSet<>();
         boolean endInput = false;
         for (ManifestCommittable committable : committables) {
@@ -140,6 +166,58 @@ public class PartitionMarkDone implements Closeable {
         markDone(trigger.donePartitions(endInput), actions);
     }
 
+    private void markDoneByWatermark(List<ManifestCommittable> committables) {
+        // extract watermarks from committables and update partition watermarks
+        Tuple2<Map<BinaryRow, Long>, Boolean> extractedWatermarks =
+                extractPartitionWatermarks(committables);
+        Map<BinaryRow, Long> partitionWatermarks = extractedWatermarks.f0;
+        boolean endInput = extractedWatermarks.f1;
+        Optional<Long> latestWatermark = partitionWatermarks.values().stream().max(Long::compareTo);
+
+        if (!latestWatermark.isPresent()) {
+            LOG.warn("No watermark found in this batch of committables, skip partition mark done.");
+            return;
+        }
+
+        partitionWatermarks.forEach(
+                (row, value) -> {
+                    String partition =
+                            PartitionPathUtils.generatePartitionPath(
+                                    partitionComputer.generatePartValues(row));
+                    trigger.notifyPartition(partition, value);
+                });
+
+        markDone(trigger.donePartitions(endInput, latestWatermark.get(), true), actions);
+    }
+
+    private Tuple2<Map<BinaryRow, Long>, Boolean> extractPartitionWatermarks(
+            List<ManifestCommittable> committables) {
+        boolean endInput = false;
+        Map<BinaryRow, Long> partitionWatermarks = new HashMap<>();
+        for (ManifestCommittable committable : committables) {
+            Long watermark = committable.watermark();
+            if (watermark != null) {
+                for (CommitMessage commitMessage : committable.fileCommittables()) {
+                    CommitMessageImpl message = (CommitMessageImpl) commitMessage;
+                    if (waitCompaction
+                            || !message.indexIncrement().isEmpty()
+                            || !message.newFilesIncrement().isEmpty()) {
+                        partitionWatermarks.compute(
+                                message.partition(),
+                                (partition, old) ->
+                                        old == null ? watermark : Math.max(old, watermark));
+                    }
+                }
+            }
+
+            if (committable.identifier() == Long.MAX_VALUE) {
+                endInput = true;
+            }
+        }
+
+        return Tuple2.of(partitionWatermarks, endInput);
+    }
+
     public static void markDone(List<String> partitions, List<PartitionMarkDoneAction> actions) {
         for (String partition : partitions) {
             try {
@@ -152,6 +230,7 @@ public class PartitionMarkDone implements Closeable {
         }
     }
 
+    @Override
     public void snapshotState() throws Exception {
         trigger.snapshotState();
     }

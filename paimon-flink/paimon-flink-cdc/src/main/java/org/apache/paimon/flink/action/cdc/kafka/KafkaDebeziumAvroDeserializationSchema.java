@@ -21,7 +21,6 @@ package org.apache.paimon.flink.action.cdc.kafka;
 import org.apache.paimon.flink.action.cdc.CdcSourceRecord;
 import org.apache.paimon.flink.action.cdc.serialization.ConfluentAvroDeserializationSchema;
 
-import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
 import io.confluent.kafka.serializers.GenericContainerWithVersion;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
@@ -41,8 +40,6 @@ public class KafkaDebeziumAvroDeserializationSchema
 
     private static final long serialVersionUID = 1L;
 
-    private static final int DEFAULT_IDENTITY_MAP_CAPACITY = 1000;
-
     private final String topic;
     private final String schemaRegistryUrl;
 
@@ -51,7 +48,7 @@ public class KafkaDebeziumAvroDeserializationSchema
 
     public KafkaDebeziumAvroDeserializationSchema(Configuration cdcSourceConfig) {
         this.topic = KafkaActionUtils.findOneTopic(cdcSourceConfig);
-        this.schemaRegistryUrl = cdcSourceConfig.getString(SCHEMA_REGISTRY_URL);
+        this.schemaRegistryUrl = cdcSourceConfig.get(SCHEMA_REGISTRY_URL);
     }
 
     @Override
@@ -93,9 +90,6 @@ public class KafkaDebeziumAvroDeserializationSchema
     }
 
     private void initAvroDeserializer() {
-        this.avroDeserializer =
-                new ConfluentAvroDeserializationSchema(
-                        new CachedSchemaRegistryClient(
-                                schemaRegistryUrl, DEFAULT_IDENTITY_MAP_CAPACITY));
+        this.avroDeserializer = ConfluentAvroDeserializationSchema.create(this.schemaRegistryUrl);
     }
 }

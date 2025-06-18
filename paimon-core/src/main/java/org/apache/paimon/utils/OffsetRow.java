@@ -24,6 +24,7 @@ import org.apache.paimon.data.InternalArray;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.variant.Variant;
 import org.apache.paimon.types.RowKind;
 
 /** A {@link InternalRow} to wrap row with offset. */
@@ -38,6 +39,10 @@ public class OffsetRow implements InternalRow {
     public OffsetRow(int arity, int offset) {
         this.arity = arity;
         this.offset = offset;
+    }
+
+    public InternalRow getOriginalRow() {
+        return row;
     }
 
     public OffsetRow replace(InternalRow row) {
@@ -118,6 +123,11 @@ public class OffsetRow implements InternalRow {
     @Override
     public byte[] getBinary(int pos) {
         return row.getBinary(offset + pos);
+    }
+
+    @Override
+    public Variant getVariant(int pos) {
+        return row.getVariant(offset + pos);
     }
 
     @Override

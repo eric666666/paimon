@@ -23,6 +23,9 @@ import org.apache.paimon.flink.action.MergeIntoAction;
 
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.ProcedureHint;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.procedure.ProcedureContext;
@@ -37,32 +40,6 @@ import static org.apache.paimon.utils.Preconditions.checkNotNull;
  *
  * <pre><code>
  *  -- NOTE: use '' as placeholder for optional arguments
- *
- *  -- when matched then upsert
- *  CALL sys.merge_into(
- *      'targetTableId',
- *      'targetAlias',
- *      'sourceSqls', -- separate with ';'
- *      'sourceTable',
- *      'mergeCondition',
- *      'matchedUpsertCondition',
- *      'matchedUpsertSetting'
- *  )
- *
- *  -- when matched then upsert + when not matched then insert
- *  CALL sys.merge_into(
- *      'targetTableId'
- *      'targetAlias',
- *      'sourceSqls',
- *      'sourceTable',
- *      'mergeCondition',
- *      'matchedUpsertCondition',
- *      'matchedUpsertSetting',
- *      'notMatchedInsertCondition',
- *      'notMatchedInsertValues'
- *  )
- *
- *  -- above + when matched then delete
  *  -- IMPORTANT: Use 'TRUE' if you want to delete data without filter condition.
  *  -- If matchedDeleteCondition='', it will ignore matched-delete action!
  *  CALL sys.merge_into(
@@ -77,16 +54,6 @@ import static org.apache.paimon.utils.Preconditions.checkNotNull;
  *      'notMatchedInsertValues',
  *      'matchedDeleteCondition'
  *  )
- *
- *  -- when matched then delete (short form)
- *  CALL sys.merge_into(
- *      'targetTableId'
- *      'targetAlias',
- *      'sourceSqls',
- *      'sourceTable',
- *      'mergeCondition',
- *      'matchedDeleteCondition'
- *  )
  * </code></pre>
  *
  * <p>This procedure will be forced to use batch environments. Compared to {@link MergeIntoAction},
@@ -97,76 +64,58 @@ public class MergeIntoProcedure extends ProcedureBase {
 
     public static final String IDENTIFIER = "merge_into";
 
-    public String[] call(
-            ProcedureContext procedureContext,
-            String targetTableId,
-            String targetAlias,
-            String sourceSqls,
-            String sourceTable,
-            String mergeCondition,
-            String matchedUpsertCondition,
-            String matchedUpsertSetting) {
-        return call(
-                procedureContext,
-                targetTableId,
-                targetAlias,
-                sourceSqls,
-                sourceTable,
-                mergeCondition,
-                matchedUpsertCondition,
-                matchedUpsertSetting,
-                "",
-                "",
-                "");
-    }
-
-    public String[] call(
-            ProcedureContext procedureContext,
-            String targetTableId,
-            String targetAlias,
-            String sourceSqls,
-            String sourceTable,
-            String mergeCondition,
-            String matchedUpsertCondition,
-            String matchedUpsertSetting,
-            String notMatchedInsertCondition,
-            String notMatchedInsertValues) {
-        return call(
-                procedureContext,
-                targetTableId,
-                targetAlias,
-                sourceSqls,
-                sourceTable,
-                mergeCondition,
-                matchedUpsertCondition,
-                matchedUpsertSetting,
-                notMatchedInsertCondition,
-                notMatchedInsertValues,
-                "");
-    }
-
-    public String[] call(
-            ProcedureContext procedureContext,
-            String targetTableId,
-            String targetAlias,
-            String sourceSqls,
-            String sourceTable,
-            String mergeCondition,
-            String matchedDeleteCondition) {
-        return call(
-                procedureContext,
-                targetTableId,
-                targetAlias,
-                sourceSqls,
-                sourceTable,
-                mergeCondition,
-                "",
-                "",
-                "",
-                "",
-                matchedDeleteCondition);
-    }
-
+    @ProcedureHint(
+            argument = {
+                @ArgumentHint(name = "target_table", type = @DataTypeHint("STRING")),
+                @ArgumentHint(
+                        name = "target_alias",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "source_sqls",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "source_table",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "merge_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "matched_upsert_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "matched_upsert_setting",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "not_matched_insert_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "not_matched_insert_values",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "matched_delete_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "not_matched_by_source_upsert_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "not_matched_by_source_upsert_setting",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+                @ArgumentHint(
+                        name = "not_matched_by_source_delete_condition",
+                        type = @DataTypeHint("STRING"),
+                        isOptional = true),
+            })
     public String[] call(
             ProcedureContext procedureContext,
             String targetTableId,
@@ -178,16 +127,28 @@ public class MergeIntoProcedure extends ProcedureBase {
             String matchedUpsertSetting,
             String notMatchedInsertCondition,
             String notMatchedInsertValues,
-            String matchedDeleteCondition) {
-        String warehouse = catalog.warehouse();
+            String matchedDeleteCondition,
+            String notMatchedBySourceUpsertCondition,
+            String notMatchedBySourceUpsertSetting,
+            String notMatchedBySourceDeleteCondition) {
+        targetAlias = notnull(targetAlias);
+        sourceSqls = notnull(sourceSqls);
+        sourceTable = notnull(sourceTable);
+        mergeCondition = notnull(mergeCondition);
+        matchedUpsertCondition = notnull(matchedUpsertCondition);
+        matchedUpsertSetting = notnull(matchedUpsertSetting);
+        notMatchedInsertCondition = notnull(notMatchedInsertCondition);
+        notMatchedInsertValues = notnull(notMatchedInsertValues);
+        matchedDeleteCondition = notnull(matchedDeleteCondition);
+        notMatchedBySourceUpsertCondition = notnull(notMatchedBySourceUpsertCondition);
+        notMatchedBySourceUpsertSetting = notnull(notMatchedBySourceUpsertSetting);
+        notMatchedBySourceDeleteCondition = notnull(notMatchedBySourceDeleteCondition);
+
         Map<String, String> catalogOptions = catalog.options();
         Identifier identifier = Identifier.fromString(targetTableId);
         MergeIntoAction action =
                 new MergeIntoAction(
-                        warehouse,
-                        identifier.getDatabaseName(),
-                        identifier.getObjectName(),
-                        catalogOptions);
+                        identifier.getDatabaseName(), identifier.getObjectName(), catalogOptions);
         action.withTargetAlias(nullable(targetAlias));
 
         if (!sourceSqls.isEmpty()) {
@@ -217,6 +178,20 @@ public class MergeIntoProcedure extends ProcedureBase {
 
         if (!matchedDeleteCondition.isEmpty()) {
             action.withMatchedDelete(matchedDeleteCondition);
+        }
+
+        if (!notMatchedBySourceUpsertCondition.isEmpty()
+                || !notMatchedBySourceUpsertSetting.isEmpty()) {
+            String condition = nullable(notMatchedBySourceUpsertCondition);
+            String values = nullable(notMatchedBySourceUpsertSetting);
+            checkArgument(
+                    !"*".equals(values),
+                    "not-matched-by-source-upsert does not support setting notMatchedBySourceUpsertSetting to *.");
+            action.withNotMatchedBySourceUpsert(condition, values);
+        }
+
+        if (!notMatchedBySourceDeleteCondition.isEmpty()) {
+            action.withNotMatchedBySourceDelete(notMatchedBySourceDeleteCondition);
         }
 
         action.withStreamExecutionEnvironment(procedureContext.getExecutionEnvironment());

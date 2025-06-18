@@ -27,13 +27,19 @@ import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.utils.StringUtils;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Optional;
 
 import static org.apache.paimon.CoreOptions.PATH;
 
 /** Factory to create {@link FileStoreTable}. */
 public class FileStoreTableFactory {
+
+    private static final Logger LOG = LoggerFactory.getLogger(FileStoreTableFactory.class);
 
     public static FileStoreTable create(CatalogContext context) {
         FileIO fileIO;
@@ -63,6 +69,7 @@ public class FileStoreTableFactory {
                                                 "Schema file not found in location "
                                                         + tablePath
                                                         + ". Please create table first."));
+
         return create(fileIO, tablePath, tableSchema, options, CatalogEnvironment.empty());
     }
 
@@ -93,20 +100,22 @@ public class FileStoreTableFactory {
         if (!StringUtils.isNullOrWhitespaceOnly(fallbackBranch)) {
             Options branchOptions = new Options(dynamicOptions.toMap());
             branchOptions.set(CoreOptions.BRANCH, fallbackBranch);
-            FileStoreTable fallbackTable =
-                    createWithoutFallbackBranch(
-                            fileIO,
-                            tablePath,
-                            new SchemaManager(fileIO, tablePath, fallbackBranch).latest().get(),
-                            branchOptions,
-                            catalogEnvironment);
-            table = new FallbackReadFileStoreTable(table, fallbackTable);
+            Optional<TableSchema> schema =
+                    new SchemaManager(fileIO, tablePath, fallbackBranch).latest();
+            if (schema.isPresent()) {
+                FileStoreTable fallbackTable =
+                        createWithoutFallbackBranch(
+                                fileIO, tablePath, schema.get(), branchOptions, catalogEnvironment);
+                table = new FallbackReadFileStoreTable(table, fallbackTable);
+            } else {
+                LOG.error("Fallback branch {} not found for table {}", fallbackBranch, tablePath);
+            }
         }
 
         return table;
     }
 
-    private static FileStoreTable createWithoutFallbackBranch(
+    public static FileStoreTable createWithoutFallbackBranch(
             FileIO fileIO,
             Path tablePath,
             TableSchema tableSchema,

@@ -19,19 +19,36 @@
 package org.apache.paimon.flink.action;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.compact.UnawareBucketCompactionTopoBuilder;
+import org.apache.paimon.flink.postpone.PostponeBucketCompactSplitSource;
+import org.apache.paimon.flink.postpone.RewritePostponeBucketCommittableOperator;
 import org.apache.paimon.flink.predicate.SimpleSqlPredicateConvertor;
+import org.apache.paimon.flink.sink.Committable;
+import org.apache.paimon.flink.sink.CommittableTypeInfo;
 import org.apache.paimon.flink.sink.CompactorSinkBuilder;
+import org.apache.paimon.flink.sink.FixedBucketSink;
+import org.apache.paimon.flink.sink.FlinkSinkBuilder;
+import org.apache.paimon.flink.sink.FlinkStreamPartitioner;
+import org.apache.paimon.flink.sink.RowDataChannelComputer;
 import org.apache.paimon.flink.source.CompactorSourceBuilder;
+import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.PartitionPredicateVisitor;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.predicate.PredicateBuilder;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.utils.InternalRowPartitionComputer;
+import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.Preconditions;
 
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
@@ -41,8 +58,11 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -59,17 +79,14 @@ public class CompactAction extends TableActionBase {
 
     @Nullable private Duration partitionIdleTime = null;
 
-    public CompactAction(String warehouse, String database, String tableName) {
-        this(warehouse, database, tableName, Collections.emptyMap(), Collections.emptyMap());
-    }
+    private Boolean fullCompaction;
 
     public CompactAction(
-            String warehouse,
             String database,
             String tableName,
             Map<String, String> catalogConfig,
             Map<String, String> tableConf) {
-        super(warehouse, database, tableName, catalogConfig);
+        super(database, tableName, catalogConfig);
         if (!(table instanceof FileStoreTable)) {
             throw new UnsupportedOperationException(
                     String.format(
@@ -100,33 +117,58 @@ public class CompactAction extends TableActionBase {
         return this;
     }
 
+    public CompactAction withFullCompaction(Boolean fullCompaction) {
+        this.fullCompaction = fullCompaction;
+        return this;
+    }
+
     @Override
     public void build() throws Exception {
+        buildImpl();
+    }
+
+    private boolean buildImpl() throws Exception {
         ReadableConfig conf = env.getConfiguration();
         boolean isStreaming =
                 conf.get(ExecutionOptions.RUNTIME_MODE) == RuntimeExecutionMode.STREAMING;
         FileStoreTable fileStoreTable = (FileStoreTable) table;
-        switch (fileStoreTable.bucketMode()) {
-            case BUCKET_UNAWARE:
-                {
-                    buildForUnawareBucketCompaction(env, fileStoreTable, isStreaming);
-                    break;
-                }
-            case HASH_FIXED:
-            case HASH_DYNAMIC:
-            default:
-                {
-                    buildForTraditionalCompaction(env, fileStoreTable, isStreaming);
-                }
+
+        if (fileStoreTable.coreOptions().bucket() == BucketMode.POSTPONE_BUCKET) {
+            return buildForPostponeBucketCompaction(env, fileStoreTable, isStreaming);
+        } else if (fileStoreTable.bucketMode() == BucketMode.BUCKET_UNAWARE) {
+            buildForUnawareBucketCompaction(env, fileStoreTable, isStreaming);
+            return true;
+        } else {
+            buildForTraditionalCompaction(env, fileStoreTable, isStreaming);
+            return true;
         }
     }
 
     private void buildForTraditionalCompaction(
             StreamExecutionEnvironment env, FileStoreTable table, boolean isStreaming)
             throws Exception {
+        if (fullCompaction == null) {
+            fullCompaction = !isStreaming;
+        } else {
+            Preconditions.checkArgument(
+                    !(fullCompaction && isStreaming),
+                    "The full compact strategy is only supported in batch mode. Please add -Dexecution.runtime-mode=BATCH.");
+        }
+        if (isStreaming) {
+            // for completely asynchronous compaction
+            HashMap<String, String> dynamicOptions =
+                    new HashMap<String, String>() {
+                        {
+                            put(CoreOptions.NUM_SORTED_RUNS_STOP_TRIGGER.key(), "2147483647");
+                            put(CoreOptions.SORT_SPILL_THRESHOLD.key(), "10");
+                            put(CoreOptions.LOOKUP_WAIT.key(), "false");
+                        }
+                    };
+            table = table.copy(dynamicOptions);
+        }
         CompactorSourceBuilder sourceBuilder =
                 new CompactorSourceBuilder(identifier.getFullName(), table);
-        CompactorSinkBuilder sinkBuilder = new CompactorSinkBuilder(table);
+        CompactorSinkBuilder sinkBuilder = new CompactorSinkBuilder(table, fullCompaction);
 
         sourceBuilder.withPartitionPredicate(getPredicate());
         DataStreamSource<RowData> source =
@@ -174,22 +216,110 @@ public class CompactAction extends TableActionBase {
             predicate = simpleSqlPredicateConvertor.convertSqlToPredicate(whereSql);
         }
 
-        // Check whether predicate contain non parition key.
+        // Check whether predicate contain non partition key.
         if (predicate != null) {
             LOGGER.info("the partition predicate of compaction is {}", predicate);
             PartitionPredicateVisitor partitionPredicateVisitor =
                     new PartitionPredicateVisitor(table.partitionKeys());
             Preconditions.checkArgument(
                     predicate.visit(partitionPredicateVisitor),
-                    "Only parition key can be specialized in compaction action.");
+                    "Only partition key can be specialized in compaction action.");
         }
 
         return predicate;
     }
 
+    private boolean buildForPostponeBucketCompaction(
+            StreamExecutionEnvironment env, FileStoreTable table, boolean isStreaming) {
+        Preconditions.checkArgument(
+                !isStreaming, "Postpone bucket compaction currently only supports batch mode");
+        Preconditions.checkArgument(
+                partitions == null,
+                "Postpone bucket compaction currently does not support specifying partitions");
+        Preconditions.checkArgument(
+                whereSql == null,
+                "Postpone bucket compaction currently does not support predicates");
+
+        Options options = new Options(table.options());
+        int defaultBucketNum = options.get(FlinkConnectorOptions.POSTPONE_DEFAULT_BUCKET_NUM);
+
+        // change bucket to a positive value, so we can scan files from the bucket = -2 directory
+        Map<String, String> bucketOptions = new HashMap<>(table.options());
+        bucketOptions.put(CoreOptions.BUCKET.key(), String.valueOf(defaultBucketNum));
+        FileStoreTable fileStoreTable = table.copy(table.schema().copy(bucketOptions));
+
+        List<BinaryRow> partitions =
+                fileStoreTable
+                        .newSnapshotReader()
+                        .withBucket(BucketMode.POSTPONE_BUCKET)
+                        .partitions();
+        if (partitions.isEmpty()) {
+            return false;
+        }
+
+        InternalRowPartitionComputer partitionComputer =
+                new InternalRowPartitionComputer(
+                        fileStoreTable.coreOptions().partitionDefaultName(),
+                        fileStoreTable.store().partitionType(),
+                        fileStoreTable.partitionKeys().toArray(new String[0]),
+                        fileStoreTable.coreOptions().legacyPartitionName());
+        String commitUser = CoreOptions.createCommitUser(options);
+        List<DataStream<Committable>> dataStreams = new ArrayList<>();
+        for (BinaryRow partition : partitions) {
+            int bucketNum = defaultBucketNum;
+
+            Iterator<ManifestEntry> it =
+                    table.newSnapshotReader()
+                            .withPartitionFilter(Collections.singletonList(partition))
+                            .readFileIterator();
+            if (it.hasNext()) {
+                bucketNum = it.next().totalBuckets();
+            }
+
+            bucketOptions = new HashMap<>(table.options());
+            bucketOptions.put(CoreOptions.BUCKET.key(), String.valueOf(bucketNum));
+            FileStoreTable realTable = table.copy(table.schema().copy(bucketOptions));
+
+            LinkedHashMap<String, String> partitionSpec =
+                    partitionComputer.generatePartValues(partition);
+            Pair<DataStream<RowData>, DataStream<Committable>> sourcePair =
+                    PostponeBucketCompactSplitSource.buildSource(
+                            env,
+                            realTable,
+                            partitionSpec,
+                            options.get(FlinkConnectorOptions.SCAN_PARALLELISM));
+
+            DataStream<InternalRow> partitioned =
+                    FlinkStreamPartitioner.partition(
+                            FlinkSinkBuilder.mapToInternalRow(
+                                    sourcePair.getLeft(), realTable.rowType()),
+                            new RowDataChannelComputer(realTable.schema(), false),
+                            null);
+            FixedBucketSink sink = new FixedBucketSink(realTable, null, null);
+            DataStream<Committable> written =
+                    sink.doWrite(partitioned, commitUser, partitioned.getParallelism())
+                            .forward()
+                            .transform(
+                                    "Rewrite compact committable",
+                                    new CommittableTypeInfo(),
+                                    new RewritePostponeBucketCommittableOperator(realTable));
+            dataStreams.add(written);
+            dataStreams.add(sourcePair.getRight());
+        }
+
+        FixedBucketSink sink = new FixedBucketSink(fileStoreTable, null, null);
+        DataStream<Committable> dataStream = dataStreams.get(0);
+        for (int i = 1; i < dataStreams.size(); i++) {
+            dataStream = dataStream.union(dataStreams.get(i));
+        }
+        sink.doCommit(dataStream, commitUser);
+        return true;
+    }
+
     @Override
     public void run() throws Exception {
-        build();
-        execute("Compact job");
+        if (buildImpl()) {
+            execute("Compact job : " + table.fullName());
+        }
     }
 }

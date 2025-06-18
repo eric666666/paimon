@@ -18,28 +18,24 @@
 
 package org.apache.paimon.flink.action;
 
-import org.apache.paimon.operation.FileStoreCommit;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.sink.BatchWriteBuilder;
+import org.apache.paimon.table.sink.BatchTableCommit;
 
 import java.util.List;
 import java.util.Map;
-
-import static org.apache.paimon.CoreOptions.createCommitUser;
 
 /** Table drop partition action for Flink. */
 public class DropPartitionAction extends TableActionBase {
 
     private final List<Map<String, String>> partitions;
-    private final FileStoreCommit commit;
+    private final BatchTableCommit commit;
 
     public DropPartitionAction(
-            String warehouse,
             String databaseName,
             String tableName,
             List<Map<String, String>> partitions,
             Map<String, String> catalogConfig) {
-        super(warehouse, databaseName, tableName, catalogConfig);
+        super(databaseName, tableName, catalogConfig);
         if (!(table instanceof FileStoreTable)) {
             throw new UnsupportedOperationException(
                     String.format(
@@ -48,17 +44,11 @@ public class DropPartitionAction extends TableActionBase {
         }
 
         this.partitions = partitions;
-
-        FileStoreTable fileStoreTable = (FileStoreTable) table;
-        this.commit =
-                fileStoreTable
-                        .store()
-                        .newCommit(
-                                createCommitUser(fileStoreTable.coreOptions().toConfiguration()));
+        this.commit = table.newBatchWriteBuilder().newCommit();
     }
 
     @Override
     public void run() throws Exception {
-        commit.dropPartitions(partitions, BatchWriteBuilder.COMMIT_IDENTIFIER);
+        commit.truncatePartitions(partitions);
     }
 }

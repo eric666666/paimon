@@ -57,7 +57,7 @@ public class CdcRecordUtils {
         GenericRow genericRow = new GenericRow(dataFields.size());
         for (int i = 0; i < dataFields.size(); i++) {
             DataField dataField = dataFields.get(i);
-            String fieldValue = record.fields().get(dataField.name());
+            String fieldValue = record.data().get(dataField.name());
             if (fieldValue != null) {
                 genericRow.setField(
                         i, TypeUtils.castFromCdcValueString(fieldValue, dataField.type()));
@@ -76,18 +76,19 @@ public class CdcRecordUtils {
      * CdcRecordUtils#projectAsInsert} instead.
      *
      * @param dataFields {@link DataField}s of the converted {@link GenericRow}.
+     * @param logCorruptRecord whether to log data during conversion error
      * @return if all field names of {@code dataFields} existed in keys of {@code fields} and all
-     * values of {@code fields} can be correctly converted to the specified type, an {@code
-     * Optional#of(GenericRow)} will be returned, otherwise an {@code Optional#empty()} will be
-     * returned
+     *     values of {@code fields} can be correctly converted to the specified type, an {@code
+     *     Optional#of(GenericRow)} will be returned, otherwise an {@code Optional#empty()} will be
+     *     returned
      */
-    public static Optional<GenericRow> toGenericRow(CdcRecord record, FileStoreTable table) {
-        List<DataField> dataFields = table.schema().fields();
+    public static Optional<GenericRow> toGenericRow(CdcRecord record, FileStoreTable table,boolean logCorruptRecord)) {
+            CdcRecord record, List<DataField> dataFields, boolean logCorruptRecord) {
         GenericRow genericRow = new GenericRow(record.kind(), dataFields.size());
         List<String> fieldNames =
                 dataFields.stream().map(DataField::name).collect(Collectors.toList());
         String fullName = table.fullName();
-        for (Map.Entry<String, String> field : record.fields().entrySet()) {
+        for (Map.Entry<String, String> field : record.data().entrySet()) {
             String key = field.getKey();
             String value = field.getValue();
 
@@ -120,14 +121,14 @@ public class CdcRecordUtils {
     }
 
     public static CdcRecord fromGenericRow(GenericRow row, List<String> fieldNames) {
-        Map<String, String> fields = new HashMap<>();
+        Map<String, String> data = new HashMap<>();
         for (int i = 0; i < row.getFieldCount(); i++) {
             Object field = row.getField(i);
             if (field != null) {
-                fields.put(fieldNames.get(i), field.toString());
+                data.put(fieldNames.get(i), field.toString());
             }
         }
 
-        return new CdcRecord(row.getRowKind(), fields);
+        return new CdcRecord(row.getRowKind(), data);
     }
 }

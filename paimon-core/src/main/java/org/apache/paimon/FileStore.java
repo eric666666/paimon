@@ -20,6 +20,7 @@ package org.apache.paimon;
 
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.index.IndexFileHandler;
+import org.apache.paimon.manifest.IndexManifestFile;
 import org.apache.paimon.manifest.ManifestCacheFilter;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.manifest.ManifestList;
@@ -31,20 +32,25 @@ import org.apache.paimon.operation.PartitionExpire;
 import org.apache.paimon.operation.SnapshotDeletion;
 import org.apache.paimon.operation.SplitRead;
 import org.apache.paimon.operation.TagDeletion;
+import org.apache.paimon.partition.PartitionExpireStrategy;
 import org.apache.paimon.service.ServiceManager;
 import org.apache.paimon.stats.StatsFileHandler;
 import org.apache.paimon.table.BucketMode;
-import org.apache.paimon.table.sink.CommitCallback;
+import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.TagCallback;
 import org.apache.paimon.tag.TagAutoManager;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.ChangelogManager;
 import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.SegmentsCache;
 import org.apache.paimon.utils.SnapshotManager;
 import org.apache.paimon.utils.TagManager;
 
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
+
 import javax.annotation.Nullable;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -58,6 +64,8 @@ public interface FileStore<T> {
 
     SnapshotManager snapshotManager();
 
+    ChangelogManager changelogManager();
+
     RowType partitionType();
 
     CoreOptions options();
@@ -70,6 +78,8 @@ public interface FileStore<T> {
 
     ManifestFile.Factory manifestFileFactory();
 
+    IndexManifestFile.Factory indexManifestFileFactory();
+
     IndexFileHandler newIndexFileHandler();
 
     StatsFileHandler newStatsFileHandler();
@@ -80,9 +90,7 @@ public interface FileStore<T> {
 
     FileStoreWrite<T> newWrite(String commitUser, ManifestCacheFilter manifestFilter);
 
-    FileStoreCommit newCommit(String commitUser);
-
-    FileStoreCommit newCommit(String commitUser, List<CommitCallback> callbacks);
+    FileStoreCommit newCommit(String commitUser, FileStoreTable table);
 
     SnapshotDeletion newSnapshotDeletion();
 
@@ -93,7 +101,15 @@ public interface FileStore<T> {
     TagDeletion newTagDeletion();
 
     @Nullable
-    PartitionExpire newPartitionExpire(String commitUser);
+    PartitionExpire newPartitionExpire(String commitUser, FileStoreTable table);
+
+    @Nullable
+    PartitionExpire newPartitionExpire(
+            String commitUser,
+            FileStoreTable table,
+            Duration expirationTime,
+            Duration checkInterval,
+            PartitionExpireStrategy expireStrategy);
 
     TagAutoManager newTagCreationManager();
 
@@ -104,4 +120,6 @@ public interface FileStore<T> {
     List<TagCallback> createTagCallbacks();
 
     void setManifestCache(SegmentsCache<Path> manifestCache);
+
+    void setSnapshotCache(Cache<Path, Snapshot> cache);
 }

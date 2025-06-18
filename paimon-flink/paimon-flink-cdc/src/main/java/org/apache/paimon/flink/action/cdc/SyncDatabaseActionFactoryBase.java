@@ -22,27 +22,34 @@ import org.apache.paimon.flink.action.Action;
 import org.apache.paimon.flink.action.ActionFactory;
 import org.apache.paimon.flink.action.MultipleParameterToolAdapter;
 
+import java.util.ArrayList;
 import java.util.Optional;
 
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.COMPUTED_COLUMN;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.EAGER_INIT;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.EXCLUDING_DBS;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.EXCLUDING_TABLES;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.INCLUDING_DBS;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.INCLUDING_TABLES;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.MULTIPLE_TABLE_PARTITION_KEYS;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.PARTITION_KEYS;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.PRIMARY_KEYS;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TABLE_MAPPING;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TABLE_PREFIX;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TABLE_PREFIX_DB;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TABLE_SUFFIX;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TABLE_SUFFIX_DB;
 import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.TYPE_MAPPING;
 
 /** Base {@link ActionFactory} for synchronizing into database. */
 public abstract class SyncDatabaseActionFactoryBase<T extends SyncDatabaseActionBase>
         extends SynchronizationActionFactoryBase<T> {
 
-    protected String warehouse;
     protected String database;
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
-        this.warehouse = getRequiredValue(params, WAREHOUSE);
-        this.database = getRequiredValue(params, DATABASE);
+        this.database = params.getRequired(DATABASE);
         return super.create(params);
     }
 
@@ -50,9 +57,17 @@ public abstract class SyncDatabaseActionFactoryBase<T extends SyncDatabaseAction
     protected void withParams(MultipleParameterToolAdapter params, T action) {
         action.withTablePrefix(params.get(TABLE_PREFIX))
                 .withTableSuffix(params.get(TABLE_SUFFIX))
+                .withDbPrefix(optionalConfigMap(params, TABLE_PREFIX_DB))
+                .withDbSuffix(optionalConfigMap(params, TABLE_SUFFIX_DB))
+                .withTableMapping(optionalConfigMap(params, TABLE_MAPPING))
                 .includingTables(params.get(INCLUDING_TABLES))
                 .excludingTables(params.get(EXCLUDING_TABLES))
-                .withPartitionKeys();
+                .includingDbs(params.get(INCLUDING_DBS))
+                .excludingDbs(params.get(EXCLUDING_DBS))
+                .withPartitionKeyMultiple(
+                        optionalConfigMapList(params, MULTIPLE_TABLE_PARTITION_KEYS))
+                .withPartitionKeys()
+                .eagerInit(Boolean.valueOf(params.get(EAGER_INIT)));
 
         if (params.has(PARTITION_KEYS)) {
             action.withPartitionKeys(params.get(PARTITION_KEYS).split(","));
@@ -65,6 +80,11 @@ public abstract class SyncDatabaseActionFactoryBase<T extends SyncDatabaseAction
         if (params.has(TYPE_MAPPING)) {
             String[] options = params.get(TYPE_MAPPING).split(",");
             action.withTypeMapping(TypeMapping.parse(options));
+        }
+
+        if (params.has(COMPUTED_COLUMN)) {
+            action.withComputedColumnArgs(
+                    new ArrayList<>(params.getMultiParameter(COMPUTED_COLUMN)));
         }
     }
 }

@@ -20,9 +20,12 @@ package org.apache.paimon.types;
 
 import org.apache.paimon.annotation.Public;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.table.SpecialFields;
 import org.apache.paimon.utils.Preconditions;
 import org.apache.paimon.utils.StringUtils;
 
+import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.core.JsonGenerator;
 
 import java.io.IOException;
@@ -51,6 +54,8 @@ public final class RowType extends DataType {
 
     private static final long serialVersionUID = 1L;
 
+    private static final String FIELD_FIELDS = "fields";
+
     public static final String FORMAT = "ROW<%s>";
 
     private final List<DataField> fields;
@@ -66,8 +71,13 @@ public final class RowType extends DataType {
         validateFields(fields);
     }
 
-    public RowType(List<DataField> fields) {
+    @JsonCreator
+    public RowType(@JsonProperty(FIELD_FIELDS) List<DataField> fields) {
         this(true, fields);
+    }
+
+    public RowType copy(List<DataField> newFields) {
+        return new RowType(isNullable(), newFields);
     }
 
     public List<DataField> getFields() {
@@ -117,6 +127,15 @@ public final class RowType extends DataType {
         return false;
     }
 
+    public boolean containsField(int fieldId) {
+        for (DataField field : fields) {
+            if (field.id() == fieldId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public boolean notContainsField(String fieldName) {
         return !containsField(fieldName);
     }
@@ -131,10 +150,38 @@ public final class RowType extends DataType {
         throw new RuntimeException("Cannot find field: " + fieldName);
     }
 
+    public DataField getField(int fieldId) {
+        for (DataField field : fields) {
+            if (field.id() == fieldId) {
+                return field;
+            }
+        }
+        throw new RuntimeException("Cannot find field by field id: " + fieldId);
+    }
+
+    public int getFieldIndexByFieldId(int fieldId) {
+        for (int i = 0; i < fields.size(); i++) {
+            if (fields.get(i).id() == fieldId) {
+                return i;
+            }
+        }
+        throw new RuntimeException("Cannot find field index by FieldId " + fieldId);
+    }
+
     @Override
-    public DataType copy(boolean isNullable) {
+    public int defaultSize() {
+        return fields.stream().mapToInt(f -> f.type().defaultSize()).sum();
+    }
+
+    @Override
+    public RowType copy(boolean isNullable) {
         return new RowType(
                 isNullable, fields.stream().map(DataField::copy).collect(Collectors.toList()));
+    }
+
+    @Override
+    public RowType notNull() {
+        return copy(false);
     }
 
     @Override
@@ -169,6 +216,49 @@ public final class RowType extends DataType {
         }
         RowType rowType = (RowType) o;
         return fields.equals(rowType.fields);
+    }
+
+    @Override
+    public boolean equalsIgnoreFieldId(DataType o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+        RowType other = (RowType) o;
+        if (fields.size() != other.fields.size()) {
+            return false;
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            if (!fields.get(i).equalsIgnoreFieldId(other.fields.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean isPrunedFrom(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+        RowType rowType = (RowType) o;
+        for (DataField field : fields) {
+            if (!field.isPrunedFrom(rowType.getField(field.id()))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -232,6 +322,19 @@ public final class RowType extends DataType {
                         .collect(Collectors.toList()));
     }
 
+    public RowType project(String... names) {
+        return project(Arrays.asList(names));
+    }
+
+    public static RowType of() {
+        return new RowType(true, Collections.emptyList());
+    }
+
+    public static RowType of(DataField... fields) {
+        final List<DataField> fs = new ArrayList<>(Arrays.asList(fields));
+        return new RowType(true, fs);
+    }
+
     public static RowType of(DataType... types) {
         final List<DataField> fields = new ArrayList<>();
         for (int i = 0; i < types.length; i++) {
@@ -251,11 +354,18 @@ public final class RowType extends DataType {
     public static int currentHighestFieldId(List<DataField> fields) {
         Set<Integer> fieldIds = new HashSet<>();
         new RowType(fields).collectFieldIds(fieldIds);
-        return fieldIds.stream().max(Integer::compareTo).orElse(-1);
+        return fieldIds.stream()
+                .filter(i -> !SpecialFields.isSystemField(i))
+                .max(Integer::compareTo)
+                .orElse(-1);
     }
 
     public static Builder builder() {
-        return builder(true, new AtomicInteger(-1));
+        return builder(new AtomicInteger(-1));
+    }
+
+    public static Builder builder(AtomicInteger fieldId) {
+        return builder(true, fieldId);
     }
 
     public static Builder builder(boolean isNullable, AtomicInteger fieldId) {

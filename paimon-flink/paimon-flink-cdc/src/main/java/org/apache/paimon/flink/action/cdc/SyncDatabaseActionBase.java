@@ -21,6 +21,7 @@ package org.apache.paimon.flink.action.cdc;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.flink.action.Action;
 import org.apache.paimon.flink.action.MultiTablesSinkMode;
+import org.apache.paimon.flink.sink.TableFilter;
 import org.apache.paimon.flink.sink.cdc.EventParser;
 import org.apache.paimon.flink.sink.cdc.FlinkCdcSyncDatabaseSinkBuilder;
 import org.apache.paimon.flink.sink.cdc.NewTableSchemaBuilder;
@@ -36,6 +37,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -43,28 +45,35 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 import static org.apache.paimon.flink.action.MultiTablesSinkMode.COMBINED;
+import static org.apache.paimon.flink.action.cdc.ComputedColumnUtils.buildComputedColumns;
 
 /** Base {@link Action} for synchronizing into one Paimon database. */
 public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
 
+    protected boolean eagerInit = false;
     protected boolean mergeShards = true;
     protected MultiTablesSinkMode mode = COMBINED;
     protected String tablePrefix = "";
     protected String tableSuffix = "";
+    protected Map<String, String> tableMapping = new HashMap<>();
+    protected Map<String, String> dbPrefix = new HashMap<>();
+    protected Map<String, String> dbSuffix = new HashMap<>();
     protected String includingTables = ".*";
     protected List<String> partitionKeys = new ArrayList<>();
     protected List<String> primaryKeys = new ArrayList<>();
+    protected List<ComputedColumn> computedColumns = new ArrayList<>();
     @Nullable protected String excludingTables;
+    protected String includingDbs = ".*";
+    @Nullable protected String excludingDbs;
     protected List<FileStoreTable> tables = new ArrayList<>();
+    protected Map<String, List<String>> partitionKeyMultiple = new HashMap<>();
 
     public SyncDatabaseActionBase(
-            String warehouse,
             String database,
             Map<String, String> catalogConfig,
             Map<String, String> cdcSourceConfig,
             SyncJobHandler.SourceType sourceType) {
         super(
-                warehouse,
                 database,
                 catalogConfig,
                 cdcSourceConfig,
@@ -73,6 +82,11 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
 
     public SyncDatabaseActionBase mergeShards(boolean mergeShards) {
         this.mergeShards = mergeShards;
+        return this;
+    }
+
+    public SyncDatabaseActionBase eagerInit(boolean eagerInit) {
+        this.eagerInit = eagerInit;
         return this;
     }
 
@@ -95,6 +109,37 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
         return this;
     }
 
+    public SyncDatabaseActionBase withDbPrefix(Map<String, String> dbPrefix) {
+        if (dbPrefix != null) {
+            this.dbPrefix =
+                    dbPrefix.entrySet().stream()
+                            .collect(
+                                    HashMap::new,
+                                    (m, e) -> m.put(e.getKey().toLowerCase(), e.getValue()),
+                                    HashMap::putAll);
+        }
+        return this;
+    }
+
+    public SyncDatabaseActionBase withDbSuffix(Map<String, String> dbSuffix) {
+        if (dbSuffix != null) {
+            this.dbSuffix =
+                    dbSuffix.entrySet().stream()
+                            .collect(
+                                    HashMap::new,
+                                    (m, e) -> m.put(e.getKey().toLowerCase(), e.getValue()),
+                                    HashMap::putAll);
+        }
+        return this;
+    }
+
+    public SyncDatabaseActionBase withTableMapping(Map<String, String> tableMapping) {
+        if (tableMapping != null) {
+            this.tableMapping = tableMapping;
+        }
+        return this;
+    }
+
     public SyncDatabaseActionBase includingTables(@Nullable String includingTables) {
         if (includingTables != null) {
             this.includingTables = includingTables;
@@ -104,6 +149,18 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
 
     public SyncDatabaseActionBase excludingTables(@Nullable String excludingTables) {
         this.excludingTables = excludingTables;
+        return this;
+    }
+
+    public SyncDatabaseActionBase includingDbs(@Nullable String includingDbs) {
+        if (includingDbs != null) {
+            this.includingDbs = includingDbs;
+        }
+        return this;
+    }
+
+    public SyncDatabaseActionBase excludingDbs(@Nullable String excludingDbs) {
+        this.excludingDbs = excludingDbs;
         return this;
     }
 
@@ -117,17 +174,23 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
         return this;
     }
 
-    @Override
-    protected void validateCaseSensitivity() {
-        Catalog.validateCaseInsensitive(allowUpperCase, "Database", database);
-        Catalog.validateCaseInsensitive(allowUpperCase, "Table prefix", tablePrefix);
-        Catalog.validateCaseInsensitive(allowUpperCase, "Table suffix", tableSuffix);
+    public SyncDatabaseActionBase withComputedColumnArgs(List<String> computedColumnArgs) {
+        this.computedColumns = buildComputedColumns(computedColumnArgs, Collections.emptyList());
+        return this;
     }
 
     @Override
     protected FlatMapFunction<CdcSourceRecord, RichCdcMultiplexRecord> recordParse() {
         return syncJobHandler.provideRecordParser(
-                Collections.emptyList(), typeMapping, metadataConverters);
+                this.computedColumns, typeMapping, metadataConverters);
+    }
+
+    public SyncDatabaseActionBase withPartitionKeyMultiple(
+            Map<String, List<String>> partitionKeyMultiple) {
+        if (partitionKeyMultiple != null) {
+            this.partitionKeyMultiple = partitionKeyMultiple;
+        }
+        return this;
     }
 
     @Override
@@ -135,15 +198,26 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
         NewTableSchemaBuilder schemaBuilder =
                 new NewTableSchemaBuilder(
                         tableConfig,
-                        allowUpperCase,
+                        caseSensitive,
                         partitionKeys,
                         primaryKeys,
+                        requirePrimaryKeys(),
+                        partitionKeyMultiple,
                         metadataConverters);
-        Pattern includingPattern = Pattern.compile(includingTables);
-        Pattern excludingPattern =
+        Pattern tblIncludingPattern = Pattern.compile(includingTables);
+        Pattern tblExcludingPattern =
                 excludingTables == null ? null : Pattern.compile(excludingTables);
+        Pattern dbIncludingPattern = Pattern.compile(includingDbs);
+        Pattern dbExcludingPattern = excludingDbs == null ? null : Pattern.compile(excludingDbs);
         TableNameConverter tableNameConverter =
-                new TableNameConverter(allowUpperCase, mergeShards, tablePrefix, tableSuffix);
+                new TableNameConverter(
+                        caseSensitive,
+                        mergeShards,
+                        dbPrefix,
+                        dbSuffix,
+                        tablePrefix,
+                        tableSuffix,
+                        tableMapping);
         Set<String> createdTables;
         try {
             createdTables = new HashSet<>(catalog.listTables(database));
@@ -153,24 +227,45 @@ public abstract class SyncDatabaseActionBase extends SynchronizationActionBase {
         return () ->
                 new RichCdcMultiplexRecordEventParser(
                         schemaBuilder,
-                        includingPattern,
-                        excludingPattern,
+                        tblIncludingPattern,
+                        tblExcludingPattern,
+                        dbIncludingPattern,
+                        dbExcludingPattern,
                         tableNameConverter,
                         createdTables);
     }
+
+    protected abstract boolean requirePrimaryKeys();
 
     @Override
     protected void buildSink(
             DataStream<RichCdcMultiplexRecord> input,
             EventParser.Factory<RichCdcMultiplexRecord> parserFactory) {
+
+        List<String> whiteList = new ArrayList<>(tableMapping.values());
+        List<String> prefixList = new ArrayList<>(dbPrefix.values());
+        prefixList.add(tablePrefix);
+        List<String> suffixList = new ArrayList<>(dbSuffix.values());
+        suffixList.add(tableSuffix);
+
         new FlinkCdcSyncDatabaseSinkBuilder<RichCdcMultiplexRecord>()
                 .withInput(input)
                 .withParserFactory(parserFactory)
                 .withCatalogLoader(catalogLoader())
+                .withTypeMapping(typeMapping)
                 .withDatabase(database)
                 .withTables(tables)
                 .withMode(mode)
                 .withTableOptions(tableConfig)
+                .withEagerInit(eagerInit)
+                .withTableFilter(
+                        new TableFilter(
+                                database,
+                                whiteList,
+                                prefixList,
+                                suffixList,
+                                includingTables,
+                                excludingTables))
                 .build();
     }
 }

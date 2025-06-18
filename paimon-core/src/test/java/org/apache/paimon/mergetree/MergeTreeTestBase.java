@@ -23,6 +23,7 @@ import org.apache.paimon.CoreOptions.ChangelogProducer;
 import org.apache.paimon.CoreOptions.SortEngine;
 import org.apache.paimon.KeyValue;
 import org.apache.paimon.compact.CompactResult;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
@@ -85,6 +86,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Collections.singletonList;
@@ -113,7 +115,7 @@ public abstract class MergeTreeTestBase {
         pathFactory = createNonPartFactory(path);
         comparator = Comparator.comparingInt(o -> o.getInt(0));
         recreateMergeTree(1024 * 1024);
-        Path bucketDir = writerFactory.pathFactory(0).toPath("ignore").getParent();
+        Path bucketDir = writerFactory.pathFactory(0).newPath().getParent();
         LocalFileIO.create().mkdirs(bucketDir);
     }
 
@@ -144,7 +146,7 @@ public abstract class MergeTreeTestBase {
                 options.get(CoreOptions.NUM_SORTED_RUNS_COMPACTION_TRIGGER) + 1);
         this.options = new CoreOptions(options);
         RowType keyType = new RowType(singletonList(new DataField(0, "k", new IntType())));
-        RowType valueType = new RowType(singletonList(new DataField(0, "v", new IntType())));
+        RowType valueType = new RowType(singletonList(new DataField(1, "v", new IntType())));
 
         String identifier = "avro";
         FileFormat flushingAvro = new FlushingFileFormat(identifier);
@@ -160,20 +162,12 @@ public abstract class MergeTreeTestBase {
                         new KeyValueFieldsExtractor() {
                             @Override
                             public List<DataField> keyFields(TableSchema schema) {
-                                return Collections.singletonList(
-                                        new DataField(
-                                                0,
-                                                "k",
-                                                new org.apache.paimon.types.IntType(false)));
+                                return keyType.getFields();
                             }
 
                             @Override
                             public List<DataField> valueFields(TableSchema schema) {
-                                return Collections.singletonList(
-                                        new DataField(
-                                                0,
-                                                "v",
-                                                new org.apache.paimon.types.IntType(false)));
+                                return valueType.getFields();
                             }
                         },
                         new CoreOptions(new HashMap<>()));
@@ -182,8 +176,7 @@ public abstract class MergeTreeTestBase {
         compactReaderFactory =
                 readerFactoryBuilder.build(BinaryRow.EMPTY_ROW, 0, DeletionVector.emptyFactory());
 
-        Map<String, FileStorePathFactory> pathFactoryMap = new HashMap<>();
-        pathFactoryMap.put(identifier, pathFactory);
+        Function<String, FileStorePathFactory> pathFactoryMap = k -> pathFactory;
         KeyValueFileWriterFactory.Builder writerFactoryBuilder =
                 KeyValueFileWriterFactory.builder(
                         LocalFileIO.create(),
@@ -425,7 +418,7 @@ public abstract class MergeTreeTestBase {
 
         writer.close();
 
-        Path bucketDir = writerFactory.pathFactory(0).toPath("ignore").getParent();
+        Path bucketDir = writerFactory.pathFactory(0).newPath().getParent();
         Set<String> files =
                 Arrays.stream(LocalFileIO.create().listStatus(bucketDir))
                         .map(FileStatus::getPath)
@@ -482,7 +475,7 @@ public abstract class MergeTreeTestBase {
 
         writer.close();
 
-        Path bucketDir = writerFactory.pathFactory(0).toPath("ignore").getParent();
+        Path bucketDir = writerFactory.pathFactory(0).newPath().getParent();
         Set<String> files =
                 Arrays.stream(LocalFileIO.create().listStatus(bucketDir))
                         .map(FileStatus::getPath)
@@ -514,7 +507,7 @@ public abstract class MergeTreeTestBase {
                         false,
                         MemorySize.ofKibiBytes(10),
                         128,
-                        "lz4",
+                        CompressOptions.defaultOptions(),
                         null,
                         compactManager,
                         maxSequenceNumber,
@@ -547,7 +540,9 @@ public abstract class MergeTreeTestBase {
                 new TestRewriter(),
                 null,
                 null,
-                false);
+                false,
+                options.needLookup(),
+                null);
     }
 
     static class MockFailResultCompactionManager extends MergeTreeCompactManager {
@@ -569,7 +564,9 @@ public abstract class MergeTreeTestBase {
                     rewriter,
                     null,
                     null,
-                    false);
+                    false,
+                    false,
+                    null);
         }
 
         protected CompactResult obtainCompactResult()
@@ -599,7 +596,7 @@ public abstract class MergeTreeTestBase {
             assertThat(remove).isTrue();
             // See MergeTreeWriter.updateCompactResult
             if (!newFileNames.contains(file.fileName()) && !afterFiles.contains(file.fileName())) {
-                compactWriterFactory.deleteFile(file.fileName(), file.level());
+                compactWriterFactory.deleteFile(file);
             }
         }
         compactedFiles.addAll(increment.compactIncrement().compactAfter());

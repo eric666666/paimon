@@ -20,11 +20,18 @@ package org.apache.spark.sql
 
 import org.apache.spark.executor.OutputMetrics
 import org.apache.spark.rdd.InputFileBlockHolder
+import org.apache.spark.sql.catalyst.analysis.Resolver
+import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.connector.expressions.{FieldReference, NamedReference}
+import org.apache.spark.sql.connector.expressions.FieldReference
+import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.execution.datasources.DataSourceStrategy
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Strategy.translateFilterV2WithMapping
+import org.apache.spark.sql.internal.connector.PredicateUtils
 import org.apache.spark.sql.sources.Filter
+import org.apache.spark.sql.types.{DataType, StructType}
+import org.apache.spark.sql.util.PartitioningUtils
 import org.apache.spark.util.{Utils => SparkUtils}
 
 /**
@@ -64,8 +71,20 @@ object PaimonUtils {
     DataSourceStrategy.translateFilter(predicate, supportNestedPredicatePushdown)
   }
 
-  def fieldReference(name: String): NamedReference = {
-    FieldReference(Seq(name))
+  def translateFilterV2(predicate: Expression): Option[Predicate] = {
+    translateFilterV2WithMapping(predicate, None)
+  }
+
+  def filterV2ToV1(predicate: Predicate): Option[Filter] = {
+    PredicateUtils.toV1(predicate)
+  }
+
+  def fieldReference(name: String): FieldReference = {
+    fieldReference(Seq(name))
+  }
+
+  def fieldReference(parts: Seq[String]): FieldReference = {
+    FieldReference(parts)
   }
 
   def bytesToString(size: Long): String = {
@@ -86,5 +105,24 @@ object PaimonUtils {
       recordsWritten: Long): Unit = {
     outputMetrics.setBytesWritten(bytesWritten)
     outputMetrics.setRecordsWritten(recordsWritten)
+  }
+
+  def normalizePartitionSpec[T](
+      partitionSpec: Map[String, T],
+      partCols: StructType,
+      tblName: String,
+      resolver: Resolver): Map[String, T] = {
+    PartitioningUtils.normalizePartitionSpec(partitionSpec, partCols, tblName, resolver)
+  }
+
+  def requireExactMatchedPartitionSpec(
+      tableName: String,
+      spec: TablePartitionSpec,
+      partitionColumnNames: Seq[String]): Unit = {
+    PartitioningUtils.requireExactMatchedPartitionSpec(tableName, spec, partitionColumnNames)
+  }
+
+  def sameType(left: DataType, right: DataType): Boolean = {
+    left.sameType(right)
   }
 }

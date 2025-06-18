@@ -22,6 +22,8 @@ import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.fs.FileIO;
+import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.predicate.Predicate;
 import org.apache.paimon.reader.RecordReader;
@@ -94,6 +96,12 @@ public class CatalogOptionsTable implements ReadonlyTable {
     }
 
     @Override
+    public FileIO fileIO() {
+        // pass a useless file io, should never use this.
+        return new LocalFileIO();
+    }
+
+    @Override
     public Table copy(Map<String, String> dynamicOptions) {
         return new CatalogOptionsTable(catalogOptions);
     }
@@ -144,7 +152,7 @@ public class CatalogOptionsTable implements ReadonlyTable {
 
     private static class CatalogOptionsRead implements InnerTableRead {
 
-        private int[][] projection;
+        private RowType readType;
 
         @Override
         public InnerTableRead withFilter(Predicate predicate) {
@@ -152,8 +160,8 @@ public class CatalogOptionsTable implements ReadonlyTable {
         }
 
         @Override
-        public InnerTableRead withProjection(int[][] projection) {
-            this.projection = projection;
+        public InnerTableRead withReadType(RowType readType) {
+            this.readType = readType;
             return this;
         }
 
@@ -171,10 +179,13 @@ public class CatalogOptionsTable implements ReadonlyTable {
                     Iterators.transform(
                             ((CatalogOptionsSplit) split).catalogOptions.entrySet().iterator(),
                             this::toRow);
-            if (projection != null) {
+            if (readType != null) {
                 rows =
                         Iterators.transform(
-                                rows, row -> ProjectedRow.from(projection).replaceRow(row));
+                                rows,
+                                row ->
+                                        ProjectedRow.from(readType, CatalogOptionsTable.TABLE_TYPE)
+                                                .replaceRow(row));
             }
             return new IteratorRecordReader<>(rows);
         }

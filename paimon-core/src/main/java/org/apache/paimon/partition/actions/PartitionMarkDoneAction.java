@@ -19,60 +19,99 @@
 package org.apache.paimon.partition.actions;
 
 import org.apache.paimon.CoreOptions;
-import org.apache.paimon.metastore.MetastoreClient;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.PartitionHandler;
+import org.apache.paimon.utils.StringUtils;
 
 import java.io.Closeable;
-import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.CoreOptions.METASTORE_PARTITIONED_TABLE;
 import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_ACTION;
+import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_CUSTOM_CLASS;
+import static org.apache.paimon.CoreOptions.PartitionMarkDoneAction.CUSTOM;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
 
 /** Action to mark partitions done. */
 public interface PartitionMarkDoneAction extends Closeable {
 
+    default void open(FileStoreTable fileStoreTable, CoreOptions options) {}
+
     void markDone(String partition) throws Exception;
 
     static List<PartitionMarkDoneAction> createActions(
-            FileStoreTable fileStoreTable, CoreOptions options) {
-        return Arrays.stream(options.toConfiguration().get(PARTITION_MARK_DONE_ACTION).split(","))
+            ClassLoader cl, FileStoreTable fileStoreTable, CoreOptions options) {
+        return options.partitionMarkDoneActions().stream()
                 .map(
                         action -> {
+                            PartitionMarkDoneAction instance;
                             switch (action) {
-                                case "success-file":
-                                    return new SuccessFileMarkDoneAction(
-                                            fileStoreTable.fileIO(), fileStoreTable.location());
-                                case "done-partition":
-                                    return new AddDonePartitionAction(
-                                            createMetastoreClient(fileStoreTable, options));
-                                case "mark-event":
-                                    return new MarkPartitionDoneEventAction(
-                                            createMetastoreClient(fileStoreTable, options));
+                                case SUCCESS_FILE:
+                                    instance =
+                                            new SuccessFileMarkDoneAction(
+                                                    fileStoreTable.fileIO(),
+                                                    fileStoreTable.location());
+                                    break;
+                                case DONE_PARTITION:
+                                    instance =
+                                            new AddDonePartitionAction(
+                                                    createPartitionHandler(
+                                                            fileStoreTable, options));
+                                    break;
+                                case MARK_EVENT:
+                                    instance =
+                                            new MarkPartitionDoneEventAction(
+                                                    createPartitionHandler(
+                                                            fileStoreTable, options));
+                                    break;
+                                case HTTP_REPORT:
+                                    instance = new HttpReportMarkDoneAction();
+                                    break;
+                                case CUSTOM:
+                                    instance = generateCustomMarkDoneAction(cl, options);
+                                    break;
                                 default:
-                                    throw new UnsupportedOperationException(action);
+                                    throw new UnsupportedOperationException(action.toString());
                             }
+                            instance.open(fileStoreTable, options);
+                            return instance;
                         })
                 .collect(Collectors.toList());
     }
 
-    static MetastoreClient createMetastoreClient(FileStoreTable table, CoreOptions options) {
-        MetastoreClient.Factory metastoreClientFactory =
-                table.catalogEnvironment().metastoreClientFactory();
+    static PartitionMarkDoneAction generateCustomMarkDoneAction(
+            ClassLoader cl, CoreOptions options) {
+        if (StringUtils.isNullOrWhitespaceOnly(options.partitionMarkDoneCustomClass())) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "You need to set [%s] when you add [%s] mark done action in your property [%s].",
+                            PARTITION_MARK_DONE_CUSTOM_CLASS.key(),
+                            CUSTOM,
+                            PARTITION_MARK_DONE_ACTION.key()));
+        }
+        String customClass = options.partitionMarkDoneCustomClass();
+        try {
+            return (PartitionMarkDoneAction) cl.loadClass(customClass).newInstance();
+        } catch (ClassNotFoundException | IllegalAccessException | InstantiationException e) {
+            throw new RuntimeException(
+                    "Can not create new instance for custom class from " + customClass, e);
+        }
+    }
+
+    static PartitionHandler createPartitionHandler(FileStoreTable table, CoreOptions options) {
+        PartitionHandler partitionHandler = table.catalogEnvironment().partitionHandler();
 
         if (options.toConfiguration().get(PARTITION_MARK_DONE_ACTION).contains("done-partition")) {
             checkNotNull(
-                    metastoreClientFactory,
-                    "Cannot mark done partition for table without metastore.");
+                    partitionHandler, "Cannot mark done partition for table without metastore.");
             checkArgument(
                     options.partitionedTableInMetastore(),
                     "Table should enable %s",
                     METASTORE_PARTITIONED_TABLE.key());
         }
 
-        return metastoreClientFactory.create();
+        return partitionHandler;
     }
 }

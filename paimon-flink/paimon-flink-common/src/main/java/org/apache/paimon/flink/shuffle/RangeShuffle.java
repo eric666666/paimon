@@ -27,6 +27,7 @@ import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SerializableSupplier;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
@@ -89,8 +90,8 @@ public class RangeShuffle {
      *     -----------------------------BATCH-[ARange,n]-PARTITION->[RRange,m]->
      * }</pre>
      *
-     * <p>The streams except the sample and histogram process stream will been blocked, so the the
-     * sample and histogram process stream does not care about requiredExchangeMode.
+     * <p>The streams except the sample and histogram process stream will be blocked, so the sample
+     * and histogram process stream does not care about requiredExchangeMode.
      */
     public static <T> DataStream<Tuple2<T, RowData>> rangeShuffleByKey(
             DataStream<Tuple2<T, RowData>> inputDataStream,
@@ -110,7 +111,8 @@ public class RangeShuffle {
                         "ABSTRACT KEY AND SIZE",
                         new StreamMap<>(new KeyAndSizeExtractor<>(valueRowType, isSortBySize)),
                         new TupleTypeInfo<>(keyTypeInformation, BasicTypeInfo.INT_TYPE_INFO),
-                        input.getParallelism());
+                        input.getParallelism(),
+                        input.isParallelismConfigured());
 
         // 1. Fixed size sample in each partitions.
         OneInputTransformation<Tuple2<T, Integer>, Tuple3<Double, T, Integer>> localSample =
@@ -122,7 +124,8 @@ public class RangeShuffle {
                                 BasicTypeInfo.DOUBLE_TYPE_INFO,
                                 keyTypeInformation,
                                 BasicTypeInfo.INT_TYPE_INFO),
-                        keyInput.getParallelism());
+                        keyInput.getParallelism(),
+                        keyInput.isParallelismConfigured());
 
         // 2. Collect all the samples and gather them into a sorted key range.
         OneInputTransformation<Tuple3<Double, T, Integer>, List<T>> sampleAndHistogram =
@@ -131,7 +134,8 @@ public class RangeShuffle {
                         "GLOBAL SAMPLE",
                         new GlobalSampleOperator<>(globalSampleSize, keyComparator, rangeNum),
                         new ListTypeInfo<>(keyTypeInformation),
-                        1);
+                        1,
+                        true);
 
         // 3. Take range boundaries as broadcast input and take the tuple of partition id and
         // record as output.
@@ -152,7 +156,8 @@ public class RangeShuffle {
                                 new AssignRangeIndexOperator<>(keyComparator),
                                 new TupleTypeInfo<>(
                                         BasicTypeInfo.INT_TYPE_INFO, input.getOutputType()),
-                                input.getParallelism());
+                                input.getParallelism(),
+                                input.isParallelismConfigured());
 
         // 4. Remove the partition id. (shuffle according range partition)
         return new DataStream<>(
@@ -167,7 +172,8 @@ public class RangeShuffle {
                         "REMOVE RANGE INDEX",
                         new RemoveRangeIndexOperator<>(),
                         input.getOutputType(),
-                        outParallelism));
+                        outParallelism,
+                        true));
     }
 
     /** KeyAndSizeExtractor is responsible for extracting the sort key and row size. */
@@ -182,9 +188,19 @@ public class RangeShuffle {
             this.isSortBySize = isSortBySize;
         }
 
-        @Override
+        /**
+         * Do not annotate with <code>@override</code> here to maintain compatibility with Flink
+         * 1.18-.
+         */
+        public void open(OpenContext openContext) throws Exception {
+            open(new Configuration());
+        }
+
+        /**
+         * Do not annotate with <code>@override</code> here to maintain compatibility with Flink
+         * 2.0+.
+         */
         public void open(Configuration parameters) throws Exception {
-            super.open(parameters);
             InternalRowToSizeVisitor internalRowToSizeVisitor = new InternalRowToSizeVisitor();
             fieldSizeCalculator =
                     rowType.getFieldTypes().stream()
@@ -324,8 +340,8 @@ public class RangeShuffle {
     }
 
     /**
-     * This two-input-operator require a input with RangeBoundaries as broadcast input, and generate
-     * Tuple2 which includes range index and record from the other input itself as output.
+     * This two-input-operator require an input with RangeBoundaries as broadcast input, and
+     * generate Tuple2 which includes range index and record from the other input itself as output.
      */
     private static class AssignRangeIndexOperator<T>
             extends TableStreamOperator<Tuple2<Integer, Tuple2<T, RowData>>>

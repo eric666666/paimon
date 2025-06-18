@@ -18,6 +18,8 @@
 
 package org.apache.paimon.flink.action;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 
 /** Factory to create {@link CloneAction}. */
@@ -37,16 +39,23 @@ public class CloneActionFactory implements ActionFactory {
 
     @Override
     public Optional<Action> create(MultipleParameterToolAdapter params) {
+        Map<String, String> catalogConfig = catalogConfigMap(params);
+
+        Map<String, String> targetCatalogConfig =
+                new HashMap<>(optionalConfigMap(params, TARGET_CATALOG_CONF));
+        String targetWarehouse = params.get(TARGET_WAREHOUSE);
+        if (targetWarehouse != null && !targetCatalogConfig.containsKey(WAREHOUSE)) {
+            targetCatalogConfig.put(WAREHOUSE, targetWarehouse);
+        }
+
         CloneAction cloneAction =
                 new CloneAction(
-                        params.get(WAREHOUSE),
                         params.get(DATABASE),
                         params.get(TABLE),
-                        optionalConfigMap(params, CATALOG_CONF),
-                        params.get(TARGET_WAREHOUSE),
+                        catalogConfig,
                         params.get(TARGET_DATABASE),
                         params.get(TARGET_TABLE),
-                        optionalConfigMap(params, TARGET_CATALOG_CONF),
+                        targetCatalogConfig,
                         params.get(PARALLELISM));
 
         return Optional.of(cloneAction);
@@ -59,31 +68,31 @@ public class CloneActionFactory implements ActionFactory {
 
         System.out.println("Syntax:");
         System.out.println(
-                "  clone --warehouse <warehouse_path> "
-                        + "[--database <database_name>] "
-                        + "[--table <table_name>] "
-                        + "[--catalog_conf <source-paimon-catalog-conf> [--catalog_conf <source-paimon-catalog-conf> ...]] "
-                        + "--target_warehouse <target_warehouse_path> "
-                        + "[--target_database <target_database_name>] "
-                        + "[--target_table <target_table_name>] "
-                        + "[--target_catalog_conf <target-paimon-catalog-conf> [--target_catalog_conf <target-paimon-catalog-conf> ...]] "
+                "  clone --warehouse <warehouse_path> \\\n"
+                        + "[--database <database_name>] \\\n"
+                        + "[--table <table_name>] \\\n"
+                        + "[--catalog_conf <source-paimon-catalog-conf> [--catalog_conf <source-paimon-catalog-conf> ...]] \\\n"
+                        + "--target_warehouse <target_warehouse_path> \\\n"
+                        + "[--target_database <target_database_name>] \\\n"
+                        + "[--target_table <target_table_name>] \\\n"
+                        + "[--target_catalog_conf <target-paimon-catalog-conf> [--target_catalog_conf <target-paimon-catalog-conf> ...]] \\\n"
                         + "[--parallelism <parallelism>]");
 
         System.out.println();
 
         System.out.println("Examples:");
         System.out.println(
-                "  clone --warehouse s3:///path1/from/warehouse "
-                        + "--database test_db "
-                        + "--table test_table "
-                        + "--catalog_conf s3.endpoint=https://****.com "
-                        + "--catalog_conf s3.access-key=***** "
-                        + "--catalog_conf s3.secret-key=***** "
-                        + "--target_warehouse s3:///path2/to/warehouse "
-                        + "--target_database test_db_copy "
-                        + "--target_table test_table_copy "
-                        + "--target_catalog_conf s3.endpoint=https://****.com "
-                        + "--target_catalog_conf s3.access-key=***** "
+                "  clone --warehouse s3:///path1/from/warehouse \\\n"
+                        + "--database test_db \\\n"
+                        + "--table test_table \\\n"
+                        + "--catalog_conf s3.endpoint=https://****.com \\\n"
+                        + "--catalog_conf s3.access-key=***** \\\n"
+                        + "--catalog_conf s3.secret-key=***** \\\n"
+                        + "--target_warehouse s3:///path2/to/warehouse \\\n"
+                        + "--target_database test_db_copy \\\n"
+                        + "--target_table test_table_copy \\\n"
+                        + "--target_catalog_conf s3.endpoint=https://****.com \\\n"
+                        + "--target_catalog_conf s3.access-key=***** \\\n"
                         + "--target_catalog_conf s3.secret-key=***** ");
     }
 }

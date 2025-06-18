@@ -20,7 +20,7 @@ package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.append.MultiTableUnawareAppendCompactionTask;
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.manifest.WrappedManifestCommittable;
 import org.apache.paimon.options.Options;
 
@@ -32,8 +32,8 @@ import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 import org.apache.flink.table.data.RowData;
 
 import java.io.Serializable;
@@ -47,6 +47,7 @@ import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEM
 import static org.apache.paimon.flink.sink.FlinkSink.assertBatchAdaptiveParallelism;
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.utils.ManagedMemoryUtils.declareManagedMemory;
+import static org.apache.paimon.flink.utils.ParallelismUtils.forwardParallelism;
 
 /** A sink for processing multi-tables in dedicated compaction job. */
 public class CombinedTableCompactorSink implements Serializable {
@@ -55,13 +56,17 @@ public class CombinedTableCompactorSink implements Serializable {
     private static final String WRITER_NAME = "Writer";
     private static final String GLOBAL_COMMITTER_NAME = "Global Committer";
 
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private final boolean ignorePreviousFiles;
+    private final boolean fullCompaction;
+
     private final Options options;
 
-    public CombinedTableCompactorSink(Catalog.Loader catalogLoader, Options options) {
+    public CombinedTableCompactorSink(
+            CatalogLoader catalogLoader, Options options, boolean fullCompaction) {
         this.catalogLoader = catalogLoader;
         this.ignorePreviousFiles = false;
+        this.fullCompaction = fullCompaction;
         this.options = options;
     }
 
@@ -99,22 +104,23 @@ public class CombinedTableCompactorSink implements Serializable {
                         == RuntimeExecutionMode.STREAMING;
 
         SingleOutputStreamOperator<MultiTableCommittable> multiBucketTableRewriter =
-                awareBucketTableSource
-                        .transform(
-                                String.format("%s-%s", "Multi-Bucket-Table", WRITER_NAME),
-                                new MultiTableCommittableTypeInfo(),
-                                combinedMultiComacptionWriteOperator(
-                                        env.getCheckpointConfig(), isStreaming, commitUser))
-                        .setParallelism(awareBucketTableSource.getParallelism());
+                awareBucketTableSource.transform(
+                        String.format("%s-%s", "Multi-Bucket-Table", WRITER_NAME),
+                        new MultiTableCommittableTypeInfo(),
+                        combinedMultiCompactionWriteOperator(
+                                env.getCheckpointConfig(),
+                                isStreaming,
+                                fullCompaction,
+                                commitUser));
+        forwardParallelism(multiBucketTableRewriter, awareBucketTableSource);
 
         SingleOutputStreamOperator<MultiTableCommittable> unawareBucketTableRewriter =
-                unawareBucketTableSource
-                        .transform(
-                                String.format("%s-%s", "Unaware-Bucket-Table", WRITER_NAME),
-                                new MultiTableCommittableTypeInfo(),
-                                new AppendOnlyMultiTableCompactionWorkerOperator(
-                                        catalogLoader, commitUser, options))
-                        .setParallelism(unawareBucketTableSource.getParallelism());
+                unawareBucketTableSource.transform(
+                        String.format("%s-%s", "Unaware-Bucket-Table", WRITER_NAME),
+                        new MultiTableCommittableTypeInfo(),
+                        new AppendOnlyMultiTableCompactionWorkerOperator.Factory(
+                                catalogLoader, commitUser, options));
+        forwardParallelism(unawareBucketTableRewriter, unawareBucketTableSource);
 
         if (!isStreaming) {
             assertBatchAdaptiveParallelism(env, multiBucketTableRewriter.getParallelism());
@@ -149,39 +155,49 @@ public class CombinedTableCompactorSink implements Serializable {
                         new MultiTableCommittableChannelComputer(),
                         written.getParallelism());
         SingleOutputStreamOperator<?> committed =
-                partitioned
-                        .transform(
-                                GLOBAL_COMMITTER_NAME,
-                                new MultiTableCommittableTypeInfo(),
-                                new CommitterOperator<>(
-                                        streamingCheckpointEnabled,
-                                        false,
-                                        options.get(SINK_COMMITTER_OPERATOR_CHAINING),
-                                        commitUser,
-                                        createCommitterFactory(),
-                                        createCommittableStateManager(),
-                                        options.get(END_INPUT_WATERMARK)))
-                        .setParallelism(written.getParallelism());
-        return committed.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
+                partitioned.transform(
+                        GLOBAL_COMMITTER_NAME,
+                        new MultiTableCommittableTypeInfo(),
+                        new CommitterOperatorFactory<>(
+                                streamingCheckpointEnabled,
+                                false,
+                                commitUser,
+                                createCommitterFactory(isStreaming),
+                                createCommittableStateManager(),
+                                options.get(END_INPUT_WATERMARK)));
+        forwardParallelism(committed, written);
+        if (!options.get(SINK_COMMITTER_OPERATOR_CHAINING)) {
+            committed = committed.startNewChain();
+        }
+        return committed.sinkTo(new DiscardingSink<>()).name("end").setParallelism(1);
     }
 
     // TODO:refactor FlinkSink to adopt this sink
-    protected OneInputStreamOperator<RowData, MultiTableCommittable>
-            combinedMultiComacptionWriteOperator(
-                    CheckpointConfig checkpointConfig, boolean isStreaming, String commitUser) {
-        return new MultiTablesStoreCompactOperator(
+    protected OneInputStreamOperatorFactory<RowData, MultiTableCommittable>
+            combinedMultiCompactionWriteOperator(
+                    CheckpointConfig checkpointConfig,
+                    boolean isStreaming,
+                    boolean fullCompaction,
+                    String commitUser) {
+        return new MultiTablesStoreCompactOperator.Factory(
                 catalogLoader,
                 commitUser,
                 checkpointConfig,
                 isStreaming,
                 ignorePreviousFiles,
+                fullCompaction,
                 options);
     }
 
     protected Committer.Factory<MultiTableCommittable, WrappedManifestCommittable>
-            createCommitterFactory() {
+            createCommitterFactory(boolean isStreaming) {
         Map<String, String> dynamicOptions = options.toMap();
         dynamicOptions.put(CoreOptions.WRITE_ONLY.key(), "false");
+        if (isStreaming) {
+            dynamicOptions.put(CoreOptions.NUM_SORTED_RUNS_STOP_TRIGGER.key(), "2147483647");
+            dynamicOptions.put(CoreOptions.SORT_SPILL_THRESHOLD.key(), "10");
+            dynamicOptions.put(CoreOptions.LOOKUP_WAIT.key(), "false");
+        }
         return context -> new StoreMultiCommitter(catalogLoader, context, true, dynamicOptions);
     }
 

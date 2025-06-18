@@ -32,6 +32,7 @@ import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.table.source.KeyValueTableRead;
 import org.apache.paimon.types.RowKind;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.FieldsComparator;
 import org.apache.paimon.utils.ProjectedRow;
 
@@ -52,7 +53,7 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
     private final MergeFileSplitRead mergeRead;
 
     private boolean forceKeepDelete = false;
-    @Nullable private int[][] projectedFields;
+    @Nullable private RowType readType;
 
     public IncrementalDiffSplitRead(MergeFileSplitRead mergeRead) {
         this.mergeRead = mergeRead;
@@ -71,8 +72,8 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
     }
 
     @Override
-    public SplitRead<InternalRow> withProjection(@Nullable int[][] projectedFields) {
-        this.projectedFields = projectedFields;
+    public SplitRead<InternalRow> withReadType(RowType readType) {
+        this.readType = readType;
         return this;
     }
 
@@ -91,19 +92,20 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
                                 split.bucket(),
                                 split.beforeFiles(),
                                 split.beforeDeletionFiles().orElse(null),
-                                false),
+                                forceKeepDelete),
                         mergeRead.createMergeReader(
                                 split.partition(),
                                 split.bucket(),
                                 split.dataFiles(),
                                 split.deletionFiles().orElse(null),
-                                false),
+                                forceKeepDelete),
                         mergeRead.keyComparator(),
                         mergeRead.createUdsComparator(),
                         mergeRead.mergeSorter(),
                         forceKeepDelete);
-        if (projectedFields != null) {
-            ProjectedRow projectedRow = ProjectedRow.from(projectedFields);
+        if (readType != null) {
+            ProjectedRow projectedRow =
+                    ProjectedRow.from(readType, mergeRead.tableSchema().logicalRowType());
             reader = reader.transform(kv -> kv.replaceValue(projectedRow.replaceRow(kv.value())));
         }
         return KeyValueTableRead.unwrap(reader);
@@ -189,33 +191,40 @@ public class IncrementalDiffSplitRead implements SplitRead<InternalRow> {
         @Nullable
         @Override
         public KeyValue getResult() {
+            KeyValue toReturn = null;
             if (kvs.size() == 1) {
                 KeyValue kv = kvs.get(0);
                 if (kv.level() == BEFORE_LEVEL) {
-                    if (keepDelete) {
+                    if (keepDelete && kv.isAdd()) {
                         return kv.replaceValueKind(RowKind.DELETE);
                     }
                 } else {
-                    return kv;
+                    toReturn = kv;
                 }
             } else if (kvs.size() == 2) {
-                KeyValue latest = kvs.get(1);
-                if (latest.level() == AFTER_LEVEL) {
-                    if (!valueEquals()) {
-                        return latest;
+                KeyValue before = kvs.get(0);
+                KeyValue after = kvs.get(1);
+                if (after.level() == AFTER_LEVEL) {
+                    if (!valueAndRowKindEquals(before, after)) {
+                        toReturn = after;
                     }
                 }
             } else {
                 throw new IllegalArgumentException("Illegal kv number: " + kvs.size());
             }
 
+            if (toReturn != null && (keepDelete || toReturn.isAdd())) {
+                return toReturn;
+            }
+
             return null;
         }
 
-        private boolean valueEquals() {
+        private boolean valueAndRowKindEquals(KeyValue before, KeyValue after) {
             return serializer1
-                    .toBinaryRow(kvs.get(0).value())
-                    .equals(serializer2.toBinaryRow(kvs.get(1).value()));
+                            .toBinaryRow(before.value())
+                            .equals(serializer2.toBinaryRow(after.value()))
+                    && before.isAdd() == after.isAdd();
         }
     }
 }

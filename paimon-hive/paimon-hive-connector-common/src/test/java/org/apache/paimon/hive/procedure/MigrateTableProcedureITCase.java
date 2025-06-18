@@ -20,7 +20,6 @@ package org.apache.paimon.hive.procedure;
 
 import org.apache.paimon.flink.action.ActionITCaseBase;
 import org.apache.paimon.flink.action.MigrateTableAction;
-import org.apache.paimon.flink.procedure.MigrateFileProcedure;
 import org.apache.paimon.hive.TestHiveMetastore;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
@@ -32,16 +31,18 @@ import org.apache.hadoop.hive.conf.HiveConf;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.stream.Stream;
 
-/** Tests for {@link MigrateFileProcedure}. */
+/** Tests for {@code MigrateFileProcedure}. */
 public class MigrateTableProcedureITCase extends ActionITCaseBase {
 
     private static final TestHiveMetastore TEST_HIVE_METASTORE = new TestHiveMetastore();
@@ -58,25 +59,16 @@ public class MigrateTableProcedureITCase extends ActionITCaseBase {
         TEST_HIVE_METASTORE.stop();
     }
 
-    @Test
-    public void testOrc() throws Exception {
-        testUpgradeNonPartitionTable("orc");
-        resetMetastore();
-        testUpgradePartitionTable("orc");
+    private static Stream<Arguments> testArguments() {
+        return Stream.of(Arguments.of("orc"), Arguments.of("avro"), Arguments.of("parquet"));
     }
 
-    @Test
-    public void testAvro() throws Exception {
-        testUpgradeNonPartitionTable("avro");
+    @ParameterizedTest
+    @MethodSource("testArguments")
+    public void testMigrateProcedure(String format) throws Exception {
+        testUpgradeNonPartitionTable(format);
         resetMetastore();
-        testUpgradePartitionTable("avro");
-    }
-
-    @Test
-    public void testParquet() throws Exception {
-        testUpgradeNonPartitionTable("parquet");
-        resetMetastore();
-        testUpgradePartitionTable("parquet");
+        testUpgradePartitionTable(format);
     }
 
     private void resetMetastore() throws Exception {
@@ -109,7 +101,7 @@ public class MigrateTableProcedureITCase extends ActionITCaseBase {
                         + "')");
         tEnv.useCatalog("PAIMON");
         tEnv.executeSql(
-                        "CALL sys.migrate_table('hive', 'default.hivetable', 'file.format="
+                        "CALL sys.migrate_table(connector => 'hive', source_table => 'default.hivetable', options => 'file.format="
                                 + format
                                 + "')")
                 .await();
@@ -140,7 +132,7 @@ public class MigrateTableProcedureITCase extends ActionITCaseBase {
                         + "')");
         tEnv.useCatalog("PAIMON");
         tEnv.executeSql(
-                        "CALL sys.migrate_table('hive', 'default.hivetable', 'file.format="
+                        "CALL sys.migrate_table(connector => 'hive', source_table => 'default.hivetable', options => 'file.format="
                                 + format
                                 + "')")
                 .await();
@@ -169,13 +161,10 @@ public class MigrateTableProcedureITCase extends ActionITCaseBase {
         Map<String, String> catalogConf = new HashMap<>();
         catalogConf.put("metastore", "hive");
         catalogConf.put("uri", "thrift://localhost:" + PORT);
+        catalogConf.put(
+                "warehouse", System.getProperty(HiveConf.ConfVars.METASTOREWAREHOUSE.varname));
         MigrateTableAction migrateTableAction =
-                new MigrateTableAction(
-                        "hive",
-                        System.getProperty(HiveConf.ConfVars.METASTOREWAREHOUSE.varname),
-                        "default.hivetable",
-                        catalogConf,
-                        "");
+                new MigrateTableAction("hive", "default.hivetable", catalogConf, "", 6);
         migrateTableAction.run();
 
         tEnv.executeSql(

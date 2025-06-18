@@ -24,6 +24,7 @@ import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.codegen.CodeGenUtils;
 import org.apache.paimon.codegen.NormalizedKeyComputer;
 import org.apache.paimon.codegen.RecordComparator;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.serializer.BinaryRowSerializer;
@@ -69,7 +70,7 @@ public class SortBufferWriteBuffer implements WriteBuffer {
             boolean spillable,
             MemorySize maxDiskSize,
             int sortMaxFan,
-            String compression,
+            CompressOptions compression,
             IOManager ioManager) {
         this.keyType = keyType;
         this.valueType = valueType;
@@ -100,7 +101,7 @@ public class SortBufferWriteBuffer implements WriteBuffer {
         NormalizedKeyComputer normalizedKeyComputer =
                 CodeGenUtils.newNormalizedKeyComputer(fieldTypes, sortFieldArray);
         RecordComparator keyComparator =
-                CodeGenUtils.newRecordComparator(fieldTypes, sortFieldArray);
+                CodeGenUtils.newRecordComparator(fieldTypes, sortFieldArray, true);
 
         if (memoryPool.freePages() < 3) {
             throw new IllegalArgumentException(
@@ -177,6 +178,7 @@ public class SortBufferWriteBuffer implements WriteBuffer {
         private final MutableObjectIterator<BinaryRow> kvIter;
         private final Comparator<InternalRow> keyComparator;
         private final ReducerMergeFunctionWrapper mergeFunctionWrapper;
+        private final boolean requireCopy;
 
         // previously read kv
         private KeyValueSerializer previous;
@@ -198,6 +200,7 @@ public class SortBufferWriteBuffer implements WriteBuffer {
             this.kvIter = kvIter;
             this.keyComparator = keyComparator;
             this.mergeFunctionWrapper = new ReducerMergeFunctionWrapper(mergeFunction);
+            this.requireCopy = mergeFunction.requireCopy();
 
             int totalFieldCount = keyType.getFieldCount() + 2 + valueType.getFieldCount();
             this.previous = new KeyValueSerializer(keyType, valueType);
@@ -234,7 +237,8 @@ public class SortBufferWriteBuffer implements WriteBuffer {
                     return;
                 }
                 mergeFunctionWrapper.reset();
-                mergeFunctionWrapper.add(previous.getReusedKv());
+                mergeFunctionWrapper.add(
+                        requireCopy ? previous.getCopiedKv() : previous.getReusedKv());
 
                 while (readOnce()) {
                     if (keyComparator.compare(
@@ -242,7 +246,8 @@ public class SortBufferWriteBuffer implements WriteBuffer {
                             != 0) {
                         break;
                     }
-                    mergeFunctionWrapper.add(current.getReusedKv());
+                    mergeFunctionWrapper.add(
+                            requireCopy ? current.getCopiedKv() : current.getReusedKv());
                     swapSerializers();
                 }
                 result = mergeFunctionWrapper.getResult();

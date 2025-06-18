@@ -18,16 +18,22 @@
 
 package org.apache.paimon.spark.commands
 
-import org.apache.paimon.CoreOptions.DYNAMIC_PARTITION_OVERWRITE
+import org.apache.paimon.CoreOptions
+import org.apache.paimon.CoreOptions.{DYNAMIC_PARTITION_OVERWRITE, TagCreationMode}
 import org.apache.paimon.options.Options
+import org.apache.paimon.partition.actions.PartitionMarkDoneAction
 import org.apache.paimon.spark._
 import org.apache.paimon.spark.schema.SparkSystemColumns
 import org.apache.paimon.table.FileStoreTable
+import org.apache.paimon.table.sink.CommitMessage
+import org.apache.paimon.tag.TagBatchCreation
+import org.apache.paimon.utils.{InternalRowPartitionComputer, PartitionPathUtils, TypeUtils}
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, PaimonUtils, Row, SparkSession}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.functions.{col, lit}
 
 import scala.collection.JavaConverters._
 
@@ -35,7 +41,7 @@ import scala.collection.JavaConverters._
 case class WriteIntoPaimonTable(
     override val originTable: FileStoreTable,
     saveMode: SaveMode,
-    data: DataFrame,
+    _data: DataFrame,
     options: Options)
   extends RunnableCommand
   with PaimonCommand
@@ -45,10 +51,25 @@ case class WriteIntoPaimonTable(
   private lazy val mergeSchema = options.get(SparkConnectorOptions.MERGE_SCHEMA)
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
+    var data = _data
     if (mergeSchema) {
       val dataSchema = SparkSystemColumns.filterSparkSystemColumns(data.schema)
       val allowExplicitCast = options.get(SparkConnectorOptions.EXPLICIT_CAST)
       mergeAndCommitSchema(dataSchema, allowExplicitCast)
+
+      // For case that some columns is absent in data, we still allow to write once write.merge-schema is true.
+      val newTableSchema = SparkTypeUtils.fromPaimonRowType(table.schema().logicalRowType())
+      if (!PaimonUtils.sameType(newTableSchema, dataSchema)) {
+        val resolve = sparkSession.sessionState.conf.resolver
+        val cols = newTableSchema.map {
+          field =>
+            dataSchema.find(f => resolve(f.name, field.name)) match {
+              case Some(f) => col(f.name)
+              case _ => lit(null).as(field.name)
+            }
+        }
+        data = data.select(cols: _*)
+      }
     }
 
     val (dynamicPartitionOverwriteMode, overwritePartition) = parseSaveMode()
@@ -63,7 +84,37 @@ case class WriteIntoPaimonTable(
     val commitMessages = writer.write(data)
     writer.commit(commitMessages)
 
+    preFinish(commitMessages)
     Seq.empty
+  }
+
+  private def preFinish(commitMessages: Seq[CommitMessage]): Unit = {
+    if (table.coreOptions().tagCreationMode() == TagCreationMode.BATCH) {
+      val tagCreation = new TagBatchCreation(table)
+      tagCreation.createTag()
+    }
+    markDoneIfNeeded(commitMessages)
+  }
+
+  private def markDoneIfNeeded(commitMessages: Seq[CommitMessage]): Unit = {
+    val coreOptions = table.coreOptions()
+    if (coreOptions.toConfiguration.get(CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT)) {
+      val actions =
+        PartitionMarkDoneAction.createActions(getClass.getClassLoader, table, table.coreOptions())
+      val partitionComputer = new InternalRowPartitionComputer(
+        coreOptions.partitionDefaultName,
+        TypeUtils.project(table.rowType(), table.partitionKeys()),
+        table.partitionKeys().asScala.toArray,
+        coreOptions.legacyPartitionName()
+      )
+      val partitions = commitMessages
+        .map(c => c.partition())
+        .distinct
+        .map(p => PartitionPathUtils.generatePartitionPath(partitionComputer.generatePartValues(p)))
+      for (partition <- partitions) {
+        actions.forEach(a => a.markDone(partition))
+      }
+    }
   }
 
   private def parseSaveMode(): (Boolean, Map[String, String]) = {
@@ -76,7 +127,7 @@ case class WriteIntoPaimonTable(
         } else if (isTruncate(filter.get)) {
           Map.empty[String, String]
         } else {
-          convertFilterToMap(filter.get, table.schema.logicalPartitionType())
+          convertPartitionFilterToMap(filter.get, table.schema.logicalPartitionType())
         }
       case DynamicOverWrite =>
         dynamicPartitionOverwriteMode = true

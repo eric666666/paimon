@@ -20,10 +20,13 @@ package org.apache.paimon.table.system;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.casting.CastExecutor;
+import org.apache.paimon.casting.CastExecutors;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.manifest.ManifestList;
 import org.apache.paimon.predicate.Predicate;
@@ -37,6 +40,7 @@ import org.apache.paimon.table.source.ReadOnceTableScan;
 import org.apache.paimon.table.source.SingletonSplit;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
+import org.apache.paimon.table.source.snapshot.TimeTravelUtil;
 import org.apache.paimon.types.BigIntType;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.RowType;
@@ -44,9 +48,11 @@ import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.IteratorRecordReader;
 import org.apache.paimon.utils.ProjectedRow;
 import org.apache.paimon.utils.SerializationUtils;
-import org.apache.paimon.utils.SnapshotManager;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.Iterators;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -58,7 +64,10 @@ import static org.apache.paimon.catalog.Catalog.SYSTEM_TABLE_SPLITTER;
 
 /** A {@link Table} for showing committing snapshots of table. */
 public class ManifestsTable implements ReadonlyTable {
-    private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(ManifestsTable.class);
+
+    private static final long serialVersionUID = 2L;
 
     public static final String MANIFESTS = "manifests";
 
@@ -69,7 +78,15 @@ public class ManifestsTable implements ReadonlyTable {
                             new DataField(1, "file_size", new BigIntType(false)),
                             new DataField(2, "num_added_files", new BigIntType(false)),
                             new DataField(3, "num_deleted_files", new BigIntType(false)),
-                            new DataField(4, "schema_id", new BigIntType(false))));
+                            new DataField(4, "schema_id", new BigIntType(false)),
+                            new DataField(
+                                    5,
+                                    "min_partition_stats",
+                                    SerializationUtils.newStringType(true)),
+                            new DataField(
+                                    6,
+                                    "max_partition_stats",
+                                    SerializationUtils.newStringType(true))));
 
     private final FileStoreTable dataTable;
 
@@ -100,6 +117,11 @@ public class ManifestsTable implements ReadonlyTable {
     @Override
     public List<String> primaryKeys() {
         return Collections.singletonList("file_name");
+    }
+
+    @Override
+    public FileIO fileIO() {
+        return dataTable.fileIO();
     }
 
     @Override
@@ -138,7 +160,7 @@ public class ManifestsTable implements ReadonlyTable {
 
     private static class ManifestsRead implements InnerTableRead {
 
-        private int[][] projection;
+        private RowType readType;
 
         private final FileStoreTable dataTable;
 
@@ -153,8 +175,8 @@ public class ManifestsTable implements ReadonlyTable {
         }
 
         @Override
-        public InnerTableRead withProjection(int[][] projection) {
-            this.projection = projection;
+        public InnerTableRead withReadType(RowType readType) {
+            this.readType = readType;
             return this;
         }
 
@@ -170,46 +192,54 @@ public class ManifestsTable implements ReadonlyTable {
             }
             List<ManifestFileMeta> manifestFileMetas = allManifests(dataTable);
 
+            @SuppressWarnings("unchecked")
+            CastExecutor<InternalRow, BinaryString> partitionCastExecutor =
+                    (CastExecutor<InternalRow, BinaryString>)
+                            CastExecutors.resolveToString(
+                                    dataTable.schema().logicalPartitionType());
+
             Iterator<InternalRow> rows =
-                    Iterators.transform(manifestFileMetas.iterator(), this::toRow);
-            if (projection != null) {
+                    Iterators.transform(
+                            manifestFileMetas.iterator(),
+                            meta -> toRow(meta, partitionCastExecutor));
+            if (readType != null) {
                 rows =
                         Iterators.transform(
-                                rows, row -> ProjectedRow.from(projection).replaceRow(row));
+                                rows,
+                                row ->
+                                        ProjectedRow.from(readType, ManifestsTable.TABLE_TYPE)
+                                                .replaceRow(row));
             }
             return new IteratorRecordReader<>(rows);
         }
 
-        private InternalRow toRow(ManifestFileMeta manifestFileMeta) {
+        private InternalRow toRow(
+                ManifestFileMeta manifestFileMeta,
+                CastExecutor<InternalRow, BinaryString> partitionCastExecutor) {
             return GenericRow.of(
                     BinaryString.fromString(manifestFileMeta.fileName()),
                     manifestFileMeta.fileSize(),
                     manifestFileMeta.numAddedFiles(),
                     manifestFileMeta.numDeletedFiles(),
-                    manifestFileMeta.schemaId());
+                    manifestFileMeta.schemaId(),
+                    partitionCastExecutor.cast(manifestFileMeta.partitionStats().minValues()),
+                    partitionCastExecutor.cast(manifestFileMeta.partitionStats().maxValues()));
         }
     }
 
     private static List<ManifestFileMeta> allManifests(FileStoreTable dataTable) {
-        CoreOptions coreOptions = CoreOptions.fromMap(dataTable.options());
-        SnapshotManager snapshotManager = dataTable.snapshotManager();
-        Long snapshotId = coreOptions.scanSnapshotId();
-        Snapshot snapshot = null;
-        if (snapshotId != null && snapshotManager.snapshotExists(snapshotId)) {
-            snapshot = snapshotManager.snapshot(snapshotId);
-        } else if (snapshotId == null) {
-            snapshot = snapshotManager.latestSnapshot();
-        }
-
+        CoreOptions options = dataTable.coreOptions();
+        Snapshot snapshot = TimeTravelUtil.resolveSnapshot(dataTable);
         if (snapshot == null) {
+            LOG.warn("Check if your snapshot is empty.");
             return Collections.emptyList();
         }
         FileStorePathFactory fileStorePathFactory = dataTable.store().pathFactory();
         ManifestList manifestList =
                 new ManifestList.Factory(
                                 dataTable.fileIO(),
-                                coreOptions.manifestFormat(),
-                                coreOptions.manifestCompression(),
+                                options.manifestFormat(),
+                                options.manifestCompression(),
                                 fileStorePathFactory,
                                 null)
                         .create();

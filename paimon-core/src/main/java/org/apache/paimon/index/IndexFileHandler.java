@@ -75,8 +75,9 @@ public class IndexFileHandler {
         return this.deletionVectorsIndex;
     }
 
-    public Optional<IndexFileMeta> scanHashIndex(long snapshotId, BinaryRow partition, int bucket) {
-        List<IndexFileMeta> result = scan(snapshotId, HASH_INDEX, partition, bucket);
+    public Optional<IndexFileMeta> scanHashIndex(
+            Snapshot snapshot, BinaryRow partition, int bucket) {
+        List<IndexFileMeta> result = scan(snapshot, HASH_INDEX, partition, bucket);
         if (result.size() > 1) {
             throw new IllegalArgumentException(
                     "Find multiple hash index files for one bucket: " + result);
@@ -85,11 +86,10 @@ public class IndexFileHandler {
     }
 
     public Map<String, DeletionFile> scanDVIndex(
-            @Nullable Long snapshotId, BinaryRow partition, int bucket) {
-        if (snapshotId == null) {
+            @Nullable Snapshot snapshot, BinaryRow partition, int bucket) {
+        if (snapshot == null) {
             return Collections.emptyMap();
         }
-        Snapshot snapshot = snapshotManager.snapshot(snapshotId);
         String indexManifest = snapshot.indexManifest();
         if (indexManifest == null) {
             return Collections.emptyMap();
@@ -100,15 +100,16 @@ public class IndexFileHandler {
             if (meta.indexType().equals(DELETION_VECTORS_INDEX)
                     && file.partition().equals(partition)
                     && file.bucket() == bucket) {
-                LinkedHashMap<String, Pair<Integer, Integer>> dvRanges =
-                        meta.deletionVectorsRanges();
-                checkNotNull(dvRanges);
-                for (String dataFile : dvRanges.keySet()) {
-                    Pair<Integer, Integer> pair = dvRanges.get(dataFile);
-                    DeletionFile deletionFile =
+                LinkedHashMap<String, DeletionVectorMeta> dvMetas = meta.deletionVectorMetas();
+                checkNotNull(dvMetas);
+                for (DeletionVectorMeta dvMeta : dvMetas.values()) {
+                    result.put(
+                            dvMeta.dataFileName(),
                             new DeletionFile(
-                                    filePath(meta).toString(), pair.getLeft(), pair.getRight());
-                    result.put(dataFile, deletionFile);
+                                    filePath(meta).toString(),
+                                    dvMeta.offset(),
+                                    dvMeta.length(),
+                                    dvMeta.cardinality()));
                 }
             }
         }
@@ -135,9 +136,9 @@ public class IndexFileHandler {
     }
 
     public List<IndexFileMeta> scan(
-            long snapshotId, String indexType, BinaryRow partition, int bucket) {
+            Snapshot snapshot, String indexType, BinaryRow partition, int bucket) {
         List<IndexFileMeta> result = new ArrayList<>();
-        for (IndexManifestEntry file : scanEntries(snapshotId, indexType, partition)) {
+        for (IndexManifestEntry file : scanEntries(snapshot, indexType, partition)) {
             if (file.bucket() == bucket) {
                 result.add(file.indexFile());
             }
@@ -146,9 +147,14 @@ public class IndexFileHandler {
     }
 
     public Map<Pair<BinaryRow, Integer>, List<IndexFileMeta>> scan(
-            long snapshotId, String indexType, Set<BinaryRow> partitions) {
+            long snapshot, String indexType, Set<BinaryRow> partitions) {
+        return scan(snapshotManager.snapshot(snapshot), indexType, partitions);
+    }
+
+    public Map<Pair<BinaryRow, Integer>, List<IndexFileMeta>> scan(
+            Snapshot snapshot, String indexType, Set<BinaryRow> partitions) {
         Map<Pair<BinaryRow, Integer>, List<IndexFileMeta>> result = new HashMap<>();
-        for (IndexManifestEntry file : scanEntries(snapshotId, indexType, partitions)) {
+        for (IndexManifestEntry file : scanEntries(snapshot, indexType, partitions)) {
             result.computeIfAbsent(Pair.of(file.partition(), file.bucket()), k -> new ArrayList<>())
                     .add(file.indexFile());
         }
@@ -165,7 +171,7 @@ public class IndexFileHandler {
     }
 
     public List<IndexManifestEntry> scanEntries(String indexType, BinaryRow partition) {
-        Long snapshot = snapshotManager.latestSnapshotId();
+        Snapshot snapshot = snapshotManager.latestSnapshot();
         if (snapshot == null) {
             return Collections.emptyList();
         }
@@ -174,13 +180,12 @@ public class IndexFileHandler {
     }
 
     public List<IndexManifestEntry> scanEntries(
-            long snapshotId, String indexType, BinaryRow partition) {
-        return scanEntries(snapshotId, indexType, Collections.singleton(partition));
+            Snapshot snapshot, String indexType, BinaryRow partition) {
+        return scanEntries(snapshot, indexType, Collections.singleton(partition));
     }
 
     public List<IndexManifestEntry> scanEntries(
-            long snapshotId, String indexType, Set<BinaryRow> partitions) {
-        Snapshot snapshot = snapshotManager.snapshot(snapshotId);
+            Snapshot snapshot, String indexType, Set<BinaryRow> partitions) {
         String indexManifest = snapshot.indexManifest();
         if (indexManifest == null) {
             return Collections.emptyList();

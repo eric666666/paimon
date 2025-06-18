@@ -19,6 +19,7 @@
 package org.apache.paimon.append;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
@@ -65,7 +66,6 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
@@ -93,7 +93,6 @@ public class AppendOnlyWriterTest {
     private static final String PART = "2022-05-01";
     private static final long SCHEMA_ID = 0L;
     private static final int MIN_FILE_NUM = 3;
-    private static final int MAX_FILE_NUM = 4;
 
     @BeforeEach
     public void before() {
@@ -124,7 +123,7 @@ public class AppendOnlyWriterTest {
         DataFileMeta meta = increment.newFilesIncrement().newFiles().get(0);
         assertThat(meta).isNotNull();
 
-        Path path = pathFactory.toPath(meta.fileName());
+        Path path = pathFactory.toPath(meta);
         assertThat(LocalFileIO.create().exists(path)).isTrue();
 
         assertThat(meta.rowCount()).isEqualTo(1L);
@@ -136,11 +135,13 @@ public class AppendOnlyWriterTest {
                 new SimpleColStats[] {
                     initStats(1, 1, 0), initStats("AAA", "AAA", 0), initStats(PART, PART, 0)
                 };
-        assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinary(expected));
+        assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinaryAllMode(expected));
 
         assertThat(meta.minSequenceNumber()).isEqualTo(0);
         assertThat(meta.maxSequenceNumber()).isEqualTo(0);
         assertThat(meta.level()).isEqualTo(DataFileMeta.DUMMY_LEVEL);
+        assertThat(meta.fileName().substring(meta.fileName().lastIndexOf(".") + 1))
+                .isEqualTo(CoreOptions.FILE_FORMAT_AVRO);
     }
 
     @Test
@@ -160,8 +161,8 @@ public class AppendOnlyWriterTest {
 
             writer.sync();
             CommitIncrement inc = writer.prepareCommit(true);
-            if (txn > 0 && txn % 3 == 0) {
-                assertThat(inc.compactIncrement().compactBefore()).hasSize(4);
+            if (txn > 0 && txn % 2 == 0) {
+                assertThat(inc.compactIncrement().compactBefore()).hasSize(3);
                 assertThat(inc.compactIncrement().compactAfter()).hasSize(1);
                 DataFileMeta compactAfter = inc.compactIncrement().compactAfter().get(0);
                 assertThat(compactAfter.fileName()).startsWith("compact-");
@@ -185,7 +186,7 @@ public class AppendOnlyWriterTest {
             assertThat(inc.newFilesIncrement().newFiles().size()).isEqualTo(1);
             DataFileMeta meta = inc.newFilesIncrement().newFiles().get(0);
 
-            Path path = pathFactory.toPath(meta.fileName());
+            Path path = pathFactory.toPath(meta);
             assertThat(LocalFileIO.create().exists(path)).isTrue();
 
             assertThat(meta.rowCount()).isEqualTo(100L);
@@ -199,7 +200,7 @@ public class AppendOnlyWriterTest {
                         initStats(String.format("%03d", start), String.format("%03d", end - 1), 0),
                         initStats(PART, PART, 0)
                     };
-            assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinary(expected));
+            assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinaryAllMode(expected));
 
             assertThat(meta.minSequenceNumber()).isEqualTo(start);
             assertThat(meta.maxSequenceNumber()).isEqualTo(end - 1);
@@ -226,7 +227,7 @@ public class AppendOnlyWriterTest {
 
         int id = 0;
         for (DataFileMeta meta : firstInc.newFilesIncrement().newFiles()) {
-            Path path = pathFactory.toPath(meta.fileName());
+            Path path = pathFactory.toPath(meta);
             assertThat(LocalFileIO.create().exists(path)).isTrue();
 
             assertThat(meta.rowCount()).isEqualTo(1000L);
@@ -242,7 +243,7 @@ public class AppendOnlyWriterTest {
                         initStats(String.format("%03d", min), String.format("%03d", max), 0),
                         initStats(PART, PART, 0)
                     };
-            assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinary(expected));
+            assertThat(meta.valueStats()).isEqualTo(STATS_SERIALIZER.toBinaryAllMode(expected));
 
             assertThat(meta.minSequenceNumber()).isEqualTo(min);
             assertThat(meta.maxSequenceNumber()).isEqualTo(max);
@@ -267,7 +268,7 @@ public class AppendOnlyWriterTest {
         List<DataFileMeta> compactAfter = secInc.compactIncrement().compactAfter();
         assertThat(compactBefore)
                 .containsExactlyInAnyOrderElementsOf(
-                        firstInc.newFilesIncrement().newFiles().subList(0, 4));
+                        firstInc.newFilesIncrement().newFiles().subList(0, 3));
         assertThat(compactAfter).hasSize(1);
         assertThat(compactBefore.stream().mapToLong(DataFileMeta::fileSize).sum())
                 .isEqualTo(compactAfter.stream().mapToLong(DataFileMeta::fileSize).sum());
@@ -408,6 +409,54 @@ public class AppendOnlyWriterTest {
     }
 
     @Test
+    public void tesWriteBufferSpillAutoEnabled() {
+        HashMap<String, String> map = new HashMap<>();
+        // This is the default behavior,no object store and streaming mode.
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, true, false))
+                .isFalse();
+
+        // Using object store.
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(true, true, false))
+                .isTrue();
+
+        // Batch mode.
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, false, false))
+                .isTrue();
+
+        // Append only table.
+        map.put(CoreOptions.WRITE_BUFFER_SIZE.key(), "200 MB");
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, false, false))
+                .isTrue();
+
+        // Primary key table.
+        map.put(CoreOptions.WRITE_BUFFER_SIZE.key(), "100 MB");
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, false, true))
+                .isTrue();
+
+        // targetFileSize is greater than write buffer size.
+        map.clear();
+        map.put(CoreOptions.TARGET_FILE_SIZE.key(), "2 b");
+        map.put(CoreOptions.WRITE_BUFFER_SIZE.key(), "1 b");
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, true, false))
+                .isTrue();
+
+        // target-file-size is smaller than write-buffer-size.
+        map.clear();
+        map.put(CoreOptions.TARGET_FILE_SIZE.key(), "1 b");
+        map.put(CoreOptions.WRITE_BUFFER_SIZE.key(), "2 b");
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, true, false))
+                .isFalse();
+
+        // Set to false manually.
+        map.clear();
+        map.put(CoreOptions.TARGET_FILE_SIZE.key(), "2 b");
+        map.put(CoreOptions.WRITE_BUFFER_SIZE.key(), "1 b");
+        map.put(CoreOptions.WRITE_BUFFER_SPILLABLE.key(), "false");
+        Assertions.assertThat(CoreOptions.fromMap(map).writeBufferSpillable(false, true, false))
+                .isFalse();
+    }
+
+    @Test
     public void testMultipleFlush() throws Exception {
         AppendOnlyWriter writer = createEmptyWriter(Long.MAX_VALUE, true);
 
@@ -519,7 +568,12 @@ public class AppendOnlyWriterTest {
     private DataFilePathFactory createPathFactory() {
         return new DataFilePathFactory(
                 new Path(tempDir + "/dt=" + PART + "/bucket-0"),
-                CoreOptions.FILE_FORMAT.defaultValue().toString());
+                CoreOptions.FILE_FORMAT_AVRO,
+                CoreOptions.DATA_FILE_PREFIX.defaultValue(),
+                CoreOptions.CHANGELOG_FILE_PREFIX.defaultValue(),
+                CoreOptions.FILE_SUFFIX_INCLUDE_COMPRESSION.defaultValue(),
+                CoreOptions.FILE_COMPRESSION.defaultValue(),
+                null);
     }
 
     private AppendOnlyWriter createEmptyWriter(long targetFileSize) {
@@ -597,7 +651,6 @@ public class AppendOnlyWriterTest {
                         toCompact,
                         null,
                         MIN_FILE_NUM,
-                        MAX_FILE_NUM,
                         targetFileSize,
                         compactBefore -> {
                             latch.await();
@@ -625,12 +678,15 @@ public class AppendOnlyWriterTest {
                         useWriteBuffer,
                         spillable,
                         CoreOptions.FILE_COMPRESSION.defaultValue(),
-                        CoreOptions.SPILL_COMPRESSION.defaultValue(),
+                        CompressOptions.defaultOptions(),
                         StatsCollectorFactories.createStatsFactories(
-                                options, AppendOnlyWriterTest.SCHEMA.getFieldNames()),
+                                "truncate(16)",
+                                options,
+                                AppendOnlyWriterTest.SCHEMA.getFieldNames()),
                         MemorySize.MAX_VALUE,
                         new FileIndexOptions(),
-                        true);
+                        true,
+                        false);
         writer.setMemoryPool(
                 new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize()));
         return Pair.of(writer, compactManager.allFiles());
@@ -640,13 +696,13 @@ public class AppendOnlyWriterTest {
         int size = toCompact.size();
         long minSeq = toCompact.get(0).minSequenceNumber();
         long maxSeq = toCompact.get(size - 1).maxSequenceNumber();
-        String fileName = "compact-" + UUID.randomUUID();
-        LocalFileIO.create().newOutputStream(pathFactory.toPath(fileName), false).close();
+        Path path = pathFactory.newPath("compact-");
+        LocalFileIO.create().newOutputStream(path, false).close();
         return DataFileMeta.forAppend(
-                fileName,
+                path.getName(),
                 toCompact.stream().mapToLong(DataFileMeta::fileSize).sum(),
                 toCompact.stream().mapToLong(DataFileMeta::rowCount).sum(),
-                STATS_SERIALIZER.toBinary(
+                STATS_SERIALIZER.toBinaryAllMode(
                         new SimpleColStats[] {
                             initStats(
                                     toCompact.get(0).valueStats().minValues().getInt(0),
@@ -671,6 +727,10 @@ public class AppendOnlyWriterTest {
                 minSeq,
                 maxSeq,
                 toCompact.get(0).schemaId(),
-                FileSource.APPEND);
+                Collections.emptyList(),
+                null,
+                FileSource.APPEND,
+                null,
+                null);
     }
 }

@@ -25,7 +25,8 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 
 /** Heap vector that nullable shared structure. */
-public abstract class AbstractHeapVector extends AbstractWritableVector {
+public abstract class AbstractHeapVector extends AbstractWritableVector
+        implements ElementCountable {
 
     public static final boolean LITTLE_ENDIAN = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
 
@@ -46,23 +47,23 @@ public abstract class AbstractHeapVector extends AbstractWritableVector {
     /** Reusable column for ids of dictionary. */
     protected HeapIntVector dictionaryIds;
 
-    private final int len;
-
-    public AbstractHeapVector(int len) {
-        isNull = new boolean[len];
-        this.len = len;
+    public AbstractHeapVector(int capacity) {
+        super(capacity);
+        isNull = new boolean[capacity];
     }
 
-    /**
-     * Resets the column to default state. - fills the isNull array with false. - sets noNulls to
-     * true.
-     */
+    /** Resets the column to default state. - fills the isNull array with false. */
     @Override
     public void reset() {
-        if (!noNulls) {
+        super.reset();
+        if (isNull.length != capacity) {
+            isNull = new boolean[capacity];
+        } else {
             Arrays.fill(isNull, false);
         }
-        noNulls = true;
+        if (dictionaryIds != null) {
+            dictionaryIds.reset();
+        }
     }
 
     @Override
@@ -89,7 +90,7 @@ public abstract class AbstractHeapVector extends AbstractWritableVector {
 
     @Override
     public boolean isNullAt(int i) {
-        return !noNulls && isNull[i];
+        return isAllNull || (!noNulls && isNull[i]);
     }
 
     @Override
@@ -116,7 +117,13 @@ public abstract class AbstractHeapVector extends AbstractWritableVector {
         return dictionaryIds;
     }
 
-    public int getLen() {
-        return this.len;
+    @Override
+    protected void reserveInternal(int newCapacity) {
+        if (isNull.length < newCapacity) {
+            isNull = Arrays.copyOf(isNull, newCapacity);
+        }
+        reserveForHeapVector(newCapacity);
     }
+
+    abstract void reserveForHeapVector(int newCapacity);
 }

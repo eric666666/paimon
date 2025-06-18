@@ -63,12 +63,14 @@ import org.apache.paimon.types.TimestampType;
 import org.apache.paimon.types.TinyIntType;
 import org.apache.paimon.types.VarBinaryType;
 import org.apache.paimon.types.VarCharType;
+import org.apache.paimon.types.VariantType;
 
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
 import org.apache.arrow.vector.DecimalVector;
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
@@ -112,7 +114,13 @@ public interface Arrow2PaimonVectorConverter {
 
                         @Override
                         public Bytes getBytes(int index) {
-                            byte[] bytes = ((VarCharVector) vector).get(index);
+                            byte[] bytes;
+                            if (vector instanceof FixedSizeBinaryVector) {
+                                bytes = ((FixedSizeBinaryVector) vector).get(index);
+                            } else {
+                                bytes = ((VarCharVector) vector).get(index);
+                            }
+
                             return new Bytes(bytes, 0, bytes.length) {
                                 @Override
                                 public byte[] getBytes() {
@@ -383,7 +391,7 @@ public interface Arrow2PaimonVectorConverter {
                                 return Timestamp.fromMicros(value);
                             } else {
                                 return Timestamp.fromEpochMillis(
-                                        value / 1_000_000, (int) value % 1_000_000);
+                                        value / 1_000_000, (int) (value % 1_000_000));
                             }
                         }
                     };
@@ -410,10 +418,15 @@ public interface Arrow2PaimonVectorConverter {
                                 return Timestamp.fromMicros(value);
                             } else {
                                 return Timestamp.fromEpochMillis(
-                                        value / 1_000_000, (int) value % 1_000_000);
+                                        value / 1_000_000, (int) (value % 1_000_000));
                             }
                         }
                     };
+        }
+
+        @Override
+        public Arrow2PaimonVectorConverter visit(VariantType variantType) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
@@ -506,15 +519,8 @@ public interface Arrow2PaimonVectorConverter {
                         }
 
                         @Override
-                        public ColumnVector getKeyColumnVector() {
-                            init();
-                            return keyColumnVector;
-                        }
-
-                        @Override
-                        public ColumnVector getValueColumnVector() {
-                            init();
-                            return valueColumnVector;
+                        public ColumnVector[] getChildren() {
+                            return new ColumnVector[] {keyColumnVector, valueColumnVector};
                         }
                     };
         }

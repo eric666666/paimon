@@ -47,12 +47,40 @@ public abstract class CompactTask implements Callable<CompactResult> {
         try {
             long startMillis = System.currentTimeMillis();
             CompactResult result = doCompact();
+
+            MetricUtils.safeCall(
+                    () -> {
+                        if (metricsReporter != null) {
+                            metricsReporter.reportCompactionTime(
+                                    System.currentTimeMillis() - startMillis);
+                            metricsReporter.increaseCompactionsCompletedCount();
+                            metricsReporter.reportCompactionInputSize(
+                                    result.before().stream()
+                                            .map(DataFileMeta::fileSize)
+                                            .reduce(Long::sum)
+                                            .orElse(0L));
+                            metricsReporter.reportCompactionOutputSize(
+                                    result.after().stream()
+                                            .map(DataFileMeta::fileSize)
+                                            .reduce(Long::sum)
+                                            .orElse(0L));
+                        }
+                    },
+                    LOG);
+
             if (LOG.isDebugEnabled()) {
                 logMetric(startMillis, result.before(), result.after());
             }
             return result;
         } finally {
             MetricUtils.safeCall(this::stopTimer, LOG);
+            MetricUtils.safeCall(this::decreaseCompactionsQueuedCount, LOG);
+        }
+    }
+
+    private void decreaseCompactionsQueuedCount() {
+        if (metricsReporter != null) {
+            metricsReporter.decreaseCompactionsQueuedCount();
         }
     }
 

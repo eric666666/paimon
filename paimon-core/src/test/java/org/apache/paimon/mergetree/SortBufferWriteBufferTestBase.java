@@ -18,8 +18,10 @@
 
 package org.apache.paimon.mergetree;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.KeyValue;
 import org.apache.paimon.codegen.RecordComparator;
+import org.apache.paimon.compression.CompressOptions;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.mergetree.compact.DeduplicateMergeFunction;
 import org.apache.paimon.mergetree.compact.FirstRowMergeFunction;
@@ -32,25 +34,23 @@ import org.apache.paimon.mergetree.compact.aggregate.AggregateMergeFunction;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.sort.BinaryInMemorySortBuffer;
-import org.apache.paimon.types.BigIntType;
-import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
-import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.ReusingKeyValue;
 import org.apache.paimon.utils.ReusingTestData;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 
-import org.assertj.core.util.Lists;
 import org.junit.jupiter.api.Test;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.apache.paimon.utils.Preconditions.checkState;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,15 +63,17 @@ public abstract class SortBufferWriteBufferTestBase {
 
     protected final SortBufferWriteBuffer table =
             new SortBufferWriteBuffer(
-                    new RowType(Collections.singletonList(new DataField(0, "key", new IntType()))),
-                    new RowType(
-                            Collections.singletonList(new DataField(1, "value", new BigIntType()))),
+                    RowType.builder().field("key_f0", DataTypes.INT()).build(),
+                    RowType.builder()
+                            .field("f0", DataTypes.INT())
+                            .field("f1", DataTypes.BIGINT())
+                            .build(),
                     null,
                     new HeapMemorySegmentPool(32 * 1024 * 3L, 32 * 1024),
                     false,
                     MemorySize.MAX_VALUE,
                     128,
-                    "lz4",
+                    CompressOptions.defaultOptions(),
                     null);
 
     protected abstract boolean addOnly();
@@ -165,21 +167,30 @@ public abstract class SortBufferWriteBufferTestBase {
     /** Test for {@link SortBufferWriteBuffer} with {@link PartialUpdateMergeFunction}. */
     public static class WithPartialUpdateMergeFunctionTest extends SortBufferWriteBufferTestBase {
 
+        private final boolean addOnly;
+
+        private WithPartialUpdateMergeFunctionTest() {
+            this.addOnly = ThreadLocalRandom.current().nextBoolean();
+        }
+
         @Override
         protected boolean addOnly() {
-            return true;
+            return addOnly;
         }
 
         @Override
         protected List<ReusingTestData> getExpected(List<ReusingTestData> input) {
-            return MergeFunctionTestUtils.getExpectedForPartialUpdate(input);
+            return MergeFunctionTestUtils.getExpectedForPartialUpdate(input, addOnly);
         }
 
         @Override
         protected MergeFunction<KeyValue> createMergeFunction() {
             Options options = new Options();
+            options.set(CoreOptions.IGNORE_DELETE, !addOnly);
             return PartialUpdateMergeFunction.factory(
-                            options, RowType.of(DataTypes.BIGINT()), ImmutableList.of("f0"))
+                            options,
+                            RowType.of(DataTypes.INT().notNull(), DataTypes.BIGINT()),
+                            ImmutableList.of("f0"))
                     .create();
         }
     }
@@ -187,25 +198,36 @@ public abstract class SortBufferWriteBufferTestBase {
     /** Test for {@link SortBufferWriteBuffer} with {@link AggregateMergeFunction}. */
     public static class WithAggMergeFunctionTest extends SortBufferWriteBufferTestBase {
 
+        private final boolean addOnly;
+        private final boolean removeRecordOnDelete;
+
+        private WithAggMergeFunctionTest() {
+            ThreadLocalRandom random = ThreadLocalRandom.current();
+            this.addOnly = random.nextBoolean();
+            this.removeRecordOnDelete = !addOnly && random.nextBoolean();
+        }
+
         @Override
         protected boolean addOnly() {
-            return false;
+            return addOnly;
         }
 
         @Override
         protected List<ReusingTestData> getExpected(List<ReusingTestData> input) {
-            return MergeFunctionTestUtils.getExpectedForAggSum(input);
+            return MergeFunctionTestUtils.getExpectedForAggSum(
+                    input, addOnly, removeRecordOnDelete);
         }
 
         @Override
         protected MergeFunction<KeyValue> createMergeFunction() {
             Options options = new Options();
-            options.set("fields.value.aggregate-function", "sum");
+            options.set("fields.f1.aggregate-function", "sum");
+            options.set(CoreOptions.AGGREGATION_REMOVE_RECORD_ON_DELETE, removeRecordOnDelete);
             return AggregateMergeFunction.factory(
                             options,
-                            Collections.singletonList("value"),
-                            Collections.singletonList(DataTypes.BIGINT()),
-                            Collections.emptyList())
+                            Arrays.asList("f0", "f1"),
+                            Arrays.asList(DataTypes.INT().notNull(), DataTypes.BIGINT()),
+                            Collections.singletonList("f0"))
                     .create();
         }
     }
@@ -213,31 +235,38 @@ public abstract class SortBufferWriteBufferTestBase {
     /** Test for {@link SortBufferWriteBuffer} with {@link LookupMergeFunction}. */
     public static class WithLookupFunctionTest extends SortBufferWriteBufferTestBase {
 
+        private final boolean addOnly;
+        private final boolean removeRecordOnDelete;
+
+        private WithLookupFunctionTest() {
+            ThreadLocalRandom random = ThreadLocalRandom.current();
+            this.addOnly = random.nextBoolean();
+            this.removeRecordOnDelete = !addOnly && random.nextBoolean();
+        }
+
         @Override
         protected boolean addOnly() {
-            return false;
+            return addOnly;
         }
 
         @Override
         protected List<ReusingTestData> getExpected(List<ReusingTestData> input) {
-            return MergeFunctionTestUtils.getExpectedForAggSum(input);
+            return MergeFunctionTestUtils.getExpectedForAggSum(
+                    input, addOnly, removeRecordOnDelete);
         }
 
         @Override
         protected MergeFunction<KeyValue> createMergeFunction() {
             Options options = new Options();
-            options.set("fields.value.aggregate-function", "sum");
+            options.set("fields.f1.aggregate-function", "sum");
+            options.set(CoreOptions.AGGREGATION_REMOVE_RECORD_ON_DELETE, removeRecordOnDelete);
             MergeFunctionFactory<KeyValue> aggMergeFunction =
                     AggregateMergeFunction.factory(
                             options,
-                            Collections.singletonList("value"),
-                            Collections.singletonList(DataTypes.BIGINT()),
-                            Collections.emptyList());
-            return LookupMergeFunction.wrap(
-                            aggMergeFunction,
-                            RowType.of(DataTypes.INT()),
-                            RowType.of(DataTypes.BIGINT()))
-                    .create();
+                            Arrays.asList("f0", "f1"),
+                            Arrays.asList(DataTypes.INT().notNull(), DataTypes.BIGINT()),
+                            Collections.singletonList("f0"));
+            return LookupMergeFunction.wrap(aggMergeFunction).create();
         }
     }
 
@@ -256,11 +285,7 @@ public abstract class SortBufferWriteBufferTestBase {
 
         @Override
         protected MergeFunction<KeyValue> createMergeFunction() {
-            return FirstRowMergeFunction.factory(
-                            new Options(),
-                            new RowType(Lists.list(new DataField(0, "f0", new IntType()))),
-                            new RowType(Lists.list(new DataField(1, "f1", new BigIntType()))))
-                    .create();
+            return FirstRowMergeFunction.factory(new Options()).create();
         }
     }
 }

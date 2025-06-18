@@ -71,6 +71,7 @@ public class CommitMessageLegacyV2Serializer {
         return new CommitMessageImpl(
                 deserializeBinaryRow(view),
                 view.readInt(),
+                null,
                 new DataIncrement(
                         dataFileSerializer.deserializeList(view),
                         Collections.emptyList(),
@@ -152,6 +153,8 @@ public class CommitMessageLegacyV2Serializer {
                     row.getInt(10),
                     fromStringArrayData(row.getArray(11)),
                     row.getTimestamp(12, 3),
+                    null,
+                    null,
                     null,
                     null,
                     null);

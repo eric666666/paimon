@@ -31,7 +31,9 @@ import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonPro
 
 import javax.annotation.Nullable;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.Map;
 import java.util.Objects;
 
@@ -60,7 +62,9 @@ import java.util.Objects;
  */
 @Public
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class Snapshot {
+public class Snapshot implements Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     public static final long FIRST_SNAPSHOT_ID = 1;
 
@@ -71,8 +75,11 @@ public class Snapshot {
     protected static final String FIELD_ID = "id";
     protected static final String FIELD_SCHEMA_ID = "schemaId";
     protected static final String FIELD_BASE_MANIFEST_LIST = "baseManifestList";
+    protected static final String FIELD_BASE_MANIFEST_LIST_SIZE = "baseManifestListSize";
     protected static final String FIELD_DELTA_MANIFEST_LIST = "deltaManifestList";
+    protected static final String FIELD_DELTA_MANIFEST_LIST_SIZE = "deltaManifestListSize";
     protected static final String FIELD_CHANGELOG_MANIFEST_LIST = "changelogManifestList";
+    protected static final String FIELD_CHANGELOG_MANIFEST_LIST_SIZE = "changelogManifestListSize";
     protected static final String FIELD_INDEX_MANIFEST = "indexManifest";
     protected static final String FIELD_COMMIT_USER = "commitUser";
     protected static final String FIELD_COMMIT_IDENTIFIER = "commitIdentifier";
@@ -101,16 +108,31 @@ public class Snapshot {
     @JsonProperty(FIELD_BASE_MANIFEST_LIST)
     protected final String baseManifestList;
 
+    @JsonProperty(FIELD_BASE_MANIFEST_LIST_SIZE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable
+    protected final Long baseManifestListSize;
+
     // a manifest list recording all new changes occurred in this snapshot
     // for faster expire and streaming reads
     @JsonProperty(FIELD_DELTA_MANIFEST_LIST)
     protected final String deltaManifestList;
+
+    @JsonProperty(FIELD_DELTA_MANIFEST_LIST_SIZE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable
+    protected final Long deltaManifestListSize;
 
     // a manifest list recording all changelog produced in this snapshot
     // null if no changelog is produced, or for paimon <= 0.2
     @JsonProperty(FIELD_CHANGELOG_MANIFEST_LIST)
     @Nullable
     protected final String changelogManifestList;
+
+    @JsonProperty(FIELD_CHANGELOG_MANIFEST_LIST_SIZE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable
+    protected final Long changelogManifestListSize;
 
     // a manifest recording all index files of this table
     // null if no index file
@@ -181,8 +203,11 @@ public class Snapshot {
             long id,
             long schemaId,
             String baseManifestList,
+            @Nullable Long baseManifestListSize,
             String deltaManifestList,
+            @Nullable Long deltaManifestListSize,
             @Nullable String changelogManifestList,
+            @Nullable Long changelogManifestListSize,
             @Nullable String indexManifest,
             String commitUser,
             long commitIdentifier,
@@ -199,8 +224,11 @@ public class Snapshot {
                 id,
                 schemaId,
                 baseManifestList,
+                baseManifestListSize,
                 deltaManifestList,
+                deltaManifestListSize,
                 changelogManifestList,
+                changelogManifestListSize,
                 indexManifest,
                 commitUser,
                 commitIdentifier,
@@ -220,8 +248,12 @@ public class Snapshot {
             @JsonProperty(FIELD_ID) long id,
             @JsonProperty(FIELD_SCHEMA_ID) long schemaId,
             @JsonProperty(FIELD_BASE_MANIFEST_LIST) String baseManifestList,
+            @JsonProperty(FIELD_BASE_MANIFEST_LIST_SIZE) @Nullable Long baseManifestListSize,
             @JsonProperty(FIELD_DELTA_MANIFEST_LIST) String deltaManifestList,
+            @JsonProperty(FIELD_DELTA_MANIFEST_LIST_SIZE) @Nullable Long deltaManifestListSize,
             @JsonProperty(FIELD_CHANGELOG_MANIFEST_LIST) @Nullable String changelogManifestList,
+            @JsonProperty(FIELD_CHANGELOG_MANIFEST_LIST_SIZE) @Nullable
+                    Long changelogManifestListSize,
             @JsonProperty(FIELD_INDEX_MANIFEST) @Nullable String indexManifest,
             @JsonProperty(FIELD_COMMIT_USER) String commitUser,
             @JsonProperty(FIELD_COMMIT_IDENTIFIER) long commitIdentifier,
@@ -237,8 +269,11 @@ public class Snapshot {
         this.id = id;
         this.schemaId = schemaId;
         this.baseManifestList = baseManifestList;
+        this.baseManifestListSize = baseManifestListSize;
         this.deltaManifestList = deltaManifestList;
+        this.deltaManifestListSize = deltaManifestListSize;
         this.changelogManifestList = changelogManifestList;
+        this.changelogManifestListSize = changelogManifestListSize;
         this.indexManifest = indexManifest;
         this.commitUser = commitUser;
         this.commitIdentifier = commitIdentifier;
@@ -273,15 +308,33 @@ public class Snapshot {
         return baseManifestList;
     }
 
+    @JsonGetter(FIELD_BASE_MANIFEST_LIST_SIZE)
+    @Nullable
+    public Long baseManifestListSize() {
+        return baseManifestListSize;
+    }
+
     @JsonGetter(FIELD_DELTA_MANIFEST_LIST)
     public String deltaManifestList() {
         return deltaManifestList;
+    }
+
+    @JsonGetter(FIELD_DELTA_MANIFEST_LIST_SIZE)
+    @Nullable
+    public Long deltaManifestListSize() {
+        return deltaManifestListSize;
     }
 
     @JsonGetter(FIELD_CHANGELOG_MANIFEST_LIST)
     @Nullable
     public String changelogManifestList() {
         return changelogManifestList;
+    }
+
+    @JsonGetter(FIELD_CHANGELOG_MANIFEST_LIST_SIZE)
+    @Nullable
+    public Long changelogManifestListSize() {
+        return changelogManifestListSize;
     }
 
     @JsonGetter(FIELD_INDEX_MANIFEST)
@@ -350,18 +403,6 @@ public class Snapshot {
         return JsonSerdeUtil.toJson(this);
     }
 
-    public static Snapshot fromJson(String json) {
-        return JsonSerdeUtil.fromJson(json, Snapshot.class);
-    }
-
-    public static Snapshot fromPath(FileIO fileIO, Path path) {
-        try {
-            return Snapshot.fromJson(fileIO.readFileUtf8(path));
-        } catch (IOException e) {
-            throw new RuntimeException("Fails to read snapshot from path " + path, e);
-        }
-    }
-
     @Override
     public int hashCode() {
         return Objects.hash(
@@ -369,8 +410,11 @@ public class Snapshot {
                 id,
                 schemaId,
                 baseManifestList,
+                baseManifestListSize,
                 deltaManifestList,
+                deltaManifestListSize,
                 changelogManifestList,
+                changelogManifestListSize,
                 indexManifest,
                 commitUser,
                 commitIdentifier,
@@ -380,12 +424,16 @@ public class Snapshot {
                 totalRecordCount,
                 deltaRecordCount,
                 changelogRecordCount,
-                watermark);
+                watermark,
+                statistics);
     }
 
     @Override
     public boolean equals(Object o) {
-        if (!(o instanceof Snapshot)) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
             return false;
         }
         Snapshot that = (Snapshot) o;
@@ -393,8 +441,11 @@ public class Snapshot {
                 && id == that.id
                 && schemaId == that.schemaId
                 && Objects.equals(baseManifestList, that.baseManifestList)
+                && Objects.equals(baseManifestListSize, that.baseManifestListSize)
                 && Objects.equals(deltaManifestList, that.deltaManifestList)
+                && Objects.equals(deltaManifestListSize, that.deltaManifestListSize)
                 && Objects.equals(changelogManifestList, that.changelogManifestList)
+                && Objects.equals(changelogManifestListSize, that.changelogManifestListSize)
                 && Objects.equals(indexManifest, that.indexManifest)
                 && Objects.equals(commitUser, that.commitUser)
                 && commitIdentifier == that.commitIdentifier
@@ -404,7 +455,8 @@ public class Snapshot {
                 && Objects.equals(totalRecordCount, that.totalRecordCount)
                 && Objects.equals(deltaRecordCount, that.deltaRecordCount)
                 && Objects.equals(changelogRecordCount, that.changelogRecordCount)
-                && Objects.equals(watermark, that.watermark);
+                && Objects.equals(watermark, that.watermark)
+                && Objects.equals(statistics, that.statistics);
     }
 
     /** Type of changes in this snapshot. */
@@ -421,5 +473,37 @@ public class Snapshot {
 
         /** Collect statistics. */
         ANALYZE
+    }
+
+    // =================== Utils for reading =========================
+
+    public static Snapshot fromJson(String json) {
+        return JsonSerdeUtil.fromJson(json, Snapshot.class);
+    }
+
+    public static Snapshot fromPath(FileIO fileIO, Path path) {
+        try {
+            return tryFromPath(fileIO, path);
+        } catch (FileNotFoundException e) {
+            String errorMessage =
+                    String.format(
+                            "Snapshot file %s does not exist. "
+                                    + "It might have been expired by other jobs operating on this table. "
+                                    + "In this case, you can avoid concurrent modification issues by configuring "
+                                    + "write-only = true and use a dedicated compaction job, or configuring "
+                                    + "different expiration thresholds for different jobs.",
+                            path);
+            throw new RuntimeException(errorMessage, e);
+        }
+    }
+
+    public static Snapshot tryFromPath(FileIO fileIO, Path path) throws FileNotFoundException {
+        try {
+            return Snapshot.fromJson(fileIO.readFileUtf8(path));
+        } catch (FileNotFoundException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new RuntimeException("Fails to read snapshot from path " + path, e);
+        }
     }
 }

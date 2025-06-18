@@ -31,21 +31,16 @@ import java.util.Set;
 /** Merge two maps. */
 public class FieldMergeMapAgg extends FieldAggregator {
 
-    public static final String NAME = "merge_map";
+    private static final long serialVersionUID = 1L;
 
     private final InternalArray.ElementGetter keyGetter;
     private final InternalArray.ElementGetter valueGetter;
 
-    public FieldMergeMapAgg(MapType dataType) {
-        super(dataType);
+    public FieldMergeMapAgg(String name, MapType dataType) {
+        super(name, dataType);
 
         this.keyGetter = InternalArray.createElementGetter(dataType.getKeyType());
         this.valueGetter = InternalArray.createElementGetter(dataType.getValueType());
-    }
-
-    @Override
-    String name() {
-        return NAME;
     }
 
     @Override
@@ -74,12 +69,19 @@ public class FieldMergeMapAgg extends FieldAggregator {
 
     @Override
     public Object retract(Object accumulator, Object retractField) {
+        // it's hard to mark the input is retracted without accumulator
         if (accumulator == null) {
             return null;
         }
 
-        InternalMap acc = (InternalMap) accumulator;
+        // nothing to be retracted
+        if (retractField == null) {
+            return accumulator;
+        }
         InternalMap retract = (InternalMap) retractField;
+        if (retract.size() == 0) {
+            return accumulator;
+        }
 
         InternalArray retractKeyArray = retract.keyArray();
         Set<Object> retractKeys = new HashSet<>();
@@ -87,6 +89,7 @@ public class FieldMergeMapAgg extends FieldAggregator {
             retractKeys.add(keyGetter.getElementOrNull(retractKeyArray, i));
         }
 
+        InternalMap acc = (InternalMap) accumulator;
         Map<Object, Object> resultMap = new HashMap<>();
         InternalArray accKeyArray = acc.keyArray();
         InternalArray accValueArray = acc.valueArray();

@@ -21,7 +21,6 @@ package org.apache.paimon.flink.sink.cdc;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.action.cdc.TableNameConverter;
 import org.apache.paimon.schema.Schema;
-import org.apache.paimon.types.DataField;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,8 +45,10 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
             LoggerFactory.getLogger(RichCdcMultiplexRecordEventParser.class);
 
     @Nullable private final NewTableSchemaBuilder schemaBuilder;
-    @Nullable private final Pattern includingPattern;
-    @Nullable private final Pattern excludingPattern;
+    @Nullable private final Pattern tblIncludingPattern;
+    @Nullable private final Pattern tblExcludingPattern;
+    @Nullable private final Pattern dbIncludingPattern;
+    @Nullable private final Pattern dbExcludingPattern;
     private final TableNameConverter tableNameConverter;
     private final Set<String> createdTables;
 
@@ -55,24 +56,32 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
     private final Set<String> includedTables = new HashSet<>();
     private final Set<String> excludedTables = new HashSet<>();
 
+    private final Set<String> includedDbs = new HashSet<>();
+    private final Set<String> excludedDbs = new HashSet<>();
+
     private RichCdcMultiplexRecord record;
     private String currentTable;
+    private String currentDb;
     private boolean shouldSynchronizeCurrentTable;
     private RichEventParser currentParser;
 
     public RichCdcMultiplexRecordEventParser(boolean caseSensitive) {
-        this(null, null, null, new TableNameConverter(caseSensitive), new HashSet<>());
+        this(null, null, null, null, null, new TableNameConverter(caseSensitive), new HashSet<>());
     }
 
     public RichCdcMultiplexRecordEventParser(
             @Nullable NewTableSchemaBuilder schemaBuilder,
-            @Nullable Pattern includingPattern,
-            @Nullable Pattern excludingPattern,
+            @Nullable Pattern tblIncludingPattern,
+            @Nullable Pattern tblExcludingPattern,
+            @Nullable Pattern dbIncludingPattern,
+            @Nullable Pattern dbExcludingPattern,
             TableNameConverter tableNameConverter,
             Set<String> createdTables) {
         this.schemaBuilder = schemaBuilder;
-        this.includingPattern = includingPattern;
-        this.excludingPattern = excludingPattern;
+        this.tblIncludingPattern = tblIncludingPattern;
+        this.tblExcludingPattern = tblExcludingPattern;
+        this.dbIncludingPattern = dbIncludingPattern;
+        this.dbExcludingPattern = dbExcludingPattern;
         this.tableNameConverter = tableNameConverter;
         this.createdTables = createdTables;
     }
@@ -81,6 +90,7 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
     public void setRawEvent(RichCdcMultiplexRecord record) {
         this.record = record;
         this.currentTable = record.tableName();
+        this.currentDb = record.databaseName();
         this.shouldSynchronizeCurrentTable = shouldSynchronizeCurrentTable();
         if (shouldSynchronizeCurrentTable) {
             this.currentParser = parsers.computeIfAbsent(currentTable, t -> new RichEventParser());
@@ -101,10 +111,8 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
     }
 
     @Override
-    public List<DataField> parseSchemaChange() {
-        return shouldSynchronizeCurrentTable
-                ? currentParser.parseSchemaChange()
-                : Collections.emptyList();
+    public CdcSchema parseSchemaChange() {
+        return shouldSynchronizeCurrentTable ? currentParser.parseSchemaChange() : null;
     }
 
     @Override
@@ -124,7 +132,41 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
         return Optional.empty();
     }
 
+    private boolean shouldSynchronizeCurrentDb() {
+        // In case the record is incomplete, we let the null value pass validation
+        // and handle the null value when we really need it
+        if (currentDb == null) {
+            return true;
+        }
+        if (includedDbs.contains(currentDb)) {
+            return true;
+        }
+        if (excludedDbs.contains(currentDb)) {
+            return false;
+        }
+        boolean shouldSynchronize = true;
+        if (dbIncludingPattern != null) {
+            shouldSynchronize = dbIncludingPattern.matcher(currentDb).matches();
+        }
+        if (dbExcludingPattern != null) {
+            shouldSynchronize =
+                    shouldSynchronize && !dbExcludingPattern.matcher(currentDb).matches();
+        }
+        if (!shouldSynchronize) {
+            LOG.debug(
+                    "Source database {} won't be synchronized because it was excluded. ",
+                    currentDb);
+            excludedDbs.add(currentDb);
+            return false;
+        }
+        includedDbs.add(currentDb);
+        return true;
+    }
+
     private boolean shouldSynchronizeCurrentTable() {
+        if (!shouldSynchronizeCurrentDb()) {
+            return false;
+        }
         // In case the record is incomplete, we let the null value pass validation
         // and handle the null value when we really need it
         if (currentTable == null) {
@@ -139,12 +181,12 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
         }
 
         boolean shouldSynchronize = true;
-        if (includingPattern != null) {
-            shouldSynchronize = includingPattern.matcher(currentTable).matches();
+        if (tblIncludingPattern != null) {
+            shouldSynchronize = tblIncludingPattern.matcher(currentTable).matches();
         }
-        if (excludingPattern != null) {
+        if (tblExcludingPattern != null) {
             shouldSynchronize =
-                    shouldSynchronize && !excludingPattern.matcher(currentTable).matches();
+                    shouldSynchronize && !tblExcludingPattern.matcher(currentTable).matches();
         }
         if (!shouldSynchronize) {
             LOG.debug(
@@ -160,7 +202,7 @@ public class RichCdcMultiplexRecordEventParser implements EventParser<RichCdcMul
 
     private boolean shouldCreateCurrentTable() {
         return shouldSynchronizeCurrentTable
-                && !record.fields().isEmpty()
+                && !record.cdcSchema().fields().isEmpty()
                 && createdTables.add(parseTableName());
     }
 }

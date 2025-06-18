@@ -19,6 +19,7 @@
 package org.apache.paimon.hive.migrate;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryWriter;
@@ -66,9 +67,7 @@ import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
 public class HiveMigrator implements Migrator {
 
     private static final Logger LOG = LoggerFactory.getLogger(HiveMigrator.class);
-
-    private static final ThreadPoolExecutor EXECUTOR =
-            createCachedThreadPool(Runtime.getRuntime().availableProcessors(), "HIVE_MIGRATOR");
+    private ThreadPoolExecutor executor;
 
     private static final Predicate<FileStatus> HIDDEN_PATH_FILTER =
             p -> !p.getPath().getName().startsWith("_") && !p.getPath().getName().startsWith(".");
@@ -83,7 +82,8 @@ public class HiveMigrator implements Migrator {
     private final String targetDatabase;
     private final String targetTable;
     private final CoreOptions coreOptions;
-    private Boolean delete = true;
+
+    private Boolean deleteOriginTable = true;
 
     public HiveMigrator(
             HiveCatalog hiveCatalog,
@@ -91,6 +91,7 @@ public class HiveMigrator implements Migrator {
             String sourceTable,
             String targetDatabase,
             String targetTable,
+            Integer parallelism,
             Map<String, String> options) {
         this.hiveCatalog = hiveCatalog;
         this.fileIO = hiveCatalog.fileIO();
@@ -100,10 +101,14 @@ public class HiveMigrator implements Migrator {
         this.targetDatabase = targetDatabase;
         this.targetTable = targetTable;
         this.coreOptions = new CoreOptions(options);
+        this.executor = createCachedThreadPool(parallelism, "HIVE_MIGRATOR");
     }
 
     public static List<Migrator> databaseMigrators(
-            HiveCatalog hiveCatalog, String sourceDatabase, Map<String, String> options) {
+            HiveCatalog hiveCatalog,
+            String sourceDatabase,
+            Map<String, String> options,
+            Integer parallelism) {
         IMetaStoreClient client = hiveCatalog.getHmsClient();
         try {
             return client.getAllTables(sourceDatabase).stream()
@@ -115,6 +120,7 @@ public class HiveMigrator implements Migrator {
                                             sourceTable,
                                             sourceDatabase,
                                             sourceTable + PAIMON_SUFFIX,
+                                            parallelism,
                                             options))
                     .collect(Collectors.toList());
         } catch (TException e) {
@@ -123,8 +129,8 @@ public class HiveMigrator implements Migrator {
     }
 
     @Override
-    public void deleteOriginTable(boolean delete) {
-        this.delete = delete;
+    public void deleteOriginTable(boolean deleteOriginTable) {
+        this.deleteOriginTable = deleteOriginTable;
     }
 
     @Override
@@ -139,43 +145,42 @@ public class HiveMigrator implements Migrator {
 
         // create paimon table if not exists
         Identifier identifier = Identifier.create(targetDatabase, targetTable);
-        boolean alreadyExist = hiveCatalog.tableExists(identifier);
-        if (!alreadyExist) {
+
+        boolean deleteIfFail = false;
+        try {
+            hiveCatalog.getTable(identifier);
+        } catch (Catalog.TableNotExistException e) {
             Schema schema =
                     from(
                             client.getSchema(sourceDatabase, sourceTable),
                             sourceHiveTable.getPartitionKeys(),
                             properties);
             hiveCatalog.createTable(identifier, schema, false);
+            deleteIfFail = true;
         }
 
         try {
             FileStoreTable paimonTable = (FileStoreTable) hiveCatalog.getTable(identifier);
             checkPaimonTable(paimonTable);
 
-            List<String> partitionsNames =
-                    client.listPartitionNames(sourceDatabase, sourceTable, Short.MAX_VALUE);
+            List<Partition> partitions =
+                    client.listPartitions(sourceDatabase, sourceTable, Short.MAX_VALUE);
             checkCompatible(sourceHiveTable, paimonTable);
 
             List<MigrateTask> tasks = new ArrayList<>();
             Map<Path, Path> rollBack = new ConcurrentHashMap<>();
-            if (partitionsNames.isEmpty()) {
+            if (partitions.isEmpty()) {
                 tasks.add(
                         importUnPartitionedTableTask(
                                 fileIO, sourceHiveTable, paimonTable, rollBack));
             } else {
                 tasks.addAll(
                         importPartitionedTableTask(
-                                client,
-                                fileIO,
-                                partitionsNames,
-                                sourceHiveTable,
-                                paimonTable,
-                                rollBack));
+                                fileIO, partitions, sourceHiveTable, paimonTable, rollBack));
             }
 
             List<Future<CommitMessage>> futures =
-                    tasks.stream().map(EXECUTOR::submit).collect(Collectors.toList());
+                    tasks.stream().map(executor::submit).collect(Collectors.toList());
             List<CommitMessage> commitMessages = new ArrayList<>();
             try {
                 for (Future<CommitMessage> future : futures) {
@@ -205,14 +210,14 @@ public class HiveMigrator implements Migrator {
                 commit.commit(new ArrayList<>(commitMessages));
             }
         } catch (Exception e) {
-            if (!alreadyExist) {
+            if (deleteIfFail) {
                 hiveCatalog.dropTable(identifier, true);
             }
             throw new RuntimeException("Migrating failed", e);
         }
 
         // if all success, drop the origin table according the delete field
-        if (delete) {
+        if (deleteOriginTable) {
             client.dropTable(sourceDatabase, sourceTable, true, true);
         }
     }
@@ -282,13 +287,11 @@ public class HiveMigrator implements Migrator {
     }
 
     private List<MigrateTask> importPartitionedTableTask(
-            IMetaStoreClient client,
             FileIO fileIO,
-            List<String> partitionNames,
+            List<Partition> partitions,
             Table sourceTable,
             FileStoreTable paimonTable,
-            Map<Path, Path> rollback)
-            throws Exception {
+            Map<Path, Path> rollback) {
         List<MigrateTask> migrateTasks = new ArrayList<>();
         List<BinaryWriter.ValueSetter> valueSetters = new ArrayList<>();
 
@@ -299,17 +302,14 @@ public class HiveMigrator implements Migrator {
                 .getFieldTypes()
                 .forEach(type -> valueSetters.add(BinaryWriter.createValueSetter(type)));
 
-        for (String partitionName : partitionNames) {
-            Partition partition =
-                    client.getPartition(
-                            sourceTable.getDbName(), sourceTable.getTableName(), partitionName);
-            Map<String, String> values = client.partitionNameToSpec(partitionName);
+        for (Partition partition : partitions) {
+            List<String> partitionValues = partition.getValues();
             String format = parseFormat(partition.getSd().getSerdeInfo().toString());
             String location = partition.getSd().getLocation();
             BinaryRow partitionRow =
                     FileMetaUtils.writePartitionValue(
                             partitionRowType,
-                            values,
+                            partitionValues,
                             valueSetters,
                             coreOptions.partitionDefaultName());
             Path path = paimonTable.store().pathFactory().bucketPath(partitionRow, 0);
@@ -416,7 +416,8 @@ public class HiveMigrator implements Migrator {
                             HIDDEN_PATH_FILTER,
                             newDir,
                             rollback);
-            return FileMetaUtils.commitFile(partitionRow, fileMetas);
+            return FileMetaUtils.commitFile(
+                    partitionRow, paimonTable.coreOptions().bucket(), fileMetas);
         }
     }
 }
