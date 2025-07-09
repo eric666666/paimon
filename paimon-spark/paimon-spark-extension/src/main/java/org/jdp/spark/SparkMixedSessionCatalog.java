@@ -31,10 +31,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
-import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
-import org.apache.spark.sql.catalyst.analysis.NonEmptyNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.TableAlreadyExistsException;
 import org.apache.spark.sql.catalyst.catalog.ExternalCatalog;
 import org.apache.spark.sql.catalyst.catalog.InMemoryCatalog;
@@ -49,7 +47,6 @@ import org.apache.spark.sql.connector.catalog.SupportsNamespaces;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.catalog.TableChange;
-import org.apache.spark.sql.connector.catalog.functions.UnboundFunction;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.execution.datasources.v2.V2SessionCatalog;
 import org.apache.spark.sql.internal.SQLConf;
@@ -131,10 +128,11 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
         asNamespaceCatalog().alterNamespace(namespace, changes);
     }
 
+
     @Override
-    public boolean dropNamespace(String[] namespace, boolean cascade)
-            throws NoSuchNamespaceException, NonEmptyNamespaceException {
-        if (namespace.length == 1 && namespaceExists(namespace) && cascade) {
+    public boolean dropNamespace(String[] namespace)
+            throws NoSuchNamespaceException {
+        if (namespace.length == 1 && namespaceExists(namespace)) {
             for (Identifier table : listTables(namespace)) {
                 try {
                     dropTable(table);
@@ -146,7 +144,7 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
                 }
             }
         }
-        return asNamespaceCatalog().dropNamespace(namespace, cascade);
+        return asNamespaceCatalog().dropNamespace(namespace);
     }
 
     @Override
@@ -154,6 +152,7 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
         // delegate to the session catalog because all tables share the same namespace
         return asTableCatalog().listTables(namespace);
     }
+
 
     @Override
     public Table loadTable(Identifier ident) throws NoSuchTableException {
@@ -168,33 +167,6 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
         }
     }
 
-    @Override
-    public Table loadTable(Identifier ident, String version) throws NoSuchTableException {
-        try {
-            return sparkCatalog.loadTable(ident, version);
-        } catch (NoSuchTableException e) {
-            try {
-                return icebergCatalog.loadTable(ident, version);
-            } catch (NoSuchTableException ex) {
-                return throwsOldIfExceptionHappens(() -> asTableCatalog().loadTable(ident, version), e);
-            }
-        }
-    }
-
-    @Override
-    public Table loadTable(Identifier ident, long timestamp) throws NoSuchTableException {
-        try {
-            return sparkCatalog.loadTable(ident, timestamp);
-        } catch (NoSuchTableException e) {
-            try {
-                return icebergCatalog.loadTable(ident, timestamp);
-            } catch (NoSuchTableException ex) {
-                return throwsOldIfExceptionHappens(
-                        () -> asTableCatalog().loadTable(ident, timestamp), e);
-            }
-        }
-
-    }
 
     @Override
     public void invalidateTable(Identifier ident) {
@@ -203,6 +175,11 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
         sparkCatalog.invalidateTable(ident);
         icebergCatalog.invalidateTable(ident);
         asTableCatalog().invalidateTable(ident);
+    }
+
+    @Override
+    public boolean tableExists(Identifier ident) {
+        return super.tableExists(ident);
     }
 
     @Override
@@ -393,19 +370,6 @@ public class SparkMixedSessionCatalog extends SparkBaseCatalog implements Catalo
         return (FunctionCatalog) sessionCatalog;
     }
 
-    @Override
-    public Identifier[] listFunctions(String[] namespace) throws NoSuchNamespaceException {
-        if (namespace.length == 0 || isSystemNamespace(namespace) || namespaceExists(namespace)) {
-            return new Identifier[0];
-        }
-
-        return asFunctionCatalog().listFunctions(namespace);
-    }
-
-    @Override
-    public UnboundFunction loadFunction(Identifier ident) throws NoSuchFunctionException {
-        return asFunctionCatalog().loadFunction(ident);
-    }
 
     private static boolean isSystemNamespace(String[] namespace) {
         return namespace.length == 1 && namespace[0].equalsIgnoreCase("system");

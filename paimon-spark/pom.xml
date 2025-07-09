@@ -40,6 +40,8 @@ under the License.
     <modules>
         <module>paimon-spark-common</module>
         <module>paimon-spark-ut</module>
+<!--        <module>paimon-spark-extension</module>-->
+<!--        <module>paimon-spark3.5-extension</module>-->
     </modules>
 
     <dependencyManagement>

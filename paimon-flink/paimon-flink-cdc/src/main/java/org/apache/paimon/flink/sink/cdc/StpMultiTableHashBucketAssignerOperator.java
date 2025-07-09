@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.sink.StateUtils;
 import org.apache.paimon.index.BucketAssigner;
@@ -61,7 +62,7 @@ public class StpMultiTableHashBucketAssignerOperator
     private final Map<Identifier, FileStoreTable> tables = new HashMap<>();
     private final Map<Identifier, PartitionKeyExtractor<CdcMultiplexRecord>> extractors =
             new HashMap<>();
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private transient Catalog catalog;
 
     private int numberTasks;
@@ -70,7 +71,7 @@ public class StpMultiTableHashBucketAssignerOperator
 
     public StpMultiTableHashBucketAssignerOperator(
             String commitUser,
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             Integer numAssigners,
             SerializableFunction<TableSchema, PartitionKeyExtractor<CdcMultiplexRecord>>
                     extractorFunction,
@@ -106,9 +107,10 @@ public class StpMultiTableHashBucketAssignerOperator
             FileStoreTable table = TableSelector.getTable(tables, identifier, value, catalog);
             if (!this.assignerHolder.containsKey(identifier)) {
                 long targetRowNum = table.coreOptions().dynamicBucketTargetRowNum();
+                Integer maxBucketsNum = table.coreOptions().dynamicBucketMaxBuckets();
                 BucketAssigner assigner =
                         overwrite
-                                ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum)
+                                ? new SimpleHashBucketAssigner(numberTasks, taskId, targetRowNum, maxBucketsNum)
                                 : new StpHashBucketAssigner(
                                 table.snapshotManager(),
                                 commitUser,
@@ -117,6 +119,7 @@ public class StpMultiTableHashBucketAssignerOperator
                                 MathUtils.min(numAssigners, numberTasks),
                                 taskId,
                                 targetRowNum,
+                                maxBucketsNum,
                                 identifier);
                 PartitionKeyExtractor<CdcMultiplexRecord> extractor =
                         extractorFunction.apply(table.schema());

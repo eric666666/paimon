@@ -49,6 +49,8 @@ public class StpHashBucketAssigner implements BucketAssigner {
     private final int numAssigners;
     private final int assignId;
     private final long targetBucketRowNumber;
+    private final int maxBucketsNum;
+    private int maxBucketId;
 
     private final Map<BinaryRow, PartitionIndex> partitionIndex;
     private final Identifier identifier;
@@ -61,6 +63,7 @@ public class StpHashBucketAssigner implements BucketAssigner {
             int numAssigners,
             int assignId,
             long targetBucketRowNumber,
+            int maxBucketsNum,
             Identifier identifier) {
         this.snapshotManager = snapshotManager;
         this.commitUser = commitUser;
@@ -69,8 +72,10 @@ public class StpHashBucketAssigner implements BucketAssigner {
         this.numAssigners = numAssigners;
         this.assignId = assignId;
         this.targetBucketRowNumber = targetBucketRowNumber;
+        this.maxBucketsNum = maxBucketsNum;
         this.partitionIndex = new HashMap<>();
         this.identifier = identifier;
+
     }
 
     /**
@@ -93,10 +98,12 @@ public class StpHashBucketAssigner implements BucketAssigner {
             this.partitionIndex.put(partition, index);
         }
 
-        int assigned = index.assign(hash, this::isMyBucket);
+        int assigned = index.assign(hash, this::isMyBucket, maxBucketsNum, maxBucketId);
         if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Assign " + assigned + " to the partition " + partition + " key hash " + hash);
+            LOG.debug("Assign {} to the partition {} key hash {}", assigned, partition, hash);
+        }
+        if (assigned > maxBucketId) {
+            maxBucketId = assigned;
         }
         return assigned;
     }

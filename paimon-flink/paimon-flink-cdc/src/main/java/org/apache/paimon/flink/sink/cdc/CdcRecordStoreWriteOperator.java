@@ -109,11 +109,11 @@ public class CdcRecordStoreWriteOperator extends TableWriteOperator<CdcRecord> {
     @Override
     public void processElement(StreamRecord<CdcRecord> element) throws Exception {
         CdcRecord record = element.getValue();
-        Optional<GenericRow> optionalConverted = toGenericRow(record, table.schema().fields());
+        Optional<GenericRow> optionalConverted = toGenericRow(record, table, logCorruptRecord);
         if (!optionalConverted.isPresent()) {
             for (int retry = 0; retry < maxRetryNumTimes; ++retry) {
                 table = table.copyWithLatestSchema();
-                optionalConverted = toGenericRow(record, table.schema().fields(), logCorruptRecord);
+                optionalConverted = toGenericRow(record, table, logCorruptRecord);
                 if (optionalConverted.isPresent()) {
                     break;
                 }

@@ -40,7 +40,6 @@ import org.apache.paimon.options.Options;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
@@ -49,6 +48,7 @@ import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.Collections;
+import java.util.Optional;
 
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
@@ -66,7 +66,9 @@ public class FlinkCdcMultiTableSink implements Serializable {
     private final boolean isOverwrite = false;
     private final CatalogLoader catalogLoader;
     private final double commitCpuCores;
-    @Nullable private final MemorySize commitHeapMemory;
+    @Nullable
+    private final MemorySize commitHeapMemory;
+    private final Options tableOption;
     private final String commitUser;
     private boolean eagerInit = false;
     private TableFilter tableFilter;
@@ -77,13 +79,16 @@ public class FlinkCdcMultiTableSink implements Serializable {
             @Nullable MemorySize commitHeapMemory,
             String commitUser,
             boolean eagerInit,
-            TableFilter tableFilter) {
+            TableFilter tableFilter,
+            Options tableOption) {
         this.catalogLoader = catalogLoader;
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
         this.commitUser = commitUser;
         this.eagerInit = eagerInit;
         this.tableFilter = tableFilter;
+        this.tableOption = tableOption;
+
     }
 
     private StoreSinkWrite.WithWriteBufferProvider createWriteProvider() {
@@ -145,15 +150,15 @@ public class FlinkCdcMultiTableSink implements Serializable {
     }
 
     protected OneInputStreamOperatorFactory<CdcMultiplexRecord, MultiTableCommittable>
-            createWriteOperator(
-                    StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
+    createWriteOperator(
+            StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
         return new CdcRecordStoreMultiWriteOperator.Factory(
-                catalogLoader, writeProvider, commitUser, new Options());
+                catalogLoader, writeProvider, commitUser, Optional.ofNullable(this.tableOption).orElse(new Options()));
     }
 
     // Table committers are dynamically created at runtime
     protected Committer.Factory<MultiTableCommittable, WrappedManifestCommittable>
-            createCommitterFactory(TableFilter tableFilter) {
+    createCommitterFactory(TableFilter tableFilter) {
 
         // If checkpoint is enabled for streaming job, we have to
         // commit new files list even if they're empty.

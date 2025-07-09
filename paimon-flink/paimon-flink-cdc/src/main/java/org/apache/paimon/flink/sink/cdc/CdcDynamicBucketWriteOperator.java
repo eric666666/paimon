@@ -83,11 +83,11 @@ public class CdcDynamicBucketWriteOperator extends TableWriteOperator<Tuple2<Cdc
     @Override
     public void processElement(StreamRecord<Tuple2<CdcRecord, Integer>> element) throws Exception {
         Tuple2<CdcRecord, Integer> record = element.getValue();
-        Optional<GenericRow> optionalConverted = toGenericRow(record.f0, table.schema().fields());
+        Optional<GenericRow> optionalConverted = toGenericRow(record.f0, table, logCorruptRecord);
         if (!optionalConverted.isPresent()) {
             for (int retry = 0; retry < maxRetryNumTimes; ++retry) {
                 table = table.copyWithLatestSchema();
-                optionalConverted = toGenericRow(record.f0, table.schema().fields());
+                optionalConverted = toGenericRow(record.f0, table, logCorruptRecord);
                 if (optionalConverted.isPresent()) {
                     break;
                 }
@@ -115,7 +115,9 @@ public class CdcDynamicBucketWriteOperator extends TableWriteOperator<Tuple2<Cdc
         }
     }
 
-    /** {@link StreamOperatorFactory} of {@link CdcDynamicBucketWriteOperator}. */
+    /**
+     * {@link StreamOperatorFactory} of {@link CdcDynamicBucketWriteOperator}.
+     */
     public static class Factory extends TableWriteOperator.Factory<Tuple2<CdcRecord, Integer>> {
 
         public Factory(

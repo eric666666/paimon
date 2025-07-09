@@ -33,6 +33,7 @@ import org.apache.paimon.flink.sink.StoreSinkWriteStateImpl;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 
@@ -155,7 +156,7 @@ public class CdcRecordStoreMultiWriteOperator
 
         boolean logCorruptRecord = table.coreOptions().toConfiguration().get(LOG_CORRUPT_RECORD);
         Optional<GenericRow> optionalConverted =
-                toGenericRow(record.record(), table.schema().fields(), logCorruptRecord);
+                toGenericRow(record.record(), table, logCorruptRecord);
         if (!optionalConverted.isPresent()) {
             FileStoreTable latestTable = table;
             for (int retry = 0; retry < retryCnt; ++retry) {
@@ -163,7 +164,7 @@ public class CdcRecordStoreMultiWriteOperator
                 tables.put(tableId, latestTable);
                 optionalConverted =
                         toGenericRow(
-                                record.record(), latestTable.schema().fields(), logCorruptRecord);
+                                record.record(), latestTable, logCorruptRecord);
                 if (optionalConverted.isPresent()) {
                     break;
                 }

@@ -39,22 +39,22 @@ public class StpCdcRecord implements Serializable {
     private String databaseName;
     private String tableName;
     /** to update data field. */
-    private List<DataField> fields;
+    private  CdcSchema cdcSchema;
     private CdcRecord cdcRecord;
     private Table table;
 
     public StpCdcRecord(
-            String databaseName, String tableName, List<DataField> fields, CdcRecord cdcRecord) {
+            String databaseName, String tableName, CdcSchema cdcSchema, CdcRecord cdcRecord) {
         this.databaseName = databaseName;
         this.tableName = tableName;
-        this.fields = fields;
+        this.cdcSchema = cdcSchema == null ? CdcSchema.newBuilder().build() : cdcSchema;
         this.cdcRecord = cdcRecord;
     }
 
     public StpCdcRecord(String databaseName, String tableName, CdcRecord cdcRecord) {
         this.databaseName = databaseName;
         this.tableName = tableName;
-        this.fields = Collections.emptyList();
+        this.cdcSchema = CdcSchema.newBuilder().build();
         this.cdcRecord = cdcRecord;
     }
 
@@ -68,8 +68,8 @@ public class StpCdcRecord implements Serializable {
         return tableName;
     }
 
-    public List<DataField> fields() {
-        return fields;
+    public CdcSchema cdcSchema() {
+        return cdcSchema;
     }
 
     public Table getTable() {
@@ -77,7 +77,7 @@ public class StpCdcRecord implements Serializable {
     }
 
     public RichCdcRecord toRichCdcRecord() {
-        return new RichCdcRecord(cdcRecord, fields);
+        return new RichCdcRecord(cdcRecord, cdcSchema);
     }
 
     public void setDatabaseName(String databaseName) {
@@ -88,8 +88,8 @@ public class StpCdcRecord implements Serializable {
         this.tableName = tableName;
     }
 
-    public void setFields(List<DataField> fields) {
-        this.fields = fields;
+    public void setCdcSchema(CdcSchema cdcSchema) {
+        this.cdcSchema = cdcSchema;
     }
 
     public void setCdcRecord(CdcRecord cdcRecord) {
@@ -100,8 +100,8 @@ public class StpCdcRecord implements Serializable {
         return cdcRecord;
     }
 
-    public List<DataField> getFields() {
-        return fields;
+    public CdcSchema getCdcSchema() {
+        return cdcSchema;
     }
 
     public String getTableName() {
@@ -118,7 +118,7 @@ public class StpCdcRecord implements Serializable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(databaseName, tableName, fields, cdcRecord);
+        return Objects.hash(databaseName, tableName, cdcSchema, cdcRecord);
     }
 
     @Override
@@ -132,7 +132,7 @@ public class StpCdcRecord implements Serializable {
         StpCdcRecord that = (StpCdcRecord) o;
         return Objects.equals(databaseName, that.databaseName)
                 && Objects.equals(tableName, that.tableName)
-                && Objects.equals(fields, that.fields)
+                && Objects.equals(cdcSchema, that.cdcSchema)
                 && Objects.equals(cdcRecord, that.cdcRecord);
     }
 
@@ -143,8 +143,8 @@ public class StpCdcRecord implements Serializable {
                 + databaseName
                 + ", tableName="
                 + tableName
-                + ", fields="
-                + fields
+                + ", cdcSchema="
+                + cdcSchema
                 + ", cdcRecord="
                 + cdcRecord
                 + '}';

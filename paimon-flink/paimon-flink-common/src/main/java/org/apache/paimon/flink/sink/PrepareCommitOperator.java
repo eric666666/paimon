@@ -46,15 +46,19 @@ import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEM
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY_FACTION;
 import static org.apache.paimon.flink.utils.ManagedMemoryUtils.computeManagedMemory;
 
-/** Prepare commit operator to emit {@link Committable}s. */
+/**
+ * Prepare commit operator to emit {@link Committable}s.
+ */
 public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOperator<OUT>
         implements OneInputStreamOperator<IN, OUT>, BoundedOneInput {
 
     private static final long serialVersionUID = 1L;
 
-    @Nullable protected transient MemorySegmentPool memoryPool;
-    @Nullable private transient MemorySegmentAllocator memoryAllocator;
-    private final Options options;
+    @Nullable
+    protected transient MemorySegmentPool memoryPool;
+    @Nullable
+    private transient MemorySegmentAllocator memoryAllocator;
+    protected final Options options;
     private boolean endOfInput = false;
 
     public PrepareCommitOperator(StreamOperatorParameters<OUT> parameters, Options options) {
@@ -112,7 +116,9 @@ public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOpera
     protected abstract List<OUT> prepareCommit(boolean waitCompaction, long checkpointId)
             throws IOException;
 
-    /** {@link StreamOperatorFactory} of {@link PrepareCommitOperator}. */
+    /**
+     * {@link StreamOperatorFactory} of {@link PrepareCommitOperator}.
+     */
     protected abstract static class Factory<IN, OUT> extends AbstractStreamOperatorFactory<OUT>
             implements OneInputStreamOperatorFactory<IN, OUT> {
         protected final Options options;

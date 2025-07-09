@@ -20,11 +20,12 @@ package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
-import org.apache.paimon.flink.sink.CommitterOperator;
+import org.apache.paimon.flink.sink.CommitterOperatorFactory;
 import org.apache.paimon.flink.sink.FlinkSink;
 import org.apache.paimon.flink.sink.FlinkStreamPartitioner;
 import org.apache.paimon.flink.sink.MultiTableCommittable;
@@ -34,6 +35,7 @@ import org.apache.paimon.flink.sink.RestoreAndFailCommittableStateManager;
 import org.apache.paimon.flink.sink.StoreMultiCommitter;
 import org.apache.paimon.flink.sink.StoreSinkWrite;
 import org.apache.paimon.flink.sink.StoreSinkWriteImpl;
+import org.apache.paimon.flink.sink.TableFilter;
 import org.apache.paimon.flink.sink.WrappedManifestCommittableSerializer;
 import org.apache.paimon.manifest.WrappedManifestCommittable;
 import org.apache.paimon.options.MemorySize;
@@ -55,11 +57,12 @@ import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 import javax.annotation.Nullable;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -81,23 +84,27 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private static final String GLOBAL_COMMITTER_NAME = "StpFlinkCdcMultiDynamicBucketTable Global Committer";
 
     private final boolean isOverwrite = false;
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private final double commitCpuCores;
     @Nullable
     private final MemorySize commitHeapMemory;
-    private final boolean commitChaining;
     private final Options tableOption;
+    private boolean eagerInit = false;
+    private TableFilter tableFilter;
 
     public StpFlinkCdcMultiDynamicBucketTableSink(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
-            boolean commitChaining,
+            String commitUser,
+            boolean eagerInit,
+            TableFilter tableFilter,
             Options tableOption) {
         this.catalogLoader = catalogLoader;
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
-        this.commitChaining = commitChaining;
+        this.eagerInit = eagerInit;
+        this.tableFilter = tableFilter;
         this.tableOption = tableOption;
     }
 
@@ -176,17 +183,17 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
                         new MultiTableCommittableChannelComputer(),
                         input.getParallelism());
 
+        ;
         SingleOutputStreamOperator<?> committed =
                 partitioned
                         .transform(
                                 GLOBAL_COMMITTER_NAME,
                                 typeInfo,
-                                new CommitterOperator<>(
+                                new CommitterOperatorFactory<>(
                                         true,
                                         false,
-                                        commitChaining,
                                         commitUser,
-                                        createCommitterFactory(),
+                                        createCommitterFactory(tableFilter),
                                         createCommittableStateManager()))
                         .setParallelism(input.getParallelism());
         configureGlobalCommitter(committed, commitCpuCores, commitHeapMemory);
@@ -221,24 +228,30 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
         return new RecordWithBucketChannelComputer(this.catalogLoader);
     }
 
-    protected OneInputStreamOperator<Tuple2<CdcMultiplexRecord, Integer>, MultiTableCommittable>
+    protected OneInputStreamOperatorFactory<Tuple2<CdcMultiplexRecord, Integer>, MultiTableCommittable>
     createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
-        return new StpCdcRecordStoreDynamicBucketMultiWriteOperator(
-                catalogLoader,
-                writeProvider,
-                commitUser,
+        return new StpCdcRecordStoreDynamicBucketMultiWriteOperator.Factory(
+                catalogLoader, writeProvider, commitUser,
                 Optional.ofNullable(this.tableOption).orElse(new Options()));
     }
 
     // Table committers are dynamically created at runtime
     protected Committer.Factory<MultiTableCommittable, WrappedManifestCommittable>
-    createCommitterFactory() {
+    createCommitterFactory(TableFilter tableFilter) {
+
         // If checkpoint is enabled for streaming job, we have to
         // commit new files list even if they're empty.
         // Otherwise we can't tell if the commit is successful after
         // a restart.
-        return context -> new StoreMultiCommitter(catalogLoader, context);
+        return context ->
+                new StoreMultiCommitter(
+                        catalogLoader,
+                        context,
+                        false,
+                        Collections.emptyMap(),
+                        eagerInit,
+                        tableFilter);
     }
 
     protected CommittableStateManager<WrappedManifestCommittable> createCommittableStateManager() {
@@ -247,13 +260,13 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     }
 
     private class AssignerChannelComputer implements ChannelComputer<CdcMultiplexRecord> {
-        private final Catalog.Loader loader;
+        private final CatalogLoader loader;
         private Integer numAssigners;
 
         private transient int numChannels;
         private Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
 
-        public AssignerChannelComputer(Integer numAssigners, Catalog.Loader loader) {
+        public AssignerChannelComputer(Integer numAssigners, CatalogLoader loader) {
             this.numAssigners = numAssigners;
             this.loader = loader;
         }
@@ -298,12 +311,12 @@ public class StpFlinkCdcMultiDynamicBucketTableSink implements Serializable {
     private class RecordWithBucketChannelComputer
             implements ChannelComputer<Tuple2<CdcMultiplexRecord, Integer>> {
         private transient int numChannels;
-        private final Catalog.Loader catalogLoader;
+        private final CatalogLoader catalogLoader;
         private transient Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
         private transient Map<Identifier, FileStoreTable> tables;
         private transient Catalog catalog;
 
-        public RecordWithBucketChannelComputer(Catalog.Loader catalogLoader) {
+        public RecordWithBucketChannelComputer(CatalogLoader catalogLoader) {
             this.catalogLoader = catalogLoader;
         }
 

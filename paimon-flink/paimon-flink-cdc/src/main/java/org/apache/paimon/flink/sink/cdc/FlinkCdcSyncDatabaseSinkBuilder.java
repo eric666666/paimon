@@ -194,7 +194,8 @@ public class FlinkCdcSyncDatabaseSinkBuilder<T> {
                         committerMemory,
                         commitUser,
                         eagerInit,
-                        tableFilter);
+                        tableFilter,
+                        new Options());
         sink.sinkFrom(partitioned);
     }
 

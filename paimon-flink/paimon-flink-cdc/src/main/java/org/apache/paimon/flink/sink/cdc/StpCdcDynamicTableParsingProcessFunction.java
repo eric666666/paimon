@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
@@ -35,7 +36,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -67,16 +67,16 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
                     "paimon-dynamic-table(UnawareBucket)",
                     TypeInformation.of(CdcMultiplexRecord.class));
 
-    public static final OutputTag<Tuple2<Identifier, List<DataField>>>
+    public static final OutputTag<Tuple2<Identifier, CdcSchema>>
             DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG =
             new OutputTag<>(
                     "paimon-dynamic-table-schema-change",
                     TypeInformation.of(
-                            new TypeHint<Tuple2<Identifier, List<DataField>>>() {
+                            new TypeHint<Tuple2<Identifier, CdcSchema>>() {
                             }));
 
     private final EventParser.Factory<StpCdcRecord> parserFactory;
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private transient Catalog catalog;
     private final Set<BucketMode> excludeBucketModes;
 
@@ -84,7 +84,7 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
     private transient Map<Identifier, FileStoreTable> tableMap;
 
     public StpCdcDynamicTableParsingProcessFunction(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             EventParser.Factory<StpCdcRecord> parserFactory,
             Set<BucketMode> excludeBucketModes) {
         this.catalogLoader = catalogLoader;
@@ -111,8 +111,8 @@ public class StpCdcDynamicTableParsingProcessFunction extends ProcessFunction<St
                     "Paimon table not exists:" + identifier.getEscapedFullName());
         }
 
-        List<DataField> schemaChange = parser.parseSchemaChange();
-        if (!schemaChange.isEmpty()) {
+        CdcSchema schemaChange = parser.parseSchemaChange();
+        if (schemaChange != null) {
             context.output(DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG, Tuple2.of(identifier, schemaChange));
         }
 

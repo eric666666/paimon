@@ -82,8 +82,8 @@ public class CdcRecordUtils {
      *     Optional#of(GenericRow)} will be returned, otherwise an {@code Optional#empty()} will be
      *     returned
      */
-    public static Optional<GenericRow> toGenericRow(CdcRecord record, FileStoreTable table,boolean logCorruptRecord)) {
-            CdcRecord record, List<DataField> dataFields, boolean logCorruptRecord) {
+    public static Optional<GenericRow> toGenericRow(CdcRecord record, FileStoreTable table,boolean logCorruptRecord) {
+        List<DataField> dataFields = table.schema().fields();
         GenericRow genericRow = new GenericRow(record.kind(), dataFields.size());
         List<String> fieldNames =
                 dataFields.stream().map(DataField::name).collect(Collectors.toList());
@@ -109,11 +109,13 @@ public class CdcRecordUtils {
                 genericRow.setField(idx, TypeUtils.castFromCdcValueString(value, type));
             } catch (Exception e) {
                 LOG.info(
-                        "Failed to convert record:" + record + ",field index: " + idx
-                                + ", value: " + value
-                                + " to type " + type
-                                + " with table " + fullName + ". Waiting for schema update.",
+                        "Failed to convert field '{}' value {} to type {}  with table {}. Waiting for schema update.",
+                        key,
+                        logCorruptRecord ? value : "<redacted>",
+                        type,
+                        fullName,
                         e);
+
                 return Optional.empty();
             }
         }

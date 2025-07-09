@@ -20,6 +20,7 @@ package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.sink.CommittableStateManager;
 import org.apache.paimon.flink.sink.Committer;
@@ -49,7 +50,7 @@ import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 import javax.annotation.Nullable;
 
@@ -57,9 +58,9 @@ import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.UUID;
 
+import static org.apache.paimon.flink.FlinkConnectorOptions.END_INPUT_WATERMARK;
 import static org.apache.paimon.flink.sink.FlinkSink.assertStreamingConfiguration;
 import static org.apache.paimon.flink.sink.FlinkSink.configureGlobalCommitter;
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
@@ -74,15 +75,14 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
     private static final String GLOBAL_COMMITTER_NAME = "StpFlinkCdcMultiUnawareBucketTable Global Committer";
 
     private final boolean isOverwrite = false;
-    private final Catalog.Loader catalogLoader;
+    private final CatalogLoader catalogLoader;
     private final double commitCpuCores;
     @Nullable
     private final MemorySize commitHeapMemory;
-    private final boolean commitChaining;
     private final Options tableOptions;
 
     public StpFlinkCdcMultiUnawareBucketTableSink(
-            Catalog.Loader catalogLoader,
+            CatalogLoader catalogLoader,
             double commitCpuCores,
             @Nullable MemorySize commitHeapMemory,
             boolean commitChaining,
@@ -90,7 +90,6 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
         this.catalogLoader = catalogLoader;
         this.commitCpuCores = commitCpuCores;
         this.commitHeapMemory = commitHeapMemory;
-        this.commitChaining = commitChaining;
         this.tableOptions = tableOptions;
     }
 
@@ -127,6 +126,7 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
         assertStreamingConfiguration(env);
         int parallelism = env.getParallelism();
         CoreOptions.DistributionMode distributionMode = this.tableOptions.get(CoreOptions.DISTRIBUTION_MODE);
+        Long endInputWatermark = this.tableOptions.get(END_INPUT_WATERMARK);
         DataStream<CdcMultiplexRecord> partitionByDistributionMode =
                 distributionMode == CoreOptions.DistributionMode.NONE
                         ? input
@@ -146,19 +146,20 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
                         written,
                         new MultiTableCommittableChannelComputer(),
                         input.getParallelism());
-
         SingleOutputStreamOperator<?> committed =
                 partitioned
                         .transform(
                                 GLOBAL_COMMITTER_NAME,
                                 typeInfo,
                                 new CommitterOperator<>(
-                                        true,
+                                        null,
                                         false,
-                                        commitChaining,
+                                        false,
                                         commitUser,
                                         createCommitterFactory(),
-                                        createCommittableStateManager()))
+                                        createCommittableStateManager(),
+                                        endInputWatermark
+                                ))
                         .setParallelism(input.getParallelism());
         configureGlobalCommitter(committed, commitCpuCores, commitHeapMemory);
         return committed.addSink(new DiscardingSink<>()).name("end").setParallelism(1);
@@ -168,13 +169,11 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
         return new AssignerChannelComputer(distributionMode, catalogLoader);
     }
 
-    protected OneInputStreamOperator createWriteOperator(
+    protected OneInputStreamOperatorFactory<CdcMultiplexRecord, MultiTableCommittable>
+    createWriteOperator(
             StoreSinkWrite.WithWriteBufferProvider writeProvider, String commitUser) {
-        return new StpCdcRecordStoreUnawareBucketMultiWriteOperator(
-                catalogLoader,
-                writeProvider,
-                commitUser,
-                Optional.ofNullable(this.tableOptions).orElse(new Options()));
+        return new CdcRecordStoreMultiWriteOperator.Factory(
+                catalogLoader, writeProvider, commitUser, new Options());
     }
 
     // Table committers are dynamically created at runtime
@@ -194,14 +193,14 @@ public class StpFlinkCdcMultiUnawareBucketTableSink implements Serializable {
 
 
     private class AssignerChannelComputer implements ChannelComputer<CdcMultiplexRecord> {
-        private final Catalog.Loader catalogLoader;
+        private final CatalogLoader catalogLoader;
         private final CoreOptions.DistributionMode distributionMode;
         private Integer numAssigners;
 
         private transient int numChannels;
         private Map<Identifier, KeyAndBucketExtractor<CdcMultiplexRecord>> extractors;
 
-        public AssignerChannelComputer(CoreOptions.DistributionMode distributionMode, Catalog.Loader catalogLoader) {
+        public AssignerChannelComputer(CoreOptions.DistributionMode distributionMode, CatalogLoader catalogLoader) {
             this.distributionMode = distributionMode;
             this.catalogLoader = catalogLoader;
         }

@@ -1,6 +1,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -14,7 +15,7 @@ import java.util.Map;
  * @since 2024/7/4 20:49
  */
 public class TableSelector {
-    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, Table externalTable, Catalog.Loader catalogLoader) throws Exception {
+    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, Table externalTable, CatalogLoader catalogLoader) throws Exception {
         if (tables.containsKey(tableId)) {
             return tables.get(tableId);
         } else {
@@ -30,11 +31,11 @@ public class TableSelector {
         }
     }
 
-    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, CdcMultiplexRecord record, Catalog.Loader catalogLoader) throws Exception {
+    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, CdcMultiplexRecord record, CatalogLoader catalogLoader) throws Exception {
         return getTable(tables, tableId, record.record().getTable(), catalogLoader);
     }
 
-    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, StpCdcRecord raw, Catalog.Loader catalogLoader) throws Exception {
+    public static FileStoreTable getTable(Map<Identifier, FileStoreTable> tables, Identifier tableId, StpCdcRecord raw, CatalogLoader catalogLoader) throws Exception {
         return getTable(tables, tableId, raw.getTable(), catalogLoader);
     }
 

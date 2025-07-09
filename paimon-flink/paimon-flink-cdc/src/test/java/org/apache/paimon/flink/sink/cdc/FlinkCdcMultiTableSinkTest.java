@@ -54,7 +54,7 @@ public class FlinkCdcMultiTableSinkTest {
                         null,
                         UUID.randomUUID().toString(),
                         false,
-                        null);
+                        null,new Options());
         DataStreamSink<?> dataStreamSink = sink.sinkFrom(input);
 
         // check the transformation graph

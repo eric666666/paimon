@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink.cdc;
 
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.types.DataField;
 
 import org.slf4j.Logger;
@@ -66,10 +67,8 @@ public class StpCdcRecordEventParser implements EventParser<StpCdcRecord> {
     }
 
     @Override
-    public List<DataField> parseSchemaChange() {
-        return shouldSynchronizeCurrentTable
-                ? currentParser.parseSchemaChange()
-                : Collections.emptyList();
+    public CdcSchema parseSchemaChange() {
+        return shouldSynchronizeCurrentTable ? currentParser.parseSchemaChange() : null;
     }
 
     @Override

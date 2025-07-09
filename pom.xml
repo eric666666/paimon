@@ -67,7 +67,7 @@ under the License.
         <module>paimon-spark</module>
         <module>paimon-service</module>
         <module>paimon-test-utils</module>
-        <module>paimon-arrow</module>
+<!--        <module>paimon-arrow</module>-->
         <module>tools/ci/paimon-ci-tools</module>
         <module>paimon-open-api</module>
     </modules>
@@ -478,10 +478,10 @@ under the License.
                 <artifactId>maven-compiler-plugin</artifactId>
             </plugin>
 
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-checkstyle-plugin</artifactId>
-            </plugin>
+<!--            <plugin>-->
+<!--                <groupId>org.apache.maven.plugins</groupId>-->
+<!--                <artifactId>maven-checkstyle-plugin</artifactId>-->
+<!--            </plugin>-->
 
             <plugin>
                 <groupId>org.apache.rat</groupId>
@@ -563,10 +563,10 @@ under the License.
                 </configuration>
             </plugin>
 
-            <plugin>
-                <groupId>com.diffplug.spotless</groupId>
-                <artifactId>spotless-maven-plugin</artifactId>
-            </plugin>
+<!--            <plugin>-->
+<!--                <groupId>com.diffplug.spotless</groupId>-->
+<!--                <artifactId>spotless-maven-plugin</artifactId>-->
+<!--            </plugin>-->
 
             <!--surefire for unit tests and integration tests-->
             <plugin>

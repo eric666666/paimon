@@ -18,9 +18,11 @@
 
 package org.apache.paimon.flink.sink.cdc;
 
-import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogLoader;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.sink.FlinkWriteSink;
+import org.apache.paimon.flink.sink.TableFilter;
 import org.apache.paimon.flink.utils.SingleOutputStreamOperatorUtils;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
@@ -67,10 +69,14 @@ public class StpCdcRecordSinkBuilder implements Serializable {
     //     it will check newly added tables and create the corresponding
     //     Paimon tables. 2) in multiplex sink where it is used to
     //     initialize different writers to multiple tables.
-    private Catalog.Loader catalogLoader;
+    private CatalogLoader catalogLoader;
+    private TypeMapping typeMapping;
+
     private Set<BucketMode> excludeBucketModes = Collections.emptySet();
     private Options tableOption;
     private String commitUser;
+    private boolean eagerInit;
+    private TableFilter tableFilter;
 
     public StpCdcRecordSinkBuilder withExcludeBucketModes(Set<BucketMode> excludeBucketModes) {
         this.excludeBucketModes = excludeBucketModes;
@@ -101,8 +107,24 @@ public class StpCdcRecordSinkBuilder implements Serializable {
         return this;
     }
 
-    public StpCdcRecordSinkBuilder withCatalogLoader(Catalog.Loader catalogLoader) {
+    public StpCdcRecordSinkBuilder withCatalogLoader(CatalogLoader catalogLoader) {
         this.catalogLoader = catalogLoader;
+        return this;
+    }
+
+
+    public StpCdcRecordSinkBuilder withEagerInit(boolean eagerInit) {
+        this.eagerInit = eagerInit;
+        return this;
+    }
+
+    public StpCdcRecordSinkBuilder withTableFilter(TableFilter tableFilter) {
+        this.tableFilter = tableFilter;
+        return this;
+    }
+
+    public StpCdcRecordSinkBuilder withTypeMapping(TypeMapping typeMapping) {
+        this.typeMapping = typeMapping;
         return this;
     }
 
@@ -140,7 +162,7 @@ public class StpCdcRecordSinkBuilder implements Serializable {
                         parsed,
                         CdcDynamicTableParsingProcessFunction.DYNAMIC_SCHEMA_CHANGE_OUTPUT_TAG)
                 .keyBy(t -> t.f0)
-                .process(new MultiTableUpdatedDataFieldsProcessFunction(catalogLoader))
+                .process(new MultiTableUpdatedDataFieldsProcessFunction(catalogLoader,typeMapping))
                 .name("Schema Evolution");
 
         DataStream<CdcMultiplexRecord> partitioned =
@@ -151,7 +173,14 @@ public class StpCdcRecordSinkBuilder implements Serializable {
                         parallelism);
 
         if (!excludeBucketModes.contains(BucketMode.HASH_FIXED)) {
-            new FlinkCdcMultiTableSink(catalogLoader, committerCpu, committerMemory, commitChaining, commitUser)
+            new FlinkCdcMultiTableSink(
+                    catalogLoader,
+                    committerCpu,
+                    committerMemory,
+                    commitUser,
+                    eagerInit,
+                    tableFilter,
+                    tableOption)
                     .sinkFrom(partitioned);
         }
 
@@ -160,7 +189,9 @@ public class StpCdcRecordSinkBuilder implements Serializable {
                     catalogLoader,
                     committerCpu,
                     committerMemory,
-                    commitChaining,
+                    commitUser,
+                    eagerInit,
+                    tableFilter,
                     tableOption)
                     .sinkFrom(dynamicBucketDS);
         }
